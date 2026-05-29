@@ -275,7 +275,7 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
 
     // Try to match  sign? number unit?
     if let Some((sign, num, unit)) = match_time(stripped) {
-        if sign == '-' && num.trim_matches(['0', '.']) != "" {
+        if sign == '-' && !num.trim_matches(['0', '.']).is_empty() {
             return Err(TimeParseError(format!(
                 "time must be non-negative; got {}", pyrepr(s)
             )));
@@ -288,9 +288,7 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
                          Use a unit suffix for fractional times, e.g. {num}ns", pyrepr(s)
                     )));
                 }
-                let v: i64 = num.parse().map_err(|_| {
-                    TimeParseError(format!("invalid time value {}", pyrepr(s)))
-                })?;
+                let v = parse_ticks_decimal(num, s)?;
                 check_time_range(v, s)
             }
             Some(unit) => {
@@ -312,19 +310,119 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
                         "time value {} is not finite", pyrepr(s)
                     )));
                 }
-                check_time_range(round_half_even(scaled) as i64, s)
+                let rounded = round_half_even(scaled);
+                // A scaled time beyond i64 range would saturate on `as i64`,
+                // silently fabricating a value; reject it as "too large" to
+                // match the reference's range check.
+                if rounded < 0.0 {
+                    return Err(TimeParseError(format!(
+                        "time must be non-negative; got {}", pyrepr(s)
+                    )));
+                }
+                if rounded > MAX_TIME_TICKS as f64 {
+                    return Err(TimeParseError(format!(
+                        "time value too large; got {}, max ticks is {}",
+                        pyrepr(s),
+                        MAX_TIME_TICKS
+                    )));
+                }
+                check_time_range(rounded as i64, s)
             }
         }
     } else {
         // Fall back to bare integer.
-        let v: i64 = stripped.parse().map_err(|_| {
-            TimeParseError(format!(
-                "invalid time value {}; expected integer ticks or value \
-                 with fs/ps/ns/us/ms/s suffix", pyrepr(s)
-            ))
-        })?;
+        let v = parse_ticks_decimal(stripped, s)?;
         check_time_range(v, s)
     }
+}
+
+/// Parse a bare integer-ticks string into `i64`, distinguishing the cases the
+/// reference tool treats differently: a value made only of digits but exceeding
+/// the int64 range is reported as "too large" (not "invalid"), a negative value
+/// as "non-negative", and anything else as "invalid". This mirrors
+/// `vcd_analyzer.py`, where ticks come from Python's `int()` (arbitrary
+/// precision, and accepting `_` digit-group separators between digits).
+fn parse_ticks_decimal(num: &str, original: &str) -> Result<i64, TimeParseError> {
+    // Accept Python-style underscores (only *between* digits), matching the
+    // reference's int() parsing; reject leading/trailing/doubled underscores.
+    let cleaned = match strip_int_underscores(num) {
+        Some(c) => c,
+        None => {
+            return Err(TimeParseError(format!(
+                "invalid time value {}; expected integer ticks or value \
+                 with fs/ps/ns/us/ms/s suffix",
+                pyrepr(original)
+            )));
+        }
+    };
+    let body = cleaned.strip_prefix('-').unwrap_or(&cleaned);
+    let is_neg = cleaned.starts_with('-');
+    let all_digits = !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit());
+    match cleaned.parse::<i64>() {
+        Ok(v) => Ok(v),
+        Err(_) if all_digits && !is_neg => {
+            // Pure non-negative digits that don't fit i64: "too large".
+            Err(TimeParseError(format!(
+                "time value too large; got {}, max ticks is {}",
+                pyrepr(original),
+                MAX_TIME_TICKS
+            )))
+        }
+        Err(_) => Err(TimeParseError(format!(
+            "invalid time value {}; expected integer ticks or value \
+             with fs/ps/ns/us/ms/s suffix",
+            pyrepr(original)
+        ))),
+    }
+}
+
+/// Validate and remove Python-style `_` digit separators from an integer
+/// literal. Returns the underscore-free string if `s` is a well-formed integer
+/// (optional leading sign, then digits with single underscores only between
+/// two digits), else `None`. Examples: `1_000`->`1000`, `1_0_0_0`->`1000`,
+/// while `_1`, `1_`, `1__0`, and `` are rejected. A string with no underscores
+/// is returned unchanged (still validated as sign+digits).
+fn strip_int_underscores(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut out = String::with_capacity(s.len());
+    if bytes[0] == b'+' || bytes[0] == b'-' {
+        out.push(bytes[0] as char);
+        i = 1;
+    }
+    let digits_start = i;
+    let mut prev_was_digit = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'0'..=b'9' => {
+                out.push(bytes[i] as char);
+                prev_was_digit = true;
+            }
+            b'_' => {
+                // An underscore is only legal immediately between two digits:
+                // the previous char must be a digit and the next must be one.
+                if !prev_was_digit {
+                    return None;
+                }
+                let next_is_digit = bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit());
+                if !next_is_digit {
+                    return None;
+                }
+                prev_was_digit = false; // the '_' itself is not a digit
+                // do not push the underscore
+            }
+            _ => return None,
+        }
+        i += 1;
+    }
+    // Must have at least one digit after the optional sign.
+    if i == digits_start {
+        return None;
+    }
+    Some(out)
 }
 
 /// Round to nearest integer, ties to even — matching Python 3's built-in
@@ -352,11 +450,9 @@ fn check_time_range(v: i64, original: &str) -> Result<i64, TimeParseError> {
             "time must be non-negative; got {}", pyrepr(original)
         )));
     }
-    if v > MAX_TIME_TICKS {
-        return Err(TimeParseError(format!(
-            "time value {} exceeds the supported range", pyrepr(original)
-        )));
-    }
+    // The upper bound (MAX_TIME_TICKS == i64::MAX) cannot be exceeded by an i64,
+    // so it is enforced at parse time instead (see parse_ticks_decimal and the
+    // unit-scaled path), where the source value may be larger than i64 range.
     Ok(v)
 }
 
@@ -485,6 +581,42 @@ fn strip_trailing_zeros(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_underscores_match_python_int() {
+        // Underscores between digits are accepted (bare integer ticks only).
+        assert_eq!(parse_time("1_000", 1e-9).unwrap(), 1000);
+        assert_eq!(parse_time("1_0_0_0", 1e-9).unwrap(), 1000);
+        // Leading/trailing/doubled underscores are rejected.
+        for bad in ["1__000", "_1000", "1000_", "_", "1_"] {
+            assert!(parse_time(bad, 1e-9).is_err(), "should reject {bad}");
+        }
+        // Underscores are NOT accepted with a unit suffix or in hex (the
+        // reference's numeric+unit form has no underscores).
+        assert!(parse_time("1_000ns", 1e-9).is_err());
+        assert!(parse_time("10_00ns", 1e-9).is_err());
+        assert!(parse_time("0x1_0", 1e-9).is_err());
+    }
+
+    #[test]
+    fn time_overflow_reports_too_large() {
+        // Bare integer beyond i64 range -> "too large" (not "invalid"), matching
+        // the reference whose ticks are arbitrary-precision.
+        let e = parse_time("99999999999999999999", 1e-9).unwrap_err();
+        assert!(e.0.contains("too large"), "got: {}", e.0);
+        assert!(e.0.contains("9223372036854775807"), "got: {}", e.0);
+        // i64::MAX + 1.
+        let e = parse_time("9223372036854775808", 1e-9).unwrap_err();
+        assert!(e.0.contains("too large"), "got: {}", e.0);
+        // Exactly i64::MAX parses fine.
+        assert_eq!(parse_time("9223372036854775807", 1e-9).unwrap(), i64::MAX);
+        // Non-digit garbage stays "invalid".
+        let e = parse_time("abc", 1e-9).unwrap_err();
+        assert!(e.0.contains("invalid time value"), "got: {}", e.0);
+        // Negative stays "non-negative".
+        let e = parse_time("-5", 1e-9).unwrap_err();
+        assert!(e.0.contains("non-negative"), "got: {}", e.0);
+    }
 
     #[test]
     fn one_bit() {

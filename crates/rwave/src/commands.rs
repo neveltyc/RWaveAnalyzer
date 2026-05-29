@@ -2171,7 +2171,7 @@ fn search_interval_segment_mode(
                     "  {}..{} {}",
                     ljust(&bh, 12),
                     ljust(&eh, 12),
-                    values_text(r.values.as_ref().map(|v| v.as_slice()).unwrap_or(&[]))
+                    values_text(r.values.as_deref().unwrap_or(&[]))
                 );
             } else {
                 println!("  {}..{} {}", ljust(&bh, 12), ljust(&eh, 12), cond_text);

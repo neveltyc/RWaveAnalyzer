@@ -184,6 +184,16 @@ beyond VCD:
   Verilog `parameter`/`localparam` *values* into the FST. A design that declares
   such constants will show them with values in its VCD but without values in the
   converted FST; `rwave` faithfully reports whatever each file actually contains.
+* **`dump` event order within a single timestamp.** When several signals change
+  at the *same* time, the reference emits them in the order their value-changes
+  physically appear in the VCD (which depends on the writer — Icarus Verilog,
+  for instance, emits its initial `$dumpvars` block in reverse-declaration
+  order). `wellen` stores changes per-signal and does not preserve that
+  cross-signal file order, so `rwave` orders simultaneous events by declaration
+  order instead. **All values, timestamps, and the set of emitted events are
+  identical** — only the relative order of events sharing a timestamp can
+  differ, and only for `dump`. (The reference tool is VCD-only and cannot read
+  FST at all, so there is no cross-format reference for FST ordering.)
 
 ## License
 

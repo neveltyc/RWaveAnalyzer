@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Out-of-range time values now report "too large" instead of "invalid".** A
+  bare integer time exceeding the int64 range (e.g. `99999999999999999999`)
+  overflowed Rust's integer parse and fell through to the generic "invalid time
+  value" error, whereas the reference reports `time value too large; got '…',
+  max ticks is 9223372036854775807`. The bare-integer and unit-scaled paths now
+  detect over-range values explicitly (the latter also guards against `as i64`
+  saturation), matching the reference. Added regression tests.
+- **Accept Python-style `_` digit separators in integer tick values.** The
+  reference parses ticks via Python's `int()`, which permits underscores between
+  digits (`1_000`, `1_0_0_0`); `rwave` previously rejected them as invalid. Bare
+  integer ticks now accept underscores with the same rules Python uses (rejecting
+  leading/trailing/doubled underscores, and — like the reference — not accepting
+  underscores in unit-suffixed or hex forms). Added regression tests.
+
+### Documented
+
+- **`dump` event order within a single timestamp.** Clarified in the README that
+  when multiple signals change at the same time, `rwave` orders them by
+  declaration order, while the reference preserves the VCD's value-change
+  emission order (writer-specific; Icarus Verilog emits its initial dump in
+  reverse-declaration order). Values, timestamps, and the emitted event set are
+  identical — only the order of simultaneous events can differ, and only for
+  `dump`. `wellen` stores changes per-signal and does not retain cross-signal
+  file order, so matching it exactly is not possible without diverging from
+  upstream `wellen`. (The reference is VCD-only and cannot read FST.)
+
 ## [0.1.0] — 2026-05-30
 
 First release. A Rust waveform analyzer for VCD and FST whose command-line
