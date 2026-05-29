@@ -1,0 +1,27 @@
+# Vendored from fst-reader 0.16.6 (BSD-3-Clause, Kevin Laeufer).
+# Local patch: fix an out-of-bounds panic in FstReader::read_signals where the
+# signal bitmask was sized by signals.len() instead of the max signal handle,
+# crashing on FSTs that use aliased/sparse handles (e.g. VCS output). See
+# src/reader.rs (search "max_handle for the mask"). Dev-dependencies and tests
+# from upstream are dropped because we only build the library.
+
+[package]
+edition = "2024"
+name = "fst-reader"
+version = "0.16.6"
+authors = ["Kevin Laeufer <laeufer@cornell.edu>"]
+description = "FST wavedump format reader implemented in safe Rust. Formerly known as fst-native."
+homepage = "https://github.com/ekiwi/fst-reader"
+license = "BSD-3-Clause"
+repository = "https://github.com/ekiwi/fst-reader"
+include = ["Cargo.toml", "LICENSE", "src/"]
+
+[lib]
+name = "fst_reader"
+path = "src/lib.rs"
+
+[dependencies]
+lz4_flex = "0.13.0"
+miniz_oxide = { version = "0.9.1", features = ["std"] }
+num_enum = "0.7"
+thiserror = "2.0"

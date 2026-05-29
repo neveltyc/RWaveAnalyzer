@@ -1,0 +1,1948 @@
+// Copyright 2023-2024 The Regents of the University of California
+// Copyright 2024-2025 Cornell University
+// released under BSD 3-Clause License
+// author: Kevin Laeufer <laeufer@cornell.edu>
+
+use crate::fst::{Attribute, parse_scope_attributes};
+use crate::hierarchy::*;
+use crate::signal::{Bit, SignalSource, States};
+use crate::stream::StreamEncoder;
+use crate::viewers::ProgressCount;
+use crate::wavemem::Encoder;
+use crate::{FileFormat, LoadOptions, SignalValueRef, Time, TimeTable};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::borrow::Cow;
+use std::fmt::Debug;
+use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::num::NonZeroU32;
+use std::sync::atomic::Ordering;
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum VcdParseError {
+    #[error("[vcd] failed to parse length: `{0}` for variable `{1}`")]
+    VcdVarLengthParsing(String, String),
+    #[error("[vcd] failed to parse variable name: `{0}`")]
+    VcdVarNameParsing(String),
+    #[error("[vcd] expected command to start with `$`, not `{0}`")]
+    VcdStartChar(String),
+    #[error("[vcd] unknown or invalid command: `{0}`, valid are: {list:?}", list=get_vcd_command_str())]
+    VcdInvalidCommand(String),
+    #[error("[vcd] unexpected number of tokens for command {0}: {1}")]
+    VcdUnexpectedNumberOfTokens(String, String),
+    #[error("[vcd] encountered an attribute with an unsupported type: {0}")]
+    VcdUnsupportedAttributeType(String),
+    #[error("[vcd] failed to parse VHDL var type from attribute.")]
+    VcdFailedToParseVhdlVarType(
+        #[from] num_enum::TryFromPrimitiveError<fst_reader::FstVhdlVarType>,
+    ),
+    #[error("[vcd] failed to parse VHDL data type from attribute.")]
+    VcdFailedToParseVhdlDataType(
+        #[from] num_enum::TryFromPrimitiveError<fst_reader::FstVhdlDataType>,
+    ),
+    #[error("[vcd] unknown var type: {0}")]
+    VcdUnknownVarType(String),
+    #[error("[vcd] unknown scope type: {0}")]
+    VcdUnknownScopeType(String),
+    #[error("[vcd] unexpected token in VCD body: {0}")]
+    VcdUnexpectedBodyToken(String),
+    #[error("[vcd] expected an id for a value change, but did not find one")]
+    VcdEmptyId,
+    /// This is not really an error, but our parser has to terminate and start a new attempt
+    /// at interpreting ids. This error should never reach any user.
+    #[error("[vcd] non-contiguous ids detected, applying a work around.")]
+    VcdNonContiguousIds,
+    #[error("failed to decode string")]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error("failed to parse an integer")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("I/O operation failed")]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, VcdParseError>;
+
+pub fn read_header_from_file<P: AsRef<std::path::Path>>(
+    filename: P,
+    options: &LoadOptions,
+) -> Result<(
+    Hierarchy,
+    ReadBodyContinuation<std::io::BufReader<std::fs::File>>,
+    u64,
+)> {
+    let input_file = std::fs::File::open(filename)?;
+    let mmap = unsafe { memmap2::Mmap::map(&input_file)? };
+    let (header_len, hierarchy, lookup) =
+        read_hierarchy(&mut std::io::Cursor::new(&mmap[..]), options)?;
+    let body_len = (mmap.len() - header_len) as u64;
+    let cont = ReadBodyContinuation {
+        multi_thread: options.multi_thread,
+        header_len,
+        lookup,
+        input: Input::Mmap(mmap),
+    };
+    Ok((hierarchy, cont, body_len))
+}
+
+pub fn read_header<R: BufRead + Seek>(
+    mut input: R,
+    options: &LoadOptions,
+) -> Result<(Hierarchy, ReadBodyContinuation<R>, u64)> {
+    // determine the length of the input
+    let start = input.stream_position()?;
+    input.seek(SeekFrom::End(0))?;
+    let end = input.stream_position()?;
+    input.seek(SeekFrom::Start(start))?;
+    let input_len = end - start;
+
+    // actually read the header
+    let (header_len, hierarchy, lookup) = read_hierarchy(&mut input, options)?;
+    let body_len = input_len - header_len as u64;
+    let cont = ReadBodyContinuation {
+        multi_thread: options.multi_thread,
+        header_len,
+        lookup,
+        input: Input::Reader(input),
+    };
+    Ok((hierarchy, cont, body_len))
+}
+
+pub struct ReadBodyContinuation<R: BufRead + Seek> {
+    multi_thread: bool,
+    header_len: usize,
+    lookup: IdLookup,
+    input: Input<R>,
+}
+
+enum Input<R: BufRead + Seek> {
+    Reader(R),
+    Mmap(memmap2::Mmap),
+}
+
+pub fn read_body<R: BufRead + Seek>(
+    data: ReadBodyContinuation<R>,
+    hierarchy: &Hierarchy,
+    progress: Option<ProgressCount>,
+) -> Result<(SignalSource, TimeTable)> {
+    let (source, time_table) = match data.input {
+        Input::Reader(mut input) => {
+            // determine input length
+            let end_pos = determine_len(&mut input)? as usize;
+
+            // encode signals
+            let encoder = read_single_stream_of_values(
+                &mut input,
+                end_pos, // end_pos includes the size of the header
+                true,
+                hierarchy,
+                &data.lookup,
+                progress,
+            )?;
+            encoder.finish()
+        }
+        Input::Mmap(mmap) => read_values(
+            &mmap[data.header_len..],
+            data.multi_thread,
+            hierarchy,
+            &data.lookup,
+            progress,
+        )?,
+    };
+    Ok((source, time_table))
+}
+
+fn determine_len(input: &mut impl Seek) -> Result<u64> {
+    let start = input.stream_position()?;
+    input.seek(SeekFrom::End(0))?;
+    let end = input.stream_position()?;
+    input.seek(SeekFrom::Start(start))?;
+    Ok(end)
+}
+
+const FST_SUP_VAR_DATA_TYPE_BITS: u32 = 10;
+const FST_SUP_VAR_DATA_TYPE_MASK: u64 = (1 << FST_SUP_VAR_DATA_TYPE_BITS) - 1;
+
+// VCD attributes are a GTKWave extension which is also used by nvc
+fn parse_attribute(
+    tokens: &[&[u8]],
+    path_names: &mut FxHashMap<u64, HierarchyStringId>,
+    enums: &mut FxHashMap<u64, EnumTypeId>,
+    h: &mut HierarchyBuilder,
+) -> Result<Option<Attribute>> {
+    match tokens[1] {
+        b"01" => Err(VcdParseError::VcdUnsupportedAttributeType(
+            "EnvVar".to_string(),
+        )),
+        b"02" => {
+            // FstHierarchyEntry::VhdlVarInfo
+            if tokens.len() != 4 {
+                return Err(unexpected_n_tokens("attribute", tokens));
+            }
+            let type_name = std::str::from_utf8(tokens[2])?.to_string();
+            let arg = std::str::from_utf8(tokens[3])?.parse::<u64>()?;
+            use num_enum::TryFromPrimitive;
+            let var_type = fst_reader::FstVhdlVarType::try_from_primitive(
+                (arg >> FST_SUP_VAR_DATA_TYPE_BITS) as u8,
+            )?;
+            let data_type = fst_reader::FstVhdlDataType::try_from_primitive(
+                (arg & FST_SUP_VAR_DATA_TYPE_MASK) as u8,
+            )?;
+            Ok(Some(Attribute::VhdlTypeInfo(
+                type_name, var_type, data_type,
+            )))
+        }
+        b"03" => {
+            // FstHierarchyEntry::PathName
+            if tokens.len() != 4 {
+                return Err(unexpected_n_tokens("attribute", tokens));
+            }
+            let path = std::str::from_utf8(tokens[2])?;
+            let id = std::str::from_utf8(tokens[3])?.parse::<u64>()?;
+            let string_ref = h.add_string(path.into());
+            path_names.insert(id, string_ref);
+            Ok(None)
+        }
+        b"04" => {
+            // FstHierarchyEntry::SourceStem
+            parse_source_stem(tokens, path_names, false)
+        }
+        b"05" => {
+            // FstHierarchyEntry::SourceInstantiationStem
+            parse_source_stem(tokens, path_names, true)
+        }
+        b"06" => Err(VcdParseError::VcdUnsupportedAttributeType(
+            "ValueList".to_string(),
+        )),
+        b"07" => {
+            // FstHierarchyEntry::EnumTable
+            if tokens.len() < 4 {
+                // we need at least 4 tokens
+                return Err(unexpected_n_tokens("attribute", tokens));
+            }
+
+            let name = tokens[2];
+            if name == b"\"\"" {
+                // empty name => reference
+                if tokens.len() > 4 {
+                    Err(unexpected_n_tokens("attribute", tokens))
+                } else {
+                    let handle = std::str::from_utf8(tokens[3])?.parse::<u64>()?;
+                    Ok(Some(Attribute::Enum(enums[&handle])))
+                }
+            } else {
+                // parse the enum table
+                let num_entries = std::str::from_utf8(tokens[3])?.parse::<usize>()?;
+
+                // "misc" + "07" + name + length + two token per entry + id
+                let expected_tokens = 2 + 2 + 2 * num_entries + 1;
+                if tokens.len() != expected_tokens {
+                    return Err(unexpected_n_tokens("attribute", tokens));
+                }
+
+                let handle = std::str::from_utf8(tokens.last().unwrap())?.parse::<u64>()?;
+                let mut mapping = Vec::with_capacity(num_entries);
+                let offset = 4;
+                for entry_id in 0..num_entries {
+                    let value =
+                        h.add_string(std::str::from_utf8(tokens[offset + entry_id])?.into());
+                    let key = h.add_string(
+                        std::str::from_utf8(tokens[offset + entry_id + num_entries])?.into(),
+                    );
+                    mapping.push((key, value));
+                }
+                debug_assert_eq!(mapping.len(), num_entries);
+                let name_id = h.add_string(std::str::from_utf8(name)?.into());
+                let enum_ref = h.add_enum_type(name_id, mapping);
+                enums.insert(handle, enum_ref);
+                // we just store the table for later use
+                Ok(None)
+            }
+        }
+        b"08" => Err(VcdParseError::VcdUnsupportedAttributeType(
+            "Unknown".to_string(),
+        )),
+        _ => Err(VcdParseError::VcdUnsupportedAttributeType(
+            iter_bytes_to_list_str(tokens.iter()),
+        )),
+    }
+}
+
+fn parse_source_stem(
+    tokens: &[&[u8]],
+    path_names: &mut FxHashMap<u64, HierarchyStringId>,
+    is_instance: bool,
+) -> Result<Option<Attribute>> {
+    if tokens.len() != 4 {
+        // TODO: GTKWave might actually generate 5 tokens in order to include whether it is the
+        //       instance of the normal source path
+        return Err(unexpected_n_tokens("attribute", tokens));
+    }
+    let path_id = std::str::from_utf8(tokens[2])?.parse::<u64>()?;
+    let line = std::str::from_utf8(tokens[3])?.parse::<u64>()?;
+    Ok(Some(Attribute::SourceLoc(
+        path_names[&path_id],
+        line,
+        is_instance,
+    )))
+}
+
+type IdLookup = Option<FxHashMap<Vec<u8>, SignalRef>>;
+
+fn read_hierarchy(
+    input: &mut (impl BufRead + Seek),
+    options: &LoadOptions,
+) -> Result<(usize, Hierarchy, IdLookup)> {
+    // first we try to avoid using an id map
+    let input_start = input.stream_position()?;
+    match read_hierarchy_inner(input, false, options) {
+        Ok(res) => Ok(res),
+        Err(VcdParseError::VcdNonContiguousIds) => {
+            // second try, this time with an id map
+            input.seek(SeekFrom::Start(input_start))?;
+            read_hierarchy_inner(input, true, options)
+        }
+        // non recoverable error
+        Err(other) => Err(other),
+    }
+}
+
+/// Collects statistics on VCD IDs used in order to decide whether we should be
+/// using a hash map or a direct translation to indices.
+#[derive(Debug, Clone, Default)]
+struct IdTracker {
+    var_count: u64,
+    min_max_id: Option<(u64, u64)>,
+    not_monotonic_inc: bool,
+}
+
+impl IdTracker {
+    fn need_id_map(&mut self, id_value: u64) -> bool {
+        // update statistics
+        self.var_count += 1;
+        if !self.not_monotonic_inc {
+            // check to see if new increase is monotonic
+            let is_monotonic = self
+                .min_max_id
+                .is_none_or(|(_, old_max)| old_max < id_value);
+            self.not_monotonic_inc = !is_monotonic;
+        }
+        let (min_id, max_id) = match self.min_max_id {
+            Some((min_id, max_id)) => (
+                std::cmp::min(min_id, id_value),
+                std::cmp::max(max_id, id_value),
+            ),
+            None => (id_value, id_value),
+        };
+        debug_assert!(min_id <= max_id);
+        self.min_max_id = Some((min_id, max_id));
+
+        if (id_value / self.var_count) > 1024 * 1024 {
+            // a very large id value means that our dense strategy won't work
+            // we are using 1MBi of addressable bytes as a threshold here
+            return true;
+        }
+
+        // if there are big gaps between ids, our dense strategy probably won't work
+        let inv_density = (max_id - min_id) / self.var_count;
+        if inv_density > 1000 {
+            // 1000 means only 0.1% of IDs are used, even if we employ and offset
+            return true;
+        }
+
+        false
+    }
+}
+
+fn read_hierarchy_inner(
+    input: &mut (impl BufRead + Seek),
+    use_id_map: bool,
+    options: &LoadOptions,
+) -> Result<(usize, Hierarchy, IdLookup)> {
+    let start = input.stream_position().unwrap();
+    let mut h = HierarchyBuilder::new(FileFormat::Vcd);
+    let mut attributes = Vec::new();
+    let mut path_names = FxHashMap::default();
+    // this map is used to translate identifiers to signal references for cases where we detect ids that are too large
+    let mut id_map: FxHashMap<Vec<u8>, SignalRef> = FxHashMap::default();
+    // statistics to decide whether to switch to an ID map
+    let mut id_tracker = IdTracker::default();
+
+    let mut id_to_signal_ref = |id: &[u8]| -> Result<SignalRef> {
+        // check to see if we should be using an id map
+        if !use_id_map {
+            if let Some(id_value) = id_to_int(id) {
+                if id_tracker.need_id_map(id_value) {
+                    return Err(VcdParseError::VcdNonContiguousIds); // restart with id map
+                }
+            } else {
+                return Err(VcdParseError::VcdNonContiguousIds); // restart with id map
+            }
+        }
+
+        // do the actual lookup / conversion
+        if use_id_map {
+            match id_map.get(id) {
+                Some(signal_ref) => Ok(*signal_ref),
+                None => {
+                    let signal_ref = SignalRef::from_index(id_map.len() + 1).unwrap();
+                    id_map.insert(id.to_vec(), signal_ref);
+                    Ok(signal_ref)
+                }
+            }
+        } else {
+            Ok(SignalRef::from_index(id_to_int(id).unwrap() as usize).unwrap())
+        }
+    };
+
+    let mut enums = FxHashMap::default();
+
+    let callback = |cmd: HeaderCmd| match cmd {
+        HeaderCmd::Scope(tpe, name) => {
+            let flatten = options.remove_scopes_with_empty_name && name.is_empty();
+            let tpe = convert_scope_tpe(tpe)?;
+            let (declaration_source, instance_source, pack) =
+                parse_scope_attributes(&mut attributes, &mut h)?;
+            let name = h.add_string(std::str::from_utf8(name)?.into());
+            h.add_scope(
+                name,
+                None, // VCDs do not contain component names
+                tpe,
+                pack,
+                declaration_source,
+                instance_source,
+                flatten,
+            );
+            Ok(())
+        }
+        HeaderCmd::UpScope => {
+            h.pop_scope();
+            Ok(())
+        }
+        HeaderCmd::Var(tpe, size, id, name) => {
+            let length = match std::str::from_utf8(size).unwrap().parse::<u32>() {
+                Ok(len) => len,
+                Err(_) => {
+                    return Err(VcdParseError::VcdVarLengthParsing(
+                        String::from_utf8_lossy(size).to_string(),
+                        String::from_utf8_lossy(name).to_string(),
+                    ));
+                }
+            };
+            let raw_vcd_var_tpe = convert_var_tpe(tpe)?;
+            // we derive the signal type from the vcd var directly, the VHDL type should never factor in!
+            let signal_tpe = match raw_vcd_var_tpe {
+                VarType::String => SignalEncoding::String,
+                VarType::Real | VarType::RealTime | VarType::ShortReal | VarType::RealParameter => {
+                    SignalEncoding::Real
+                }
+                VarType::Event => {
+                    debug_assert!(
+                        length == 0 || length == 1,
+                        "we generally expect event to be encoded as 1-bit signals!"
+                    );
+                    SignalEncoding::BitVector(0)
+                }
+                _ => SignalEncoding::BitVector(length),
+            };
+
+            h.add_var_raw_name(
+                name,
+                length,
+                raw_vcd_var_tpe,
+                &mut attributes,
+                signal_tpe,
+                VarDirection::vcd_default(),
+                id_to_signal_ref(id)?,
+            )
+        }
+        HeaderCmd::Date(value) => {
+            h.set_date(String::from_utf8_lossy(value).to_string());
+            Ok(())
+        }
+        HeaderCmd::Version(value) => {
+            h.set_version(String::from_utf8_lossy(value).to_string());
+            Ok(())
+        }
+        HeaderCmd::Comment(value) => {
+            h.add_comment(String::from_utf8_lossy(value).to_string());
+            Ok(())
+        }
+        HeaderCmd::Timescale(factor, unit) => {
+            let factor_int = std::str::from_utf8(factor)?.parse::<u32>()?;
+            let value = Timescale::new(factor_int, convert_timescale_unit(unit));
+            h.set_timescale(value);
+            Ok(())
+        }
+        HeaderCmd::MiscAttribute(tokens) => {
+            if let Some(attr) = parse_attribute(&tokens, &mut path_names, &mut enums, &mut h)? {
+                attributes.push(attr);
+            }
+            Ok(())
+        }
+    };
+
+    read_vcd_header(input, callback)?;
+    let end = input.stream_position().unwrap();
+    let hierarchy = h.finish();
+    let lookup = if use_id_map { Some(id_map) } else { None };
+    Ok(((end - start) as usize, hierarchy, lookup))
+}
+
+/// Tries to extract an index expression from the end of `value`. Ignores spaces.
+/// Returns the index and the remaining bytes of `value` before the parsed index.
+fn extract_suffix_index(value: &[u8]) -> (&[u8], Option<VarIndex>) {
+    use ExtractSuffixIndexState as St;
+    let mut state = St::SearchingForClosingBracket;
+
+    for (ii, cc) in value.iter().enumerate().rev() {
+        // skip whitespace
+        if *cc == b' ' {
+            continue;
+        }
+
+        state = match state {
+            St::SearchingForClosingBracket => {
+                if *cc == b']' {
+                    St::ParsingLsb(ii, 0, 1)
+                } else {
+                    // our value does not end in `]`
+                    return (&value[0..ii + 1], None);
+                }
+            }
+            St::ParsingLsb(end, num, factor) => {
+                if cc.is_ascii_digit() {
+                    let digit = i64::from(*cc - b'0');
+                    St::ParsingLsb(end, num + digit * factor, factor * 10)
+                } else if *cc == b'-' {
+                    St::ParsingLsb(end, -num, factor)
+                } else if *cc == b':' {
+                    St::ParsingMsb(end, num, 0, 1)
+                } else if *cc == b'[' {
+                    St::LookingForName(VarIndex::new(num, num))
+                } else {
+                    // not a valid number, give up
+                    return (&value[0..end + 1], None);
+                }
+            }
+            St::ParsingMsb(end, lsb, num, factor) => {
+                if cc.is_ascii_digit() {
+                    let digit = i64::from(*cc - b'0');
+                    St::ParsingMsb(end, lsb, num + digit * factor, factor * 10)
+                } else if *cc == b'-' {
+                    St::ParsingMsb(end, lsb, -num, factor)
+                } else if *cc == b'[' {
+                    St::LookingForName(VarIndex::new(num, lsb))
+                } else {
+                    // not a valid number, give up
+                    return (&value[0..end + 1], None);
+                }
+            }
+            St::LookingForName(index) => {
+                // any non-space character means that we found the name
+                return (&value[0..ii + 1], Some(index));
+            }
+        };
+    }
+
+    // wasn't able to parse any index
+    (value, None)
+}
+
+#[derive(Debug, Copy, Clone)]
+enum ExtractSuffixIndexState {
+    SearchingForClosingBracket,
+    ParsingLsb(usize, i64, i64),
+    ParsingMsb(usize, i64, i64, i64),
+    LookingForName(VarIndex),
+}
+
+pub type ScopeNames<'a> = Vec<std::borrow::Cow<'a, str>>;
+
+/// Splits a full name into:
+/// 1. the variable name
+/// 2. the bit index
+/// 3. any extra scopes generated by a multidimensional arrays
+///
+/// `length` is used in order to distinguish bit-indices and array scopes.
+pub fn parse_name(
+    raw_name: &[u8],
+    length: u32,
+) -> Result<(std::borrow::Cow<'_, str>, Option<VarIndex>, ScopeNames<'_>)> {
+    if raw_name.is_empty() {
+        return Ok(("".into(), None, vec![]));
+    }
+    debug_assert!(
+        raw_name[0] != b'[',
+        "we assume that the first character is not `[`!"
+    );
+
+    // find the bit index from the back
+    let (name, index) = extract_suffix_index(raw_name);
+
+    // Check to see if the index makes sense with the length that was reported.
+    // This is important in order to distinguish bit indices from array indices.
+    let (mut name, index) = if let Some(index) = index {
+        // index length does not match declared variable length
+        if index.width() != length {
+            // => go back to old name and no index
+            (raw_name, None)
+        } else {
+            (name, Some(index))
+        }
+    } else {
+        (name, index)
+    };
+
+    // see if there are any other indices from multidimensional arrays
+    let mut indices: Vec<std::borrow::Cow<str>> = vec![];
+    while name.last().cloned() == Some(b']') {
+        let index_start = match find_last(name, b'[') {
+            Some(s) => s,
+            None => {
+                return Err(VcdParseError::VcdVarNameParsing(
+                    String::from_utf8_lossy(name).into(),
+                ));
+            }
+        };
+        let index = &name[index_start..(name.len())];
+        indices.push(String::from_utf8_lossy(index));
+        name = trim_right(&name[..index_start]);
+    }
+
+    let name = String::from_utf8_lossy(name);
+
+    if indices.is_empty() {
+        Ok((name, index, indices))
+    } else {
+        // if there are indices, the name actually becomes part of the scope
+        let mut scopes = Vec::with_capacity(indices.len());
+        scopes.push(name);
+        while indices.len() > 1 {
+            scopes.push(indices.pop().unwrap());
+        }
+        let final_name = indices.pop().unwrap();
+        Ok((final_name, index, scopes))
+    }
+}
+
+#[inline]
+fn trim_right(mut name: &[u8]) -> &[u8] {
+    while name.last().cloned() == Some(b' ') {
+        name = &name[..(name.len() - 1)];
+    }
+    name
+}
+
+#[inline]
+fn find_last(haystack: &[u8], needle: u8) -> Option<usize> {
+    let from_back = haystack.iter().rev().position(|b| *b == needle)?;
+    Some(haystack.len() - from_back - 1)
+}
+
+fn convert_timescale_unit(name: &[u8]) -> TimescaleUnit {
+    match name {
+        b"zs" => TimescaleUnit::ZeptoSeconds,
+        b"as" => TimescaleUnit::AttoSeconds,
+        b"fs" => TimescaleUnit::FemtoSeconds,
+        b"ps" => TimescaleUnit::PicoSeconds,
+        b"ns" => TimescaleUnit::NanoSeconds,
+        b"us" => TimescaleUnit::MicroSeconds,
+        b"ms" => TimescaleUnit::MilliSeconds,
+        b"s" => TimescaleUnit::Seconds,
+        _ => TimescaleUnit::Unknown,
+    }
+}
+
+fn convert_scope_tpe(tpe: &[u8]) -> Result<ScopeType> {
+    match tpe {
+        b"module" => Ok(ScopeType::Module),
+        b"task" => Ok(ScopeType::Task),
+        b"function" => Ok(ScopeType::Function),
+        b"begin" => Ok(ScopeType::Begin),
+        b"fork" => Ok(ScopeType::Fork),
+        b"generate" => Ok(ScopeType::Generate),
+        b"struct" => Ok(ScopeType::Struct),
+        b"union" => Ok(ScopeType::Union),
+        b"class" => Ok(ScopeType::Class),
+        b"interface" => Ok(ScopeType::Interface),
+        b"package" => Ok(ScopeType::Package),
+        b"program" => Ok(ScopeType::Program),
+        // VHDL
+        b"vhdl_architecture" => Ok(ScopeType::VhdlArchitecture),
+        b"vhdl_procedure" => Ok(ScopeType::VhdlProcedure),
+        b"vhdl_function" => Ok(ScopeType::VhdlFunction),
+        b"vhdl_record" => Ok(ScopeType::VhdlRecord),
+        b"vhdl_process" => Ok(ScopeType::VhdlProcess),
+        b"vhdl_block" => Ok(ScopeType::VhdlBlock),
+        b"vhdl_for_generate" => Ok(ScopeType::VhdlForGenerate),
+        b"vhdl_if_generate" => Ok(ScopeType::VhdlIfGenerate),
+        b"vhdl_generate" => Ok(ScopeType::VhdlGenerate),
+        b"vhdl_package" => Ok(ScopeType::VhdlPackage),
+        // questa sim produces "unknown" scopes
+        b"unknown" => Ok(ScopeType::Unknown),
+        // SystemVerilog
+        b"clocking" => Ok(ScopeType::Clocking),
+        b"sv_array" => Ok(ScopeType::SvArray),
+        _ => Err(VcdParseError::VcdUnknownScopeType(
+            String::from_utf8_lossy(tpe).to_string(),
+        )),
+    }
+}
+
+fn convert_var_tpe(tpe: &[u8]) -> Result<VarType> {
+    match tpe {
+        b"wire" => Ok(VarType::Wire),
+        b"reg" => Ok(VarType::Reg),
+        b"parameter" => Ok(VarType::Parameter),
+        b"integer" => Ok(VarType::Integer),
+        b"string" => Ok(VarType::String),
+        b"event" => Ok(VarType::Event),
+        b"real" => Ok(VarType::Real),
+        b"real_parameter" => Ok(VarType::RealParameter),
+        b"supply0" => Ok(VarType::Supply0),
+        b"supply1" => Ok(VarType::Supply1),
+        b"time" => Ok(VarType::Time),
+        b"tri" => Ok(VarType::Tri),
+        b"triand" => Ok(VarType::TriAnd),
+        b"trior" => Ok(VarType::TriOr),
+        b"trireg" => Ok(VarType::TriReg),
+        b"tri0" => Ok(VarType::Tri0),
+        b"tri1" => Ok(VarType::Tri1),
+        b"wand" => Ok(VarType::WAnd),
+        b"wor" => Ok(VarType::WOr),
+        b"logic" => Ok(VarType::Logic),
+        b"port" => Ok(VarType::Port),
+        b"sparray" => Ok(VarType::SparseArray),
+        b"realtime" => Ok(VarType::RealTime),
+        b"bit" => Ok(VarType::Bit),
+        b"int" => Ok(VarType::Int),
+        b"shortint" => Ok(VarType::ShortInt),
+        b"longint" => Ok(VarType::LongInt),
+        b"byte" => Ok(VarType::Byte),
+        b"enum" => Ok(VarType::Enum),
+        b"shortreal" => Ok(VarType::ShortReal),
+        _ => Err(VcdParseError::VcdUnknownVarType(
+            String::from_utf8_lossy(tpe).to_string(),
+        )),
+    }
+}
+
+const ID_CHAR_MIN: u8 = b'!';
+const ID_CHAR_MAX: u8 = b'~';
+const NUM_ID_CHARS: u64 = (ID_CHAR_MAX - ID_CHAR_MIN + 1) as u64;
+
+/// Copied from https://github.com/kevinmehall/rust-vcd, licensed under MIT
+#[inline]
+fn id_to_int(id: &[u8]) -> Option<u64> {
+    if id.is_empty() {
+        return None;
+    }
+    let mut result = 0u64;
+    for &i in id.iter().rev() {
+        if !(ID_CHAR_MIN..=ID_CHAR_MAX).contains(&i) {
+            return None;
+        }
+        let c = u64::from(i - ID_CHAR_MIN) + 1;
+        result = result
+            .checked_mul(NUM_ID_CHARS)
+            .and_then(|x| x.checked_add(c))?;
+    }
+    Some(result - 1)
+}
+
+#[inline]
+fn unexpected_n_tokens(cmd: &str, tokens: &[&[u8]]) -> VcdParseError {
+    VcdParseError::VcdUnexpectedNumberOfTokens(
+        cmd.to_string(),
+        iter_bytes_to_list_str(tokens.iter()),
+    )
+}
+
+fn read_vcd_header(
+    input: &mut impl BufRead,
+    mut callback: impl FnMut(HeaderCmd) -> Result<()>,
+) -> Result<()> {
+    let mut buf: Vec<u8> = Vec::with_capacity(128);
+    loop {
+        buf.clear();
+        let (cmd, body) = read_command(input, &mut buf)?;
+        let parsed = match cmd {
+            VcdCmd::Scope => {
+                let tokens = find_tokens(body);
+                let name = tokens.get(1).cloned().unwrap_or(&[] as &[u8]);
+                HeaderCmd::Scope(tokens[0], name)
+            }
+            VcdCmd::Var => {
+                let tokens = find_tokens(body);
+                // the actual variable name could be represented by a variable number of tokens,
+                // thus we combine all trailing tokens together
+                if tokens.len() < 4 {
+                    return Err(unexpected_n_tokens("variable", &tokens));
+                }
+                // concatenate all trailing tokens
+                let body_start = body.as_ptr() as u64;
+                let name_start = tokens[3].as_ptr() as u64 - body_start;
+                let last_token = tokens.last().unwrap();
+                let name_end = last_token.as_ptr() as u64 - body_start + last_token.len() as u64;
+                let name = &body[name_start as usize..name_end as usize];
+                HeaderCmd::Var(tokens[0], tokens[1], tokens[2], name)
+            }
+            VcdCmd::UpScope => HeaderCmd::UpScope,
+            VcdCmd::Date => HeaderCmd::Date(body),
+            VcdCmd::Comment => HeaderCmd::Comment(body),
+            VcdCmd::Version => HeaderCmd::Version(body),
+            VcdCmd::Timescale => {
+                let tokens = find_tokens(body);
+                let (factor, unit) = match tokens.len() {
+                    1 => {
+                        // find the first non-numeric character
+                        let token = tokens[0];
+                        match token.iter().position(|c| *c < b'0' || *c > b'9') {
+                            None => (token, &[] as &[u8]),
+                            Some(pos) => (&token[..pos], &token[pos..]),
+                        }
+                    }
+                    2 => (tokens[0], tokens[1]),
+                    _ => {
+                        return Err(VcdParseError::VcdUnexpectedNumberOfTokens(
+                            "timescale".to_string(),
+                            iter_bytes_to_list_str(tokens.iter()),
+                        ));
+                    }
+                };
+                HeaderCmd::Timescale(factor, unit)
+            }
+            VcdCmd::EndDefinitions => {
+                // header is done
+                return Ok(());
+            }
+            VcdCmd::Attribute => {
+                let tokens = find_tokens(body);
+                if tokens.len() < 3 {
+                    return Err(VcdParseError::VcdUnexpectedNumberOfTokens(
+                        "attribute".to_string(),
+                        iter_bytes_to_list_str(tokens.iter()),
+                    ));
+                }
+                match tokens[0] {
+                    b"misc" => HeaderCmd::MiscAttribute(tokens),
+                    _ => {
+                        return Err(VcdParseError::VcdUnsupportedAttributeType(
+                            iter_bytes_to_list_str(tokens.iter()),
+                        ));
+                    }
+                }
+            }
+            VcdCmd::AttributeEnd => {
+                // Empty command directly folloed by $end
+                continue;
+            }
+        };
+        callback(parsed)?;
+    }
+}
+
+const VCD_DATE: &[u8] = b"date";
+const VCD_TIMESCALE: &[u8] = b"timescale";
+const VCD_VAR: &[u8] = b"var";
+const VCD_SCOPE: &[u8] = b"scope";
+const VCD_UP_SCOPE: &[u8] = b"upscope";
+const VCD_COMMENT: &[u8] = b"comment";
+const VCD_VERSION: &[u8] = b"version";
+const VCD_END_DEFINITIONS: &[u8] = b"enddefinitions";
+/// This might be an unofficial extension used by VHDL simulators.
+const VCD_ATTRIBUTE_BEGIN: &[u8] = b"attrbegin";
+/// Empty command that is generated in fst2vcd by e.g. NVCs VCD-generation
+const VCD_ATTRIBUTE_END: &[u8] = b"attrend";
+const VCD_COMMANDS: [&[u8]; 10] = [
+    VCD_DATE,
+    VCD_TIMESCALE,
+    VCD_VAR,
+    VCD_SCOPE,
+    VCD_UP_SCOPE,
+    VCD_COMMENT,
+    VCD_VERSION,
+    VCD_END_DEFINITIONS,
+    VCD_ATTRIBUTE_BEGIN,
+    VCD_ATTRIBUTE_END,
+];
+
+/// Used to show all commands when printing an error message.
+fn get_vcd_command_str() -> String {
+    iter_bytes_to_list_str(VCD_COMMANDS.iter())
+}
+
+fn iter_bytes_to_list_str<'a, I>(bytes: I) -> String
+where
+    I: Iterator<Item = &'a &'a [u8]>,
+{
+    bytes
+        .map(|c| String::from_utf8_lossy(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Debug, PartialEq)]
+enum VcdCmd {
+    Date,
+    Timescale,
+    Var,
+    Scope,
+    UpScope,
+    Comment,
+    Version,
+    EndDefinitions,
+    Attribute,
+    AttributeEnd,
+}
+
+impl VcdCmd {
+    fn from_bytes(name: &[u8]) -> Option<Self> {
+        match name {
+            VCD_VAR => Some(VcdCmd::Var),
+            VCD_SCOPE => Some(VcdCmd::Scope),
+            VCD_UP_SCOPE => Some(VcdCmd::UpScope),
+            VCD_DATE => Some(VcdCmd::Date),
+            VCD_TIMESCALE => Some(VcdCmd::Timescale),
+            VCD_COMMENT => Some(VcdCmd::Comment),
+            VCD_VERSION => Some(VcdCmd::Version),
+            VCD_END_DEFINITIONS => Some(VcdCmd::EndDefinitions),
+            VCD_ATTRIBUTE_BEGIN => Some(VcdCmd::Attribute),
+            VCD_ATTRIBUTE_END => Some(VcdCmd::AttributeEnd),
+            _ => None,
+        }
+    }
+}
+
+/// Tries to guess whether this input could be a VCD by looking at the first token.
+pub fn is_vcd(input: &mut (impl BufRead + Seek)) -> bool {
+    let is_vcd = matches!(internal_is_vcd(input), Ok(true));
+    // try to reset input
+    let _ = input.seek(std::io::SeekFrom::Start(0));
+    is_vcd
+}
+
+/// Returns an error or false if not a vcd. Returns Ok(true) only if we think it is a vcd.
+fn internal_is_vcd(input: &mut (impl BufRead + Seek)) -> Result<bool> {
+    let mut buf = Vec::with_capacity(64);
+    let (_cmd, _body) = read_command(input, &mut buf)?;
+    Ok(true)
+}
+
+/// Reads in a command until the `$end`. Uses buf to store the read data.
+/// Returns the name and the body of the command.
+fn read_command<'a>(input: &mut impl BufRead, buf: &'a mut Vec<u8>) -> Result<(VcdCmd, &'a [u8])> {
+    // start out with an empty buffer
+    assert!(buf.is_empty());
+
+    // skip over any preceding whitespace
+    let start_char = skip_whitespace(input)?;
+
+    if start_char != b'$' {
+        return Err(VcdParseError::VcdStartChar(
+            String::from_utf8_lossy(&[start_char]).to_string(),
+        ));
+    }
+
+    // read the rest of the command into the buffer
+    read_token(input, buf)?;
+
+    // check to see if this is a valid command
+    let cmd = VcdCmd::from_bytes(buf).ok_or_else(|| {
+        VcdParseError::VcdInvalidCommand(String::from_utf8_lossy(buf).to_string())
+    })?;
+    buf.clear();
+
+    // read until we find the end token
+    read_until_end_token(input, buf)?;
+
+    // return the name and body of the command
+    Ok((cmd, &buf[..]))
+}
+
+#[inline]
+fn find_tokens(line: &[u8]) -> Vec<&[u8]> {
+    line.split(|c| matches!(*c, b' ' | b'\t' | b'\n'))
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+#[inline]
+fn read_until_end_token(input: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    // count how many characters of the $end token we have recognized
+    let mut end_index = 0;
+    // we skip any whitespace at the beginning, but not between tokens
+    let mut skipping_preceding_whitespace = true;
+    loop {
+        let byte = read_byte(input)?;
+        if skipping_preceding_whitespace {
+            match byte {
+                b' ' | b'\n' | b'\r' | b'\t' => {
+                    continue;
+                }
+                _ => {
+                    skipping_preceding_whitespace = false;
+                }
+            }
+        }
+        // we always append and then later drop the `$end` bytes.
+        buf.push(byte);
+        end_index = match (end_index, byte) {
+            (0, b'$') => 1,
+            (1, b'e') => 2,
+            (2, b'n') => 3,
+            (3, b'd') => {
+                // we are done!
+                buf.truncate(buf.len() - 4); // drop $end
+                right_strip(buf);
+                return Ok(());
+            }
+            _ => 0, // reset
+        };
+    }
+}
+
+#[inline]
+fn read_token(input: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    loop {
+        let byte = read_byte(input)?;
+        match byte {
+            b' ' | b'\n' | b'\r' | b'\t' => {
+                return Ok(());
+            }
+            other => {
+                buf.push(other);
+            }
+        }
+    }
+}
+
+/// Advances the input until the first non-whitespace character which is then returned.
+#[inline]
+fn skip_whitespace(input: &mut impl BufRead) -> std::io::Result<u8> {
+    loop {
+        let byte = read_byte(input)?;
+        match byte {
+            b' ' | b'\n' | b'\r' | b'\t' => {}
+            other => return Ok(other),
+        }
+    }
+}
+
+#[inline]
+fn read_byte(input: &mut impl BufRead) -> std::io::Result<u8> {
+    let mut buf = [0u8; 1];
+    input.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+#[inline]
+fn right_strip(buf: &mut Vec<u8>) {
+    while !buf.is_empty() {
+        match buf.last().unwrap() {
+            b' ' | b'\n' | b'\r' | b'\t' => buf.pop(),
+            _ => break,
+        };
+    }
+}
+
+enum HeaderCmd<'a> {
+    Date(&'a [u8]),
+    Version(&'a [u8]),
+    Comment(&'a [u8]),
+    Timescale(&'a [u8], &'a [u8]), // factor, unit
+    Scope(&'a [u8], &'a [u8]),     // tpe, name
+    UpScope,
+    Var(&'a [u8], &'a [u8], &'a [u8], &'a [u8]), // tpe, size, id, name
+    /// Misc attributes are emitted by nvc (VHDL sim) and fst2vcd (included with GTKwave).
+    MiscAttribute(Vec<&'a [u8]>),
+}
+
+/// The minimum number of bytes we want to read per thread.
+const MIN_CHUNK_SIZE: usize = 8 * 1024;
+
+/// Returns starting byte and read length for every thread. Note that read-length is just an
+/// approximation and the thread might have to read beyond or might also run out of data before
+/// reaching read length.
+#[inline]
+fn determine_thread_chunks(body_len: usize) -> Vec<(usize, usize)> {
+    let max_threads = rayon::current_num_threads();
+    let number_of_threads_for_min_chunk_size = body_len.div_ceil(MIN_CHUNK_SIZE);
+    let num_threads = std::cmp::min(max_threads, number_of_threads_for_min_chunk_size);
+    let chunk_size = body_len.div_ceil(num_threads);
+    // TODO: for large file it might make sense to have more chunks than threads
+    (0..num_threads)
+        .map(|ii| (ii * chunk_size, chunk_size))
+        .collect()
+}
+
+/// Reads the body of a VCD with multiple threads
+fn read_values(
+    input: &[u8],
+    multi_thread: bool,
+    hierarchy: &Hierarchy,
+    lookup: &IdLookup,
+    progress: Option<ProgressCount>,
+) -> Result<(SignalSource, TimeTable)> {
+    if multi_thread {
+        let chunks = determine_thread_chunks(input.len());
+        let encoders: Result<Vec<crate::wavemem::Encoder>> = chunks
+            .par_iter()
+            .map(|(start, len)| {
+                let is_first = *start == 0;
+                let mut inp = std::io::Cursor::new(&input[*start..]);
+                read_single_stream_of_values(
+                    &mut inp,
+                    *len - 1,
+                    is_first,
+                    hierarchy,
+                    lookup,
+                    progress.clone(),
+                )
+            })
+            .collect();
+        let encoders = encoders?;
+
+        // combine encoders
+        let mut encoder_iter = encoders.into_iter();
+        let mut encoder = encoder_iter.next().unwrap();
+        for other in encoder_iter {
+            encoder.append(other);
+        }
+        Ok(encoder.finish())
+    } else {
+        let mut inp = std::io::Cursor::new(input);
+        let encoder = read_single_stream_of_values(
+            &mut inp,
+            input.len() - 1,
+            true,
+            hierarchy,
+            lookup,
+            progress,
+        )?;
+        Ok(encoder.finish())
+    }
+}
+
+enum FirstTokenResult {
+    Time(u64),
+    OneBitValue,
+    MultiBitValue,
+    CommentStart,
+    IgnoredCmd,
+}
+
+fn parse_first_token(token: &[u8]) -> Result<FirstTokenResult> {
+    match token[0] {
+        b'#' => {
+            let value_str = std::str::from_utf8(&token[1..])?;
+            // Try parsing as u64
+            let value = match value_str.parse::<u64>() {
+                Ok(val) => Ok(val),
+                Err(e) => {
+                    // Try parsing as f64
+                    match value_str.parse::<f64>() {
+                        Ok(val) => {
+                            if val.fract() == 0.0 {
+                                // Convert to u64 if no fractional part
+                                Ok(val as u64)
+                            } else {
+                                Err(e)
+                            }
+                        }
+                        Err(_) => Err(e),
+                    }
+                }
+            }?;
+
+            Ok(FirstTokenResult::Time(value))
+        }
+        b'0' | b'1' | b'z' | b'Z' | b'x' | b'X' | b'h' | b'H' | b'u' | b'U' | b'w' | b'W'
+        | b'l' | b'L' | b'-' => Ok(FirstTokenResult::OneBitValue),
+        b'b' | b'B' | b'r' | b'R' | b's' | b'S' => Ok(FirstTokenResult::MultiBitValue),
+        _ => {
+            match token {
+                b"$dumpall" => {
+                    // interpret dumpall as indicating timestep zero
+                    Ok(FirstTokenResult::Time(0))
+                }
+                b"$comment" => Ok(FirstTokenResult::CommentStart),
+                b"$dumpvars" | b"$end" | b"$dumpoff" | b"$dumpon" => {
+                    // ignore dumpvars, dumpoff, dumpon, and end command
+                    Ok(FirstTokenResult::IgnoredCmd)
+                }
+                _ => Err(VcdParseError::VcdUnexpectedBodyToken(
+                    String::from_utf8_lossy(token).to_string(),
+                )),
+            }
+        }
+    }
+}
+
+/// wraps a wavemem encoder and adds vcd specific handling of input time
+struct VcdEncoder<'a> {
+    enc: Encoder,
+    lookup: &'a IdLookup,
+    is_first_part_of_vcd: bool,
+    found_first_time_step: bool,
+}
+
+impl<'a> VcdEncoder<'a> {
+    #[inline]
+    fn new(hierarchy: &Hierarchy, lookup: &'a IdLookup, is_first_part_of_vcd: bool) -> Self {
+        let found_first_time_step = false;
+        Self {
+            enc: Encoder::new(hierarchy),
+            lookup,
+            is_first_part_of_vcd,
+            found_first_time_step,
+        }
+    }
+
+    #[inline]
+    fn into_inner(self) -> Encoder {
+        self.enc
+    }
+}
+
+impl ParseBodyOutput for VcdEncoder<'_> {
+    #[inline]
+    fn time(&mut self, value: u64) -> Result<()> {
+        self.found_first_time_step = true;
+        self.enc.time_change(value);
+        Ok(())
+    }
+
+    #[inline]
+    fn value(&mut self, value: &[u8], id: &[u8], has_escape: bool) -> Result<()> {
+        // In the first thread, we might encounter a dump values which dumps all initial values
+        // without specifying a timestamp
+        if self.is_first_part_of_vcd && !self.found_first_time_step {
+            self.time(0)?;
+        }
+        // if we are not the first part of the VCD, we are skipping value changes until the
+        // first timestep is found which serves as a synchronization point
+        if self.found_first_time_step {
+            let num_id = match self.lookup {
+                None => match id_to_int(id) {
+                    Some(ii) => ii,
+                    None => {
+                        debug_assert!(id.is_empty());
+                        return Err(VcdParseError::VcdEmptyId);
+                    }
+                },
+                Some(lookup) => lookup[id].index() as u64,
+            };
+
+            if has_escape {
+                // Substitute escape sequences as defined in libfst: "\\XXX" octal escapes and simple single-character escapes.
+                // See https://github.com/gtkwave/libfst/blob/6a52070cd62ec65c29832bc95e7db493504aa7ac/src/fstapi.c#L6774
+                // As well as hex escapes "\xHH" which pyvcd (used by Amaranth) produces.
+                // See https://github.com/SanDisk-Open-Source/pyvcd/blob/0890733e2fd77cc3483ddddac8f44053e902a2ef/vcd/writer.py#L605
+                let escaped = unescape_vcd_value(value);
+                self.enc.vcd_value_change(num_id, escaped.as_ref());
+            } else {
+                self.enc.vcd_value_change(num_id, value);
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ProgressReporter {
+    progress: Option<ProgressCount>,
+    last_reported_pos: usize,
+    report_increments: usize,
+}
+
+impl ProgressReporter {
+    #[inline]
+    fn new(progress: Option<ProgressCount>, len: usize) -> Self {
+        let last_reported_pos = 0;
+        let report_increments = std::cmp::max(len / 1000, 512);
+        Self {
+            progress,
+            last_reported_pos,
+            report_increments,
+        }
+    }
+
+    #[inline]
+    fn report(&mut self, pos: usize, always_report: bool) {
+        if let Some(p) = self.progress.as_ref() {
+            let increment = pos - self.last_reported_pos;
+            if always_report || increment > self.report_increments {
+                p.fetch_add(increment as u64, Ordering::SeqCst);
+                self.last_reported_pos = pos;
+            }
+        }
+    }
+}
+
+fn read_single_stream_of_values<R: BufRead + Seek>(
+    input: &mut R,
+    stop_pos: usize,
+    is_first: bool,
+    hierarchy: &Hierarchy,
+    lookup: &IdLookup,
+    progress: Option<ProgressCount>,
+) -> Result<crate::wavemem::Encoder> {
+    let mut encoder = VcdEncoder::new(hierarchy, lookup, is_first);
+    parse_body(input, &mut encoder, stop_pos, progress)?;
+    Ok(encoder.into_inner())
+}
+
+trait ParseBodyOutput {
+    fn time(&mut self, value: u64) -> Result<()>;
+    fn value(&mut self, value: &[u8], id: &[u8], has_escape: bool) -> Result<()>;
+}
+
+fn parse_body(
+    input: &mut impl BufRead,
+    out: &mut impl ParseBodyOutput,
+    stop_pos: usize,
+    progress: Option<ProgressCount>,
+) -> Result<()> {
+    let mut progress_report = ProgressReporter::new(progress, stop_pos);
+
+    let mut state = BodyState::SkippingNewLine;
+
+    let mut first = Vec::with_capacity(32);
+    let mut id = Vec::with_capacity(32);
+    let mut final_pos = 0;
+    let mut has_escape = false;
+
+    for (pos, b) in input.bytes().enumerate() {
+        final_pos = pos;
+        progress_report.report(pos, false);
+        let b = b?;
+        match state {
+            BodyState::SkippingNewLine => {
+                if b == b'\n' {
+                    debug_assert!(first.is_empty());
+                    state = BodyState::ParsingFirstToken;
+                }
+            }
+            BodyState::ParsingFirstToken => {
+                if b.is_ascii_whitespace() {
+                    if first.is_empty() {
+                        // we are in front of the token => nothing to do
+                    } else {
+                        state = match parse_first_token(&first)? {
+                            FirstTokenResult::Time(value) => {
+                                // check to see if this time value is already fully past
+                                // the stop position
+                                let time_token_start = pos - first.len() - 1;
+                                if time_token_start > stop_pos {
+                                    // exit
+                                    progress_report.report(pos, true);
+                                    return Ok(());
+                                }
+                                // record time step if we aren't exiting
+                                out.time(value)?;
+                                BodyState::ParsingFirstToken
+                            }
+                            FirstTokenResult::OneBitValue => {
+                                out.value(&first[0..1], &first[1..], false)?;
+                                BodyState::ParsingFirstToken
+                            }
+                            FirstTokenResult::MultiBitValue => BodyState::ParsingIdToken,
+                            FirstTokenResult::CommentStart => BodyState::LookingForEndToken,
+                            FirstTokenResult::IgnoredCmd => BodyState::ParsingFirstToken,
+                        };
+
+                        // clear buffer to find next token
+                        if state != BodyState::ParsingIdToken {
+                            first.clear();
+                            has_escape = false;
+                        }
+                    }
+                } else {
+                    has_escape |= b == b'\\';
+                    first.push(b);
+                }
+            }
+
+            BodyState::ParsingIdToken => {
+                if b.is_ascii_whitespace() {
+                    if id.is_empty() {
+                        // we are in front of the token => nothing to do
+                    } else {
+                        debug_assert_eq!(first.contains(&b'\\'), has_escape);
+                        out.value(first.as_slice(), id.as_slice(), has_escape)?;
+                        first.clear();
+                        has_escape = false;
+                        id.clear();
+                        state = BodyState::ParsingFirstToken;
+                    }
+                } else {
+                    id.push(b);
+                }
+            }
+            BodyState::LookingForEndToken => {
+                if b.is_ascii_whitespace() {
+                    if first.is_empty() {
+                        // we are in front of the token => nothing to do
+                    } else {
+                        if first == b"$end" {
+                            state = BodyState::ParsingFirstToken;
+                        }
+                        first.clear();
+                        has_escape = false;
+                    }
+                } else {
+                    first.push(b);
+                }
+            }
+        }
+    }
+
+    // we reached the end of the file
+    match state {
+        BodyState::ParsingFirstToken if !first.is_empty() => {
+            match parse_first_token(&first)? {
+                FirstTokenResult::Time(value) => {
+                    out.time(value)?;
+                }
+                FirstTokenResult::OneBitValue => {
+                    out.value(&first[0..1], &first[1..], false)?;
+                }
+                _ => {} // nothing to do
+            };
+        }
+        BodyState::ParsingIdToken => {
+            debug_assert_eq!(first.contains(&b'\\'), has_escape);
+            out.value(first.as_slice(), id.as_slice(), has_escape)?;
+        }
+        _ => {} // nothing to do
+    }
+    progress_report.report(final_pos, true);
+    Ok(())
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum BodyState {
+    /// initially the body parser might skip ahead to the next newline in order to synchronize
+    SkippingNewLine,
+    ParsingFirstToken,
+    ParsingIdToken,
+    LookingForEndToken,
+}
+
+//-------------- VCD Streaming ------------
+
+pub fn stream_body<R: BufRead + Seek, C: FnMut(Time, SignalRef, SignalValueRef<'_>)>(
+    data: &mut ReadBodyContinuation<R>,
+    enc: StreamEncoder<C>,
+) -> Result<()> {
+    let mut disp = VcdStreamDispatcher {
+        enc,
+        lookup: &data.lookup,
+    };
+
+    match &mut data.input {
+        Input::Reader(input) => {
+            let start = input.stream_position()?;
+            let stop_pos = determine_len(input)? as usize;
+            parse_body(input, &mut disp, stop_pos, None)?;
+            // reset stream so that we can read data again
+            input.seek(SeekFrom::Start(start))?;
+            disp.enc.finish();
+            Ok(())
+        }
+        Input::Mmap(mmap) => {
+            let data = &mmap[data.header_len..];
+            let mut input = std::io::Cursor::new(data);
+            let stop_pos = data.len() - 1;
+            parse_body(&mut input, &mut disp, stop_pos, None)?;
+            disp.enc.finish();
+            Ok(())
+        }
+    }
+}
+
+struct VcdStreamDispatcher<'a, C>
+where
+    C: FnMut(Time, SignalRef, SignalValueRef<'_>),
+{
+    enc: StreamEncoder<C>,
+    lookup: &'a IdLookup,
+}
+
+impl<C> ParseBodyOutput for VcdStreamDispatcher<'_, C>
+where
+    C: FnMut(Time, SignalRef, SignalValueRef<'_>),
+{
+    #[inline]
+    fn time(&mut self, value: u64) -> Result<()> {
+        self.enc.time_change(value);
+        Ok(())
+    }
+
+    #[inline]
+    fn value(&mut self, value: &[u8], id: &[u8], has_escape: bool) -> Result<()> {
+        // In the first thread, we might encounter a dump values which dumps all initial values
+        // without specifying a timestamp
+        if self.enc.time_is_none() {
+            self.time(0)?;
+        }
+
+        let num_id = match self.lookup {
+            None => match id_to_int(id) {
+                Some(ii) => ii,
+                None => {
+                    debug_assert!(id.is_empty());
+                    return Err(VcdParseError::VcdEmptyId);
+                }
+            },
+            Some(lookup) => lookup[id].index() as u64,
+        };
+
+        if has_escape {
+            // Substitute escape sequences as defined in libfst: "\\XXX" octal escapes and simple single-character escapes.
+            // See https://github.com/gtkwave/libfst/blob/6a52070cd62ec65c29832bc95e7db493504aa7ac/src/fstapi.c#L6774
+            // As well as hex escapes "\xHH" which pyvcd (used by Amaranth) produces.
+            // See https://github.com/SanDisk-Open-Source/pyvcd/blob/0890733e2fd77cc3483ddddac8f44053e902a2ef/vcd/writer.py#L605
+            let escaped = unescape_vcd_value(value);
+            self.enc.vcd_value_change(num_id, escaped.as_ref());
+        } else {
+            self.enc.vcd_value_change(num_id, value);
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn is_octal_digit(b: u8) -> bool {
+    (b'0'..=b'7').contains(&b)
+}
+
+#[inline]
+fn map_single_escape(ch: u8) -> Option<u8> {
+    // These are the escaped characters supported by libfst and therefore fst2vcd which e.g. NVC relies on.
+    match ch {
+        b'a' => Some(b'\x07'), // Bell/alert
+        b'b' => Some(b'\x08'), // Backspace
+        b'f' => Some(b'\x0C'), // Formfeed
+        b'n' => Some(b'\n'),   // Newline
+        b'r' => Some(b'\r'),   // Carriage return
+        b't' => Some(b'\t'),   // Horizontal tab
+        b'v' => Some(b'\x0B'), // Vertical tab
+        b'"' => Some(b'"'),    // Double quote
+        b'\'' => Some(b'\''),  // Single quote
+        b'\\' => Some(b'\\'),  // Backslash
+        b'?' => Some(b'\x3F'), // Question mark
+        _ => None,
+    }
+}
+
+#[inline]
+fn hex_digit_to_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[inline]
+fn unescape_vcd_value(value: &[u8]) -> Cow<'_, [u8]> {
+    let mut substituted: Option<Vec<u8>> = None;
+    let mut i = 0;
+
+    while i < value.len() {
+        if value[i] == b'\\' {
+            // Hex escape: \xHH where H are hex digits
+            if i + 4 <= value.len()
+                && value[i + 1] == b'x'
+                && let Some(hi) = hex_digit_to_value(value[i + 2])
+                && let Some(lo) = hex_digit_to_value(value[i + 3])
+            {
+                let code = (hi << 4) | lo;
+                substituted
+                    .get_or_insert_with(|| {
+                        let mut buf = Vec::with_capacity(value.len());
+                        buf.extend_from_slice(&value[..i]);
+                        buf
+                    })
+                    .push(code);
+                i += 4;
+                continue;
+            }
+
+            // Octal escape: \XYZ where X,Y,Z are 0-7; skip if not valid octal.
+            if i + 4 <= value.len()
+                && is_octal_digit(value[i + 1])
+                && is_octal_digit(value[i + 2])
+                && is_octal_digit(value[i + 3])
+            {
+                let code = ((value[i + 1] - b'0') << 6)
+                    + ((value[i + 2] - b'0') << 3)
+                    + (value[i + 3] - b'0');
+                substituted
+                    .get_or_insert_with(|| {
+                        let mut buf = Vec::with_capacity(value.len());
+                        buf.extend_from_slice(&value[..i]);
+                        buf
+                    })
+                    .push(code);
+                i += 4;
+                continue;
+            }
+
+            // Simple single-character escapes, e.g. \' and \\
+            if i + 2 <= value.len()
+                && let Some(mapped) = map_single_escape(value[i + 1])
+            {
+                substituted
+                    .get_or_insert_with(|| {
+                        let mut buf = Vec::with_capacity(value.len());
+                        buf.extend_from_slice(&value[..i]);
+                        buf
+                    })
+                    .push(mapped);
+                i += 2;
+                continue;
+            }
+        }
+
+        if let Some(ref mut buf) = substituted {
+            buf.push(value[i]);
+        }
+        i += 1;
+    }
+
+    match substituted {
+        Some(buf) => Cow::Owned(
+            // Convert ISO-8859-1 bytes to UTF-8 by mapping each byte to a char
+            buf.iter()
+                .map(|b| *b as char)
+                .collect::<String>()
+                .as_bytes()
+                .to_vec(),
+        ),
+        None => Cow::Borrowed(value),
+    }
+}
+
+pub enum VcdBitVecChange<'a> {
+    SingleBit(Bit),
+    MultiBit(Cow<'a, [u8]>),
+}
+
+pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>, States) {
+    let len =
+        NonZeroU32::new(len).expect("decode_vcd_bit_vec_change should only be called for len > 0");
+    if len.get() == 1 {
+        // Simplify parsing of non-compliant output by checking last character
+        let value_char = match value.last() {
+            // special handling for empty values which we always treat as zero
+            None => b'0',
+            // special handling for zero-length vector
+            Some(b'b') => b'0',
+            Some(v) => *v,
+        };
+
+        let (states, bit_value) = States::from_ascii_bit(value_char).unwrap_or_else(|| {
+            panic!(
+                "Failed to parse four state value: {} for signal of size 1",
+                String::from_utf8_lossy(value)
+            )
+        });
+        (VcdBitVecChange::SingleBit(bit_value), states)
+    } else {
+        let value_bits: &[u8] = match value[0] {
+            b'b' | b'B' => &value[1..],
+            _ => value,
+        };
+        // special detection for pymtl3 which adds an extra `0b` for all bit vectors
+        let value_bits: &[u8] = if value_bits.len() <= 2 {
+            value_bits
+        } else {
+            match &value_bits[0..2] {
+                b"0b" => &value_bits[2..],
+                _ => value_bits,
+            }
+        };
+        let states = States::from_ascii(value_bits).unwrap_or_else(|| {
+            panic!(
+                "Bit-vector contains invalid character. Only 2-, 4-, and 9-state signals are supported: {}",
+                String::from_utf8_lossy(value)
+            )
+        });
+
+        let bits = len.get() as usize;
+        let data_to_write = if value_bits.len() == bits {
+            Cow::Borrowed(value_bits)
+        } else {
+            let expanded = expand_special_vector_cases(value_bits, bits).unwrap_or_else(|| {
+                panic!(
+                    "Failed to parse four state value: {} for signal of size {}",
+                    String::from_utf8_lossy(value),
+                    bits
+                )
+            });
+            assert_eq!(expanded.len(), bits);
+            Cow::Owned(expanded)
+        };
+        (VcdBitVecChange::MultiBit(data_to_write), states)
+    }
+}
+
+#[inline]
+fn expand_special_vector_cases(value: &[u8], len: usize) -> Option<Vec<u8>> {
+    // if the value is actually longer than expected, there is nothing we can do
+    if value.len() >= len {
+        return None;
+    }
+
+    // zero, x or z extend
+    match value[0] {
+        b'1' | b'0' => {
+            let mut extended = Vec::with_capacity(len);
+            extended.resize(len - value.len(), b'0');
+            extended.extend_from_slice(value);
+            Some(extended)
+        }
+        b'x' | b'X' | b'z' | b'Z' => {
+            let mut extended = Vec::with_capacity(len);
+            extended.resize(len - value.len(), value[0]);
+            extended.extend_from_slice(value);
+            Some(extended)
+        }
+        _ => None, // failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl ParseBodyOutput for Vec<String> {
+        fn time(&mut self, value: u64) -> Result<()> {
+            self.push(format!("Time({value})"));
+            Ok(())
+        }
+
+        fn value(&mut self, value: &[u8], id: &[u8], _has_escape: bool) -> Result<()> {
+            let desc = format!(
+                "{} = {}",
+                std::str::from_utf8(id)?,
+                std::str::from_utf8(value)?
+            );
+            self.push(desc);
+            Ok(())
+        }
+    }
+
+    fn read_body_to_vec(input: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        parse_body(
+            &mut std::io::Cursor::new(input),
+            &mut out,
+            input.len(),
+            None,
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn test_read_body() {
+        let input = r#"
+1I,!
+1J,!
+1#2!
+#2678437829
+b00 D2!
+b0000 d2!
+b11 e2!
+b00000 f2!
+b10100 g2!
+b00000 h2!
+b00000 i2!
+x(i"
+x'i"
+x&i"
+x%i"
+0j2!"#;
+        let expected = vec![
+            "I,! = 1",
+            "J,! = 1",
+            "#2! = 1",
+            "Time(2678437829)",
+            "D2! = b00",
+            "d2! = b0000",
+            "e2! = b11",
+            "f2! = b00000",
+            "g2! = b10100",
+            "h2! = b00000",
+            "i2! = b00000",
+            "(i\" = x",
+            "'i\" = x",
+            "&i\" = x",
+            "%i\" = x",
+            "j2! = 0",
+        ];
+        let res = read_body_to_vec(input.as_bytes());
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_read_command() {
+        let mut buf = Vec::with_capacity(128);
+        let input_0 = b"$upscope $end";
+        let (cmd_0, body_0) = read_command(&mut input_0.as_slice(), &mut buf).unwrap();
+        assert_eq!(cmd_0, VcdCmd::UpScope);
+        assert!(body_0.is_empty());
+
+        // test with more whitespace
+        buf.clear();
+        let input_1 = b" \t $upscope \n $end  \n ";
+        let (cmd_1, body_1) = read_command(&mut input_1.as_slice(), &mut buf).unwrap();
+        assert_eq!(cmd_1, VcdCmd::UpScope);
+        assert!(body_1.is_empty());
+    }
+
+    #[test]
+    fn test_read_var_command() {
+        let mut buf = Vec::with_capacity(128);
+        let inp_0 = b"$var wire 1 ! CLK $end";
+        let (cmd_0, body_0) = read_command(&mut inp_0.as_slice(), &mut buf).unwrap();
+        assert_eq!(cmd_0, VcdCmd::Var);
+        assert_eq!(std::str::from_utf8(body_0).unwrap(), "wire 1 ! CLK");
+
+        // with more whitespace
+        buf.clear();
+        let inp_1 = b"$var wire\t1\t!\nCLK $end";
+        let (cmd_1, body_1) = read_command(&mut inp_1.as_slice(), &mut buf).unwrap();
+        assert_eq!(cmd_1, VcdCmd::Var);
+        assert_eq!(std::str::from_utf8(body_1).unwrap(), "wire\t1\t!\nCLK");
+    }
+
+    #[test]
+    fn test_find_tokens() {
+        assert_eq!(
+            find_tokens(b"wire  1    !   CLK".as_slice()),
+            [
+                b"wire".as_slice(),
+                b"1".as_slice(),
+                b"!".as_slice(),
+                b"CLK".as_slice()
+            ]
+        );
+        assert_eq!(
+            find_tokens(b"wire\t1\t!\nCLK".as_slice()),
+            [
+                b"wire".as_slice(),
+                b"1".as_slice(),
+                b"!".as_slice(),
+                b"CLK".as_slice()
+            ]
+        );
+        assert_eq!(
+            find_tokens(b"wire\t\t\t\t1   \t!\nCLK".as_slice()),
+            [
+                b"wire".as_slice(),
+                b"1".as_slice(),
+                b"!".as_slice(),
+                b"CLK".as_slice()
+            ]
+        );
+    }
+    #[test]
+    fn test_id_to_int() {
+        assert_eq!(id_to_int(b""), None);
+        assert_eq!(id_to_int(b"!"), Some(0));
+        assert_eq!(id_to_int(b"#"), Some(2));
+        assert_eq!(id_to_int(b"*"), Some(9));
+        assert_eq!(id_to_int(b"c"), Some(66));
+        assert_eq!(id_to_int(b"#%"), Some(472));
+        assert_eq!(id_to_int(b"("), Some(7));
+        assert_eq!(id_to_int(b")"), Some(8));
+    }
+
+    #[test]
+    fn test_find_last() {
+        assert_eq!(find_last(b"1234", b'1'), Some(0));
+        assert_eq!(find_last(b"1234", b'5'), None);
+        assert_eq!(find_last(b"12341", b'1'), Some(4));
+    }
+
+    #[test]
+    fn test_unescape_vcd_value() {
+        assert_eq!(
+            unescape_vcd_value(br"foo\040bar\'baz\\qux").as_ref(),
+            b"foo bar'baz\\qux"
+        );
+        assert_eq!(
+            unescape_vcd_value(br"line1\nline2\tbell\a").as_ref(),
+            b"line1\nline2\tbell\x07"
+        );
+        assert_eq!(unescape_vcd_value(br"\12not\xyz").as_ref(), br"\12not\xyz");
+        assert_eq!(unescape_vcd_value(br"\128oops").as_ref(), br"\128oops");
+        assert_eq!(unescape_vcd_value(br"hex\x20space").as_ref(), b"hex space");
+    }
+
+    #[test]
+    fn test_unescape_borrowed_when_no_escapes() {
+        let input = b"plain";
+        let out = unescape_vcd_value(input);
+        match out {
+            Cow::Borrowed(ptr) => assert!(std::ptr::eq(ptr, input)),
+            Cow::Owned(_) => panic!("expected borrowed slice"),
+        }
+    }
+
+    fn do_test_parse_name(
+        length: u32,
+        full_name: &str,
+        name: &str,
+        index: Option<(i64, i64)>,
+        scopes: &[&str],
+    ) {
+        let (a_name, a_index, a_scopes) = parse_name(full_name.as_bytes(), length).unwrap();
+        assert_eq!(a_name, name);
+        match index {
+            None => assert!(a_index.is_none()),
+            Some((msb, lsb)) => {
+                assert_eq!(a_index.unwrap().msb(), msb);
+                assert_eq!(a_index.unwrap().lsb(), lsb);
+            }
+        }
+        assert_eq!(a_scopes, scopes);
+    }
+
+    #[test]
+    fn test_parse_name() {
+        do_test_parse_name(32, "test", "test", None, &[]);
+        do_test_parse_name(1, "test[0]", "test", Some((0, 0)), &[]);
+        do_test_parse_name(1, "test [0]", "test", Some((0, 0)), &[]);
+        do_test_parse_name(2, "test[1:0]", "test", Some((1, 0)), &[]);
+        do_test_parse_name(2, "test [1:0]", "test", Some((1, 0)), &[]);
+        do_test_parse_name(3, "test[1:-1]", "test", Some((1, -1)), &[]);
+        do_test_parse_name(3, "test [1:-1]", "test", Some((1, -1)), &[]);
+        do_test_parse_name(1, "test[0][0]", "[0]", Some((0, 0)), &["test"]);
+        do_test_parse_name(1, "test[0] [0]", "[0]", Some((0, 0)), &["test"]);
+        do_test_parse_name(1, "test [0] [0]", "[0]", Some((0, 0)), &["test"]);
+        do_test_parse_name(1, "test[3][2][0]", "[2]", Some((0, 0)), &["test", "[3]"]);
+        do_test_parse_name(
+            1,
+            "test[0][3][2][0]",
+            "[2]",
+            Some((0, 0)),
+            &["test", "[0]", "[3]"],
+        );
+        // if the length is not 1-bit, the suffix is parsed as an array index
+        do_test_parse_name(
+            32,
+            "test[0][3][2][0]",
+            "[0]",
+            None,
+            &["test", "[0]", "[3]", "[2]"],
+        );
+        do_test_parse_name(11, "test [10:0]", "test", Some((10, 0)), &[]);
+    }
+}

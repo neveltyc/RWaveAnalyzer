@@ -1,0 +1,25 @@
+# Copyright (c) 2026 neveltyc
+# released under the MIT License (see LICENSE)
+
+[package]
+name = "rwave"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90.0"
+authors = ["neveltyc"]
+description = "AI-agent-friendly VCD/FST waveform analyzer for RTL debug, built on wellen."
+repository = "https://github.com/neveltyc/RWaveAnalyzer"
+license = "MIT"
+keywords = ["vcd", "fst", "waveform", "rtl", "debug"]
+readme = "../../README.md"
+
+# A single binary named `rwave`.
+[[bin]]
+name = "rwave"
+path = "src/main.rs"
+
+[dependencies]
+# Waveform parsing front-end: vendored under vendor/wellen, pinned to 0.23.0.
+wellen = { path = "../../vendor/wellen" }
+
+[dev-dependencies]

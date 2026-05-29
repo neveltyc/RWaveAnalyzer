@@ -1,0 +1,20 @@
+# Cross-compilation linker configuration.
+#
+# Linux static (fully static binary, no libc dependency): the x86_64 musl
+# target links against musl instead of glibc and produces a standalone
+# executable. Requires the `musl-gcc` wrapper (package: musl-tools).
+#
+# Windows: the GNU target cross-links with the MinGW-w64 toolchain
+# (package: gcc-mingw-w64-x86-64), producing a native .exe.
+#
+# Install the target std libraries with:
+#   rustup target add x86_64-unknown-linux-musl x86_64-pc-windows-gnu
+
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+# Statically link everything (this is musl's default, stated explicitly).
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"

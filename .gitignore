@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target
+**/target
+
+# Cargo lock is kept for the binary crate (reproducible builds), so it is NOT
+# ignored. (If this were a library, we'd ignore it.)
+
+# Backtrace / debug
+*.rs.bk
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Simulation scratch (the committed stimulus lives in verify/stimulus/;
+# these are transient build products from regenerating it)
+*.vvp
+/verify/stimulus_src/*.vvp
+
+# Local scratch
+/scratch/
+/tmp/

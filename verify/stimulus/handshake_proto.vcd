@@ -1,0 +1,109 @@
+$date
+	Fri May 29 23:12:26 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module handshake_proto $end
+$var wire 1 ! fire $end
+$var reg 8 " beats [7:0] $end
+$var reg 1 # clk $end
+$var reg 8 $ data [7:0] $end
+$var reg 1 % ready $end
+$var reg 1 & rst_n $end
+$var reg 1 ' valid $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+0'
+0&
+0%
+b0 $
+0#
+b0 "
+0!
+$end
+#5000
+1#
+#10000
+0#
+#12000
+1&
+#15000
+1#
+#20000
+0#
+b10000 $
+1'
+#25000
+1#
+#30000
+1!
+0#
+1%
+#35000
+b1 "
+1#
+#40000
+0#
+b100000 $
+#45000
+b10 "
+1#
+#50000
+0!
+0#
+0%
+#55000
+1#
+#60000
+0#
+#65000
+1#
+#70000
+1!
+0#
+1%
+#75000
+b11 "
+1#
+#80000
+0!
+0#
+0'
+#85000
+1#
+#90000
+1!
+0#
+b110000 $
+1'
+#95000
+b100 "
+1#
+#100000
+0#
+b110001 $
+#105000
+b101 "
+1#
+#110000
+0!
+0#
+0%
+0'
+#115000
+1#
+#120000
+0#
+#125000
+1#
+#130000
+0#

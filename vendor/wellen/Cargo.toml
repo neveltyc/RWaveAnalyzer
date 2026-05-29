@@ -1,0 +1,46 @@
+# Copyright 2023-2024 The Regents of the University of California
+# Copyright 2024-2025 Cornell University
+# released under BSD 3-Clause License
+# author: Kevin Laeufer <laeufer@cornell.edu>
+
+[package]
+name = "wellen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+include = ["Cargo.toml", "LICENSE", "Readme.md", "src/", "benches/"]
+readme = "Readme.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fst-reader.workspace = true
+leb128.workspace = true
+lz4_flex.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+num_enum.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+rustc-hash.workspace = true
+miniz_oxide.workspace = true
+indexmap.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+itertools.workspace = true
+vcd.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+proptest.workspace = true
+bytesize = "2.3"
+rand.workspace = true
+
+
+[features]
+serde1 = ["dep:serde"]

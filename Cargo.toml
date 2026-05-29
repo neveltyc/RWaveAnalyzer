@@ -1,0 +1,54 @@
+# Copyright (c) 2026 neveltyc
+# released under the MIT License (see LICENSE)
+#
+# This workspace bundles the `wellen` waveform-parsing library (BSD-3-Clause,
+# Kevin Laeufer) under vendor/wellen, pinned to version 0.23.0. The
+# [workspace.package] and [workspace.dependencies] tables below reproduce the
+# values that wellen's own workspace manifest provides, so the vendored crate
+# manifest can stay byte-for-byte identical to upstream.
+
+[workspace]
+resolver = "2"
+members = ["crates/rwave", "vendor/wellen", "vendor/fst-reader"]
+default-members = ["crates/rwave"]
+
+[workspace.package]
+version = "0.23.0"
+edition = "2024"
+rust-version = "1.90.0"
+authors = ["Kevin Laeufer <laeufer@berkeley.edu>"]
+description = "Fast VCD and FST library for waveform viewers written in Rust."
+repository = "https://github.com/ekiwi/wellen"
+license = "BSD-3-Clause"
+keywords = ["vcd", "fst", "waveform", "wavedump"]
+
+[workspace.dependencies]
+# Patched vendored copy (off-by-one mask fix); see vendor/fst-reader.
+fst-reader = { path = "vendor/fst-reader" }
+leb128 = "0.2.5"
+lz4_flex = "0.13.0"
+memmap2 = "0.9.10"
+rayon = "1.11.0"
+num_enum = "0.7.6"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+rustc-hash = "2.1"
+miniz_oxide = "0.9"
+indexmap = "2.13"
+smallvec = { version = "1.15.1", features = ["union"] }
+
+# dev dependencies (kept for parity with upstream wellen; unused by rwave)
+itertools = "0.14.0"
+vcd = "0.7.0"
+clap = { version = "4.6", features = ["derive"] }
+indicatif = "0.18"
+proptest = "1.11"
+wellen = { path = "vendor/wellen" }
+rand = "0.10.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,53 @@
+$date
+	Fri May 29 23:12:25 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module xz_tristate $end
+$var wire 4 ! bus [3:0] $end
+$var reg 4 " drive [3:0] $end
+$var reg 1 # flag $end
+$var reg 1 $ oe $end
+$var reg 8 % partial [7:0] $end
+$var reg 1 & sel $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+0&
+bx %
+0$
+0#
+b0 "
+bz !
+$end
+#10000
+b1010 !
+b1010 "
+1$
+#20000
+b1100 !
+b1100 "
+#30000
+bz !
+0$
+#40000
+b1111 %
+#50000
+1&
+#60000
+b1 !
+b1 "
+1$
+#70000
+1#
+#80000
+b10100101 %
+#100000

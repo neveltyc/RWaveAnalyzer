@@ -1,0 +1,887 @@
+// Copyright 2023-2024 The Regents of the University of California
+// Copyright 2024-2025 Cornell University
+// released under BSD 3-Clause License
+// author: Kevin Laeufer <laeufer@cornell.edu>
+
+use crate::hierarchy::*;
+use crate::signal::{
+    FixedWidthEncoding, Signal, SignalSource, SignalSourceImplementation, States, TimeTableIdx,
+};
+use crate::stream::{Filter, StreamEncoder};
+use crate::wavemem::{check_if_changed_and_truncate, write_n_state_from_ascii};
+use crate::{FileFormat, LoadOptions, SignalValueRef, Time, TimeTable, WellenError};
+use fst_reader::*;
+use rustc_hash::FxHashMap;
+use std::io::{BufRead, Seek};
+
+pub type Result<T> = std::result::Result<T, WellenError>;
+
+pub fn read_header<R: BufRead + Seek>(
+    input: R,
+    _options: &LoadOptions,
+) -> Result<(Hierarchy, ReadBodyContinuation<R>)> {
+    let mut reader = FstReader::open_and_read_time_table(input)?;
+    let hierarchy = read_hierarchy(&mut reader)?;
+    let cont = ReadBodyContinuation(reader);
+    Ok((hierarchy, cont))
+}
+pub fn read_header_from_file<P: AsRef<std::path::Path>>(
+    filename: P,
+    _options: &LoadOptions,
+) -> Result<(
+    Hierarchy,
+    ReadBodyContinuation<std::io::BufReader<std::fs::File>>,
+)> {
+    let input = std::io::BufReader::new(std::fs::File::open(filename.as_ref())?);
+    let mut reader = match FstReader::open_and_read_time_table(input) {
+        Ok(header) => header,
+        Err(ReaderError::MissingGeometry() | ReaderError::MissingHierarchy()) => {
+            // Geometric block or hierarchy block missing.
+            // This generally indicates that the FST writing process was interrupted.
+            // Thus, we try to load an external hierarchy file.
+            let input = std::io::BufReader::new(std::fs::File::open(filename.as_ref())?);
+            let mut hierarchy_filename = filename.as_ref().to_path_buf();
+            hierarchy_filename.set_extension("fst.hier");
+            let hierarchy = std::io::BufReader::new(std::fs::File::open(hierarchy_filename)?);
+            FstReader::open_incomplete_and_read_time_table(input, hierarchy)?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let hierarchy = read_hierarchy(&mut reader)?;
+    let cont = ReadBodyContinuation(reader);
+    Ok((hierarchy, cont))
+}
+pub fn read_body<R: BufRead + Seek + Sync + Send + 'static>(
+    data: ReadBodyContinuation<R>,
+) -> Result<(SignalSource, TimeTable)> {
+    let time_table = data.0.get_time_table().unwrap().to_vec();
+    let reader = data.0;
+    let db = FstWaveDatabase::new(reader);
+    let boxed_db = Box::new(db);
+    let source = SignalSource::new(boxed_db);
+    Ok((source, time_table))
+}
+
+pub struct ReadBodyContinuation<R: BufRead + Seek>(FstReader<R>);
+
+struct FstWaveDatabase<R: BufRead + Seek> {
+    reader: FstReader<R>,
+}
+
+impl<R: BufRead + Seek> FstWaveDatabase<R> {
+    fn new(reader: FstReader<R>) -> Self {
+        FstWaveDatabase { reader }
+    }
+}
+
+impl<R: BufRead + Seek + Sync + Send> SignalSourceImplementation for FstWaveDatabase<R> {
+    fn load_signals(
+        &mut self,
+        ids: &[SignalRef],
+        types: &[SignalEncoding],
+        _multi_threaded: bool,
+    ) -> Vec<Signal> {
+        // create a FST filter
+        let fst_ids = ids
+            .iter()
+            .map(|ii| FstSignalHandle::from_index(ii.index()))
+            .collect::<Vec<_>>();
+        let filter = FstFilter::filter_signals(fst_ids);
+
+        // lookup data structure for time table indices
+        let tt = self.reader.get_time_table().unwrap().to_vec();
+        let mut time_table = tt.iter().enumerate();
+        let mut index_and_time = time_table.next().unwrap();
+
+        // store signals
+        let mut signals = ids
+            .iter()
+            .zip(types.iter())
+            .map(|(id, tpe)| SignalWriter::new(*id, *tpe))
+            .collect::<Vec<_>>();
+        let idx_to_pos: FxHashMap<usize, usize> = FxHashMap::from_iter(
+            ids.iter()
+                .zip(types.iter())
+                .map(|(r, _)| r.index())
+                .enumerate()
+                .map(|(pos, idx)| (idx, pos)),
+        );
+        let callback = |time: u64, handle: FstSignalHandle, value: FstSignalValue| {
+            // determine time index
+            while *(index_and_time.1) < time {
+                index_and_time = time_table.next().unwrap();
+            }
+            let time_idx = index_and_time.0 as TimeTableIdx;
+            debug_assert_eq!(*index_and_time.1, time);
+            let signal_pos = idx_to_pos[&handle.get_index()];
+            signals[signal_pos].add_change(time_idx, &handle, &value);
+        };
+
+        self.reader.read_signals(&filter, callback).unwrap();
+        signals.into_iter().map(|w| w.finish()).collect()
+    }
+    fn print_statistics(&self) {
+        println!("FST backend currently has not statistics to print.");
+    }
+}
+
+struct SignalWriter {
+    tpe: SignalEncoding,
+    id: SignalRef,
+    /// used to check that everything is going well
+    handle: FstSignalHandle,
+    data_bytes: Vec<u8>,
+    strings: Vec<String>,
+    time_indices: Vec<TimeTableIdx>,
+    max_states: States,
+}
+
+impl SignalWriter {
+    fn new(id: SignalRef, tpe: SignalEncoding) -> Self {
+        Self {
+            tpe,
+            id,
+            handle: FstSignalHandle::from_index(id.index()),
+            data_bytes: Vec::new(),
+            strings: Vec::new(),
+            time_indices: Vec::new(),
+            max_states: States::default(),
+        }
+    }
+
+    fn add_change(
+        &mut self,
+        time_idx: TimeTableIdx,
+        handle: &FstSignalHandle,
+        value: &FstSignalValue,
+    ) {
+        debug_assert_eq!(*handle, self.handle);
+        if let Some(prev_idx) = self.time_indices.last() {
+            debug_assert!(*prev_idx <= time_idx);
+        }
+        match value {
+            FstSignalValue::String(value) => match self.tpe {
+                SignalEncoding::String => {
+                    // map characters from ISO-8859-1 to UTF-8 by casting each byte to a char.
+                    let str_value = value
+                        .iter()
+                        .map(|b| *b as char)
+                        .collect::<String>()
+                        .to_string();
+                    // check to see if the value actually changed
+                    let changed = self.strings.last() != Some(&str_value);
+                    if changed {
+                        self.strings.push(str_value);
+                        self.time_indices.push(time_idx);
+                    }
+                }
+                SignalEncoding::BitVector(0) => {
+                    debug_assert!(
+                        value.len() <= 1,
+                        "event changes carry no value, or a 1-bit value"
+                    );
+                    // all we do is note the time of the event, there is no data to save
+                    self.time_indices.push(time_idx);
+                }
+                SignalEncoding::BitVector(bits) => {
+                    debug_assert_eq!(
+                        value.len(),
+                        bits as usize,
+                        "{}",
+                        String::from_utf8_lossy(value)
+                    );
+                    let local_encoding = States::from_ascii(value).unwrap_or_else(|| {
+                        panic!(
+                            "Unexpected signal value: {}",
+                            String::from_utf8_lossy(value)
+                        )
+                    });
+
+                    let signal_states = States::join(self.max_states, local_encoding);
+                    if signal_states != self.max_states {
+                        // With FST we do not know how many states the signal needs, thus we first assume
+                        // the minimal number of states. If that turns out to be wrong, we go back and
+                        // expand the existing data.
+                        let num_prev_entries = self.time_indices.len();
+                        if !self.data_bytes.is_empty() {
+                            self.data_bytes = expand_entries(
+                                self.max_states,
+                                signal_states,
+                                &self.data_bytes,
+                                num_prev_entries,
+                                bits,
+                            );
+                        } else {
+                            debug_assert_eq!(num_prev_entries, 0);
+                        }
+                        self.max_states = signal_states;
+                    }
+
+                    let (len, has_meta) = get_len_and_meta(signal_states, bits);
+                    let meta_data = (local_encoding as u8) << 6;
+                    let (local_len, local_has_meta) = get_len_and_meta(local_encoding, bits);
+
+                    if local_len == len && local_has_meta == has_meta {
+                        // same meta-data location and length as the maximum
+                        if has_meta {
+                            self.data_bytes.push(meta_data);
+                            write_n_state_from_ascii(
+                                local_encoding,
+                                value,
+                                &mut self.data_bytes,
+                                None,
+                            );
+                        } else {
+                            write_n_state_from_ascii(
+                                local_encoding,
+                                value,
+                                &mut self.data_bytes,
+                                Some(meta_data),
+                            );
+                        }
+                    } else {
+                        // smaller encoding than the maximum
+                        self.data_bytes.push(meta_data);
+                        if has_meta {
+                            push_zeros(&mut self.data_bytes, len - local_len);
+                        } else {
+                            push_zeros(&mut self.data_bytes, len - local_len - 1);
+                        }
+                        write_n_state_from_ascii(local_encoding, value, &mut self.data_bytes, None);
+                    }
+
+                    let bytes_per_entry = get_bytes_per_entry(len, has_meta);
+                    if check_if_changed_and_truncate(bytes_per_entry, &mut self.data_bytes) {
+                        self.time_indices.push(time_idx);
+                    }
+                }
+                SignalEncoding::Real => panic!(
+                    "Expecting reals, but got: {}",
+                    String::from_utf8_lossy(value)
+                ),
+            },
+            FstSignalValue::Real(value) => {
+                debug_assert_eq!(self.tpe, SignalEncoding::Real);
+                self.data_bytes.extend_from_slice(&value.to_le_bytes());
+                if check_if_changed_and_truncate(8, &mut self.data_bytes) {
+                    self.time_indices.push(time_idx);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Signal {
+        match self.tpe {
+            SignalEncoding::String => {
+                debug_assert!(self.data_bytes.is_empty());
+                Signal::new_var_len(self.id, self.time_indices, self.strings)
+            }
+            SignalEncoding::Real => {
+                debug_assert!(self.strings.is_empty());
+                Signal::new_fixed_len(
+                    self.id,
+                    self.time_indices,
+                    FixedWidthEncoding::Real,
+                    8,
+                    self.data_bytes,
+                )
+            }
+            SignalEncoding::BitVector(0) => {
+                debug_assert!(self.data_bytes.is_empty());
+                debug_assert!(self.strings.is_empty());
+                Signal::new_fixed_len(
+                    self.id,
+                    self.time_indices,
+                    FixedWidthEncoding::Event,
+                    0,
+                    self.data_bytes,
+                )
+            }
+            SignalEncoding::BitVector(width) => {
+                debug_assert!(self.strings.is_empty());
+                let (bytes, meta_byte) = get_len_and_meta(self.max_states, width);
+                let encoding = FixedWidthEncoding::BitVector {
+                    max_states: self.max_states,
+                    width,
+                    meta_byte,
+                };
+                Signal::new_fixed_len(
+                    self.id,
+                    self.time_indices,
+                    encoding,
+                    get_bytes_per_entry(bytes, meta_byte) as u32,
+                    self.data_bytes,
+                )
+            }
+        }
+    }
+}
+
+#[inline]
+pub fn get_len_and_meta(states: States, bits: u32) -> (usize, bool) {
+    let len = states.bytes_required(bits);
+    let has_meta = (states != States::Two) && (bits).is_multiple_of(states.bits_in_a_byte());
+    (len, has_meta)
+}
+
+#[inline]
+pub fn get_bytes_per_entry(len: usize, has_meta: bool) -> usize {
+    if has_meta { len + 1 } else { len }
+}
+
+const META_MASK: u8 = 3 << 6;
+
+fn expand_entries(from: States, to: States, old: &[u8], entries: usize, bits: u32) -> Vec<u8> {
+    let (from_len, from_meta) = get_len_and_meta(from, bits);
+    let from_bytes_per_entry = get_bytes_per_entry(from_len, from_meta);
+    let (to_len, to_meta) = get_len_and_meta(to, bits);
+
+    if from_len == to_len && from_meta == to_meta {
+        return Vec::from(old); // no change necessary
+    }
+
+    let to_bytes_per_entry = get_bytes_per_entry(to_len, to_meta);
+    debug_assert!(
+        !from_meta || to_meta,
+        "meta-bytes are only added, never removed when expanding!"
+    );
+    let padding_len = if !to_meta {
+        to_len - from_len - 1 // subtract one to account for meta data
+    } else {
+        to_len - from_len
+    };
+
+    let mut data = Vec::with_capacity(entries * to_bytes_per_entry);
+    for value in old.chunks(from_bytes_per_entry) {
+        // meta handling
+        let meta_data = if from == States::Two {
+            (States::Two as u8) << 6
+        } else {
+            value[0] & META_MASK
+        };
+        // we can always push the meta byte, just need to adjust the padding
+        data.push(meta_data);
+        push_zeros(&mut data, padding_len);
+        // copy over the actual values
+        if from_meta {
+            data.extend_from_slice(&value[1..]);
+        } else if from == States::Two {
+            data.extend_from_slice(value);
+        } else {
+            // mask out meta data from MSB
+            data.push(value[0] & !META_MASK);
+            data.extend_from_slice(&value[1..]);
+        }
+    }
+    debug_assert_eq!(
+        data.len(),
+        to_bytes_per_entry * entries,
+        "we should always use all the bytes that we precalculated"
+    );
+    data
+}
+
+pub fn push_zeros(vec: &mut Vec<u8>, len: usize) {
+    for _ in 0..len {
+        vec.push(0);
+    }
+}
+
+fn convert_scope_tpe(tpe: FstScopeType) -> ScopeType {
+    match tpe {
+        FstScopeType::Module => ScopeType::Module,
+        FstScopeType::Task => ScopeType::Task,
+        FstScopeType::Function => ScopeType::Function,
+        FstScopeType::Begin => ScopeType::Begin,
+        FstScopeType::Fork => ScopeType::Fork,
+        FstScopeType::Generate => ScopeType::Generate,
+        FstScopeType::Struct => ScopeType::Struct,
+        FstScopeType::Union => ScopeType::Union,
+        FstScopeType::Class => ScopeType::Class,
+        FstScopeType::Interface => ScopeType::Interface,
+        FstScopeType::Package => ScopeType::Package,
+        FstScopeType::Program => ScopeType::Program,
+        FstScopeType::VhdlArchitecture => ScopeType::VhdlArchitecture,
+        FstScopeType::VhdlProcedure => ScopeType::VhdlProcedure,
+        FstScopeType::VhdlFunction => ScopeType::VhdlFunction,
+        FstScopeType::VhdlRecord => ScopeType::VhdlRecord,
+        FstScopeType::VhdlProcess => ScopeType::VhdlProcess,
+        FstScopeType::VhdlBlock => ScopeType::VhdlBlock,
+        FstScopeType::VhdlForGenerate => ScopeType::VhdlForGenerate,
+        FstScopeType::VhdlIfGenerate => ScopeType::VhdlIfGenerate,
+        FstScopeType::VhdlGenerate => ScopeType::VhdlGenerate,
+        FstScopeType::VhdlPackage => ScopeType::VhdlPackage,
+        FstScopeType::SvArray => ScopeType::SvArray,
+        FstScopeType::AttributeBegin
+        | FstScopeType::AttributeEnd
+        | FstScopeType::VcdScope
+        | FstScopeType::VcdUpScope => unreachable!("unexpected scope type!"),
+    }
+}
+
+fn convert_var_tpe(tpe: FstVarType) -> VarType {
+    match tpe {
+        FstVarType::Wire => VarType::Wire,
+        FstVarType::Event => VarType::Event,
+        FstVarType::Integer => VarType::Integer,
+        FstVarType::Parameter => VarType::Parameter,
+        FstVarType::Real => VarType::Real,
+        FstVarType::RealParameter => VarType::RealParameter,
+        FstVarType::Reg => VarType::Reg,
+        FstVarType::Supply0 => VarType::Supply0,
+        FstVarType::Supply1 => VarType::Supply1,
+        FstVarType::Time => VarType::Time,
+        FstVarType::Tri => VarType::Tri,
+        FstVarType::TriAnd => VarType::TriAnd,
+        FstVarType::TriOr => VarType::TriOr,
+        FstVarType::TriReg => VarType::TriReg,
+        FstVarType::Tri0 => VarType::Tri0,
+        FstVarType::Tri1 => VarType::Tri1,
+        FstVarType::Wand => VarType::WAnd,
+        FstVarType::Wor => VarType::WOr,
+        FstVarType::Port => VarType::Port,
+        FstVarType::SparseArray => VarType::SparseArray,
+        FstVarType::RealTime => VarType::RealTime,
+        FstVarType::GenericString => VarType::String,
+        FstVarType::Bit => VarType::Bit,
+        FstVarType::Logic => VarType::Logic,
+        FstVarType::Int => VarType::Int,
+        FstVarType::ShortInt => VarType::ShortInt,
+        FstVarType::LongInt => VarType::LongInt,
+        FstVarType::Byte => VarType::Byte,
+        FstVarType::Enum => VarType::Enum,
+        FstVarType::ShortReal => VarType::ShortReal,
+    }
+}
+
+fn convert_var_direction(tpe: FstVarDirection) -> VarDirection {
+    match tpe {
+        FstVarDirection::Implicit => VarDirection::Implicit,
+        FstVarDirection::Input => VarDirection::Input,
+        FstVarDirection::Output => VarDirection::Output,
+        FstVarDirection::InOut => VarDirection::InOut,
+        FstVarDirection::Buffer => VarDirection::Buffer,
+        FstVarDirection::Linkage => VarDirection::Linkage,
+    }
+}
+
+/// GHDL does not seem to encode any actual information in the VHDL variable type.
+/// Variables are always Signal or None.
+pub fn deal_with_vhdl_var_type(tpe: FstVhdlVarType, var_name: &str) {
+    if !matches!(tpe, FstVhdlVarType::None | FstVhdlVarType::Signal) {
+        println!("INFO: detected a VHDL Var Type that is not Signal!: {tpe:?} for {var_name}");
+    }
+}
+
+/// GHDL only uses a small combination of VCD variable and VHDL data types.
+/// Here we merge them together into a single VarType.
+pub fn merge_vhdl_data_and_var_type(vcd: VarType, vhdl: FstVhdlDataType) -> VarType {
+    match vhdl {
+        FstVhdlDataType::None => vcd,
+        FstVhdlDataType::Boolean => VarType::Boolean,
+        FstVhdlDataType::Bit => VarType::Bit,
+        FstVhdlDataType::Vector => VarType::BitVector,
+        FstVhdlDataType::ULogic => VarType::StdULogic,
+        FstVhdlDataType::ULogicVector => VarType::StdULogicVector,
+        FstVhdlDataType::Logic => VarType::StdLogic,
+        FstVhdlDataType::LogicVector => VarType::StdLogicVector,
+        FstVhdlDataType::Unsigned => {
+            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            vcd
+        }
+        FstVhdlDataType::Signed => {
+            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            vcd
+        }
+        FstVhdlDataType::Integer => VarType::Integer,
+        FstVhdlDataType::Real => VarType::Real,
+        FstVhdlDataType::Natural => VarType::Integer,
+        FstVhdlDataType::Positive => VarType::Integer,
+        FstVhdlDataType::Time => VarType::Time,
+        FstVhdlDataType::Character => {
+            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            vcd
+        }
+        FstVhdlDataType::String => VarType::String,
+    }
+}
+
+fn convert_timescale(exponent: i8) -> Timescale {
+    if exponent >= 0 {
+        Timescale::new(10u32.pow(exponent as u32), TimescaleUnit::Seconds)
+    } else if exponent >= -3 {
+        Timescale::new(
+            10u32.pow((exponent + 3) as u32),
+            TimescaleUnit::MilliSeconds,
+        )
+    } else if exponent >= -6 {
+        Timescale::new(
+            10u32.pow((exponent + 6) as u32),
+            TimescaleUnit::MicroSeconds,
+        )
+    } else if exponent >= -9 {
+        Timescale::new(10u32.pow((exponent + 9) as u32), TimescaleUnit::NanoSeconds)
+    } else if exponent >= -12 {
+        Timescale::new(
+            10u32.pow((exponent + 12) as u32),
+            TimescaleUnit::PicoSeconds,
+        )
+    } else if exponent >= -15 {
+        Timescale::new(
+            10u32.pow((exponent + 15) as u32),
+            TimescaleUnit::FemtoSeconds,
+        )
+    } else if exponent >= -18 {
+        Timescale::new(
+            10u32.pow((exponent + 18) as u32),
+            TimescaleUnit::AttoSeconds,
+        )
+    } else if exponent >= -21 {
+        Timescale::new(
+            10u32.pow((exponent + 21) as u32),
+            TimescaleUnit::ZeptoSeconds,
+        )
+    } else {
+        panic!("Unexpected timescale exponent: {exponent}");
+    }
+}
+
+#[derive(Debug)]
+/// Represents an attribute which can from a FST or a VCD with extensions as generated by GTKWave or nvc.
+pub enum Attribute {
+    /// nvc: `misc 03 /home/oscar/test.vhdl 1`
+    SourceLoc(HierarchyStringId, u64, bool),
+    /// nvc: `misc 02 STD_LOGIC_VECTOR 1031`
+    VhdlTypeInfo(String, FstVhdlVarType, FstVhdlDataType),
+    Enum(EnumTypeId),
+    /// Generated by Verilator through a FST Attribute.
+    PackInfo {
+        pack: Option<ScopePackInfo>,
+        #[allow(dead_code)]
+        members: u64,
+    },
+    /// Generated by Verilator through a FST Attribute
+    ArrayInfo {
+        pack: Option<ScopePackInfo>,
+        #[allow(dead_code)]
+        left: i32,
+        #[allow(dead_code)]
+        right: i32,
+    },
+}
+
+pub fn parse_var_attributes(
+    attributes: &mut Vec<Attribute>,
+    mut var_type: VarType,
+    var_name: &str,
+) -> crate::vcd::Result<(Option<String>, VarType, Option<EnumTypeId>)> {
+    let mut type_name = None;
+    let mut enum_type = None;
+    while let Some(attr) = attributes.pop() {
+        match attr {
+            Attribute::SourceLoc(_, _, _) => {
+                debug_assert!(false, "Unexpected attribute on a variable!");
+            }
+            Attribute::VhdlTypeInfo(name, vhdl_var_type, vhdl_data_type) => {
+                type_name = Some(name);
+                // For now we ignore the var type since GHDL seems to just always set it to Signal.
+                // Their code does not use any other var type.
+                deal_with_vhdl_var_type(vhdl_var_type, var_name);
+
+                // We merge the info of the VCD var type and the vhdl data type
+                var_type = merge_vhdl_data_and_var_type(var_type, vhdl_data_type);
+            }
+            Attribute::Enum(type_id) => enum_type = Some(type_id),
+            other => {
+                todo!("deal with {other:?} on {var_name}")
+            }
+        }
+    }
+    Ok((type_name, var_type, enum_type))
+}
+
+pub fn parse_scope_attributes(
+    attributes: &mut Vec<Attribute>,
+    h: &mut HierarchyBuilder,
+) -> crate::vcd::Result<(
+    Option<SourceLocId>,
+    Option<SourceLocId>,
+    Option<ScopePackInfo>,
+)> {
+    let mut declaration_source = None;
+    let mut instance_source = None;
+    let mut pack_info = None;
+    while let Some(attr) = attributes.pop() {
+        match attr {
+            Attribute::SourceLoc(path, line, is_instantiation) => {
+                if is_instantiation {
+                    instance_source = Some(h.add_source_loc(path, line, true));
+                } else {
+                    declaration_source = Some(h.add_source_loc(path, line, false));
+                }
+            }
+            Attribute::PackInfo { pack, .. } => {
+                pack_info = pack;
+            }
+            Attribute::ArrayInfo { pack, .. } => {
+                pack_info = pack;
+            }
+            Attribute::VhdlTypeInfo(_, _, _) | Attribute::Enum(_) => {
+                debug_assert!(false, "Unexpected attribute on a scope!");
+            }
+        }
+    }
+    Ok((declaration_source, instance_source, pack_info))
+}
+
+fn read_hierarchy<F: BufRead + Seek>(reader: &mut FstReader<F>) -> Result<Hierarchy> {
+    let mut h = HierarchyBuilder::new(FileFormat::Fst);
+    // load meta-data
+    let fst_header = reader.get_header();
+    h.set_version(fst_header.version.trim().to_string());
+    h.set_date(fst_header.date.trim().to_string());
+    h.set_timescale(convert_timescale(fst_header.timescale_exponent));
+
+    let mut path_names = FxHashMap::default();
+    let mut enums = FxHashMap::default();
+    let mut attributes = Vec::new();
+
+    let cb = |entry: FstHierarchyEntry| {
+        match entry {
+            FstHierarchyEntry::Scope {
+                tpe,
+                name,
+                component,
+            } => {
+                let tpe = convert_scope_tpe(tpe);
+                let (declaration_source, instance_source, pack) =
+                    parse_scope_attributes(&mut attributes, &mut h).unwrap();
+                let name_id = h.add_string(name.into());
+                let component_id = h.add_string(component.into());
+                h.add_scope(
+                    name_id,
+                    Some(component_id),
+                    tpe,
+                    pack,
+                    declaration_source,
+                    instance_source,
+                    false,
+                );
+            }
+            FstHierarchyEntry::UpScope => h.pop_scope(),
+            FstHierarchyEntry::Var {
+                tpe,
+                direction,
+                name,
+                length,
+                handle,
+                ..
+            } => {
+                // we derive the signal type from the fst tpe directly, the VHDL type should never factor in!
+                let signal_tpe = match tpe {
+                    FstVarType::GenericString => SignalEncoding::String,
+                    FstVarType::Real
+                    | FstVarType::RealTime
+                    | FstVarType::RealParameter
+                    | FstVarType::ShortReal => SignalEncoding::Real,
+                    FstVarType::Event => SignalEncoding::BitVector(0),
+                    _ => SignalEncoding::BitVector(length),
+                };
+                h.add_var_raw_name(
+                    name.as_bytes(),
+                    length,
+                    convert_var_tpe(tpe),
+                    &mut attributes,
+                    signal_tpe,
+                    convert_var_direction(direction),
+                    SignalRef::from_index(handle.get_index()).unwrap(),
+                )
+                .unwrap();
+            }
+            FstHierarchyEntry::PathName { id, name } => {
+                let string_ref = h.add_string(name.into());
+                path_names.insert(id, string_ref);
+            }
+            FstHierarchyEntry::SourceStem {
+                is_instantiation,
+                path_id,
+                line,
+            } => {
+                let path = path_names[&path_id];
+                attributes.push(Attribute::SourceLoc(path, line, is_instantiation));
+            }
+            FstHierarchyEntry::Comment { string } => {
+                h.add_comment(string);
+            }
+            FstHierarchyEntry::EnumTable {
+                name,
+                handle,
+                mapping,
+            } => {
+                let mapping = mapping
+                    .into_iter()
+                    .map(|(a, b)| (h.add_string(a.into()), h.add_string(b.into())))
+                    .collect::<Vec<_>>();
+                let name = h.add_string(name.into());
+                let enum_ref = h.add_enum_type(name, mapping);
+                // remember enum table by handle
+                enums.insert(handle, enum_ref);
+            }
+            FstHierarchyEntry::EnumTableRef { handle } => {
+                attributes.push(Attribute::Enum(enums[&handle]));
+            }
+            FstHierarchyEntry::VhdlVarInfo {
+                type_name,
+                var_type,
+                data_type,
+            } => {
+                attributes.push(Attribute::VhdlTypeInfo(type_name, var_type, data_type));
+            }
+            FstHierarchyEntry::AttributeEnd => {
+                // ignore
+                // So far the only simulator we know that uses this attribute is
+                // `nvc` which calls `fstWriterSetAttrEnd` at the end of declaring an array.
+                // This does not provide us with any additional information though since we
+                // deduce array entries from the variable names.
+            }
+            FstHierarchyEntry::Array {
+                name,
+                array_type,
+                left,
+                right,
+            } => {
+                if name == "bounds" {
+                    // this is what verilator generates
+                    let pack = fst_array_type_to_pack_info(array_type);
+                    attributes.push(Attribute::ArrayInfo { pack, left, right });
+                } else {
+                    todo!(
+                        "Unknown `name` field for array attribute. Expected `bounds` got `{name}`"
+                    );
+                }
+            }
+            FstHierarchyEntry::Pack {
+                name,
+                pack_type,
+                value,
+            } => {
+                if name == "members" {
+                    // this is what verilator generates
+                    let pack = fst_pack_type_to_pack_info(pack_type);
+                    attributes.push(Attribute::PackInfo {
+                        pack,
+                        members: value,
+                    });
+                } else {
+                    todo!(
+                        "Unknown `name` field for pack attribute. Expected `members` got `{name}`"
+                    );
+                }
+            }
+            FstHierarchyEntry::SVEnum {
+                name,
+                enum_type,
+                value,
+            } => {
+                todo!("Add support for SVEnum {name} {enum_type:?} {value}")
+            }
+        };
+    };
+    reader.read_hierarchy(cb)?;
+    Ok(h.finish())
+}
+
+fn fst_pack_type_to_pack_info(t: FstPackType) -> Option<ScopePackInfo> {
+    match t {
+        FstPackType::None => None,
+        FstPackType::Unpacked => Some(ScopePackInfo::Unpacked),
+        FstPackType::Packed => Some(ScopePackInfo::Packed),
+        FstPackType::TaggedPacked => Some(ScopePackInfo::TaggedPacked),
+    }
+}
+
+fn fst_array_type_to_pack_info(t: FstArrayType) -> Option<ScopePackInfo> {
+    match t {
+        FstArrayType::None => None,
+        FstArrayType::Unpacked => Some(ScopePackInfo::Unpacked),
+        FstArrayType::Packed => Some(ScopePackInfo::Packed),
+        FstArrayType::Sparse => Some(ScopePackInfo::Sparse),
+    }
+}
+
+// FST Streaming
+
+pub fn stream_body<R: BufRead + Seek, C: FnMut(Time, SignalRef, SignalValueRef<'_>)>(
+    data: &mut ReadBodyContinuation<R>,
+    mut enc: StreamEncoder<C>,
+    filter: &Filter,
+) -> Result<()> {
+    let reader = &mut data.0;
+
+    // convert wellen to FST filter
+    let fst_ids = filter.signals.map(|ids| {
+        ids.iter()
+            .map(|ii| FstSignalHandle::from_index(ii.index()))
+            .collect::<Vec<_>>()
+    });
+
+    let fst_filter = FstFilter {
+        start: filter.start,
+        end: filter.end,
+        include: fst_ids,
+    };
+
+    // map fst callback to wellen callback
+    let fst_callback = |time: u64, handle: FstSignalHandle, value: FstSignalValue| {
+        let signal_id = handle.get_index() as u64;
+        enc.fst_value_change(time, signal_id, &value);
+    };
+
+    reader.read_signals(&fst_filter, fst_callback)?;
+    enc.finish();
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_expand_entries() {
+        // this test was inspired by issue 77 on the wellen repository
+        let from = States::Four;
+        let to = States::Nine;
+        let bits = 4;
+        let entries = 1;
+        // 1 << 6: meta_value = 1 ==> 4-states
+        // 0xff: "zzzz"
+        let old = [1 << 6, 0xff];
+
+        // "zzzz" stays encoded as a single byte as a 2-state value
+        // however, a padding byte will be introduced to accommodate for 9-state values
+        let expected = [1 << 6, 0, 0xff];
+
+        let new = expand_entries(from, to, &old, entries, bits);
+        assert_eq!(new, expected);
+    }
+
+    #[test]
+    fn test_expand_entries_combined_meta() {
+        // testing a case where the meta data is shared in a byte with the bits
+        let from = States::Four;
+        let to = States::Nine;
+        let bits = 3;
+        let entries = 1;
+        // 1 << 6: meta_value = 1 ==> 4-states
+        // 0x3f: "zzz"
+        let old = [1 << 6 | 0x3f];
+
+        // "zzz" stays encoded as a single byte as a 2-state value
+        // however, a padding byte will be introduced to accommodate for 9-state values
+        let expected = [1 << 6, 0x3f];
+
+        let new = expand_entries(from, to, &old, entries, bits);
+        assert_eq!(new, expected);
+    }
+}
