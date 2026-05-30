@@ -78,12 +78,52 @@ command-line surface mirrors the reference `VCD_ANALYZER` Python tool.
   an index-out-of-bounds in the bitmask. The vendored copy sizes the mask to
   also cover the largest handle present in the filter, eliminating the crash.
   This is the only functional change to the vendored parser.
+- **Unit-scaled time at the i64 boundary silently saturated.** `parse_time`
+  rejected `rounded > MAX_TIME_TICKS as f64`, but `i64::MAX as f64` rounds *up*
+  to `2^63`, so a `rounded` value equal to that f64 was let through and
+  silently cast (saturating) to `i64::MAX` — off by one or more from the
+  intended tick count. Tightened to `>=` and added a regression test.
+- **`search` produced no output when conditions held throughout `[--begin,
+  --end]` but no events fell strictly past `--begin`.** The interval/segment
+  loop's initial-condition check fired only on the first event with
+  `t > t0`; if the stream was exhausted by the `t <= t0` early-continue, the
+  check never ran and the final-emit guard saw `active == false`. Now run the
+  initial check at end-of-stream too so a file-wide-true condition reports the
+  full `[t0, t1)` interval.
+- **`--version`/`--help` could be triggered by a flag *value*.** The pre-scan
+  walked every argv token unconditionally, so `rwave info x.vcd --filter
+  --version` printed the version string instead of "missing value for
+  --filter". The pre-scan now skips tokens that follow a known value-taking
+  flag (`--limit`, `--filter`, `--begin`, `--end`, `--at`, `--condition`,
+  `--show`, `--changed`).
+- **`pyrepr` (Python-style repr quoting for error messages) did not match
+  Python on backslashes or ASCII control characters.** The double-quote branch
+  emitted backslashes verbatim and neither branch escaped newline/tab/CR/DEL.
+  Now escapes `\\`, `\n`, `\r`, `\t`, and ASCII `C0` + `DEL` to `\xNN` in both
+  quoting modes, matching CPython's `unicode_repr`. Restores the
+  "byte-identical to the Python analyzer" promise for error text containing
+  those characters.
+- **`condition_match` treated weak-strength logic levels `h`/`l` as "unknown"
+  for the `!=` path,** disagreeing with `normalize_4state` (which maps
+  `h→1`, `l→0`) and `is_clean_binary` (which accepts them). So a signal
+  carrying `1h` against `--condition sig!=0` silently returned false even
+  though `1h` resolves to logical `11` (=3). `has_unknown` now treats `h`/`l`
+  as defined throughout `search --condition`; only `x`/`z` (and any other
+  non-binary, non-strength character) poison the `!=` path. See README
+  "Known differences" — `rwave` consistently treats `h`/`l` as their VCD-spec
+  1/0 values, where the Python reference's `val_to_int` rejects them.
+- **`condition_match` returned false unconditionally for `!=` against
+  non-logic signals** (real, string, event), because `has_unknown(None)` was
+  hard-wired to `true`. So `--condition sig!=0` on a real-valued signal
+  carrying `3.14` was silently false. Non-bit values now bypass the unknown
+  check and fall through to the literal compare inside `value_matches`, so
+  `!=` correctly mirrors `==` for those signal kinds.
 
 ### Testing
 
-- Five Verilog testbenches plus two FST-focused designs, compiled to matched
-  VCD+FST pairs. `$date`/`$version` blocks are normalized at generation time so
-  committed stimuli carry no host or wall-clock metadata.
+- Seven Verilog testbenches compiled to matched VCD+FST pairs. `$date` and
+  `$version` blocks are normalized at generation time so committed stimuli
+  carry no host or wall-clock metadata.
 - `verify/run.sh` self-test harness covering command smoke and VCD/FST output
   parity on the bundled stimulus.
 - `verify/differential.sh` parity check against the reference Python tool;

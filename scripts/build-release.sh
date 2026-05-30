@@ -12,7 +12,7 @@
 #
 #   one-time setup (macOS):
 #     brew install rustup zig
-#     export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+#     export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 #     rustup default stable
 #     cargo install --locked cargo-zigbuild
 #     rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
@@ -36,8 +36,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Make Homebrew's keg-only rustup and the cargo bin dir discoverable even when
-# the user's shell rc hasn't been re-sourced.
-export PATH="/opt/homebrew/opt/rustup/bin:${HOME}/.cargo/bin:${PATH}"
+# the user's shell rc hasn't been re-sourced. Covers Apple Silicon
+# (/opt/homebrew) and Intel mac (/usr/local) prefixes; no-op on other hosts.
+for _d in /opt/homebrew/opt/rustup/bin /usr/local/opt/rustup/bin "${HOME}/.cargo/bin"; do
+  if [ -d "$_d" ]; then
+    case ":${PATH}:" in *":${_d}:"*) ;; *) PATH="${_d}:${PATH}" ;; esac
+  fi
+done
+unset _d
+export PATH
 
 # ---- args ----------------------------------------------------------------
 TARGETS_INPUT=""

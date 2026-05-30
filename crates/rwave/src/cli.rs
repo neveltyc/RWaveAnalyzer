@@ -101,21 +101,37 @@ Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is ra
     )
 }
 
+/// Flags that consume the following argv token as their value. Used by the
+/// `--version` / `--help` pre-scan to avoid mistaking a flag *value* for a
+/// help/version request (e.g. `--filter --version` should be "missing value
+/// for --filter", not "print version").
+const VALUE_FLAGS: &[&str] = &[
+    "--limit", "--begin", "--end", "--filter", "--at",
+    "--condition", "--show", "--changed",
+];
+
 /// Parse a slice of argv tokens (excluding argv[0]).
 pub fn parse(argv: &[String]) -> ParseOutcome {
-    // Pre-scan for --version / --help anywhere.
+    // Pre-scan for --version / --help anywhere, skipping tokens that are the
+    // values of preceding value-taking flags.
+    let mut skip_next = false;
     for a in argv {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
         if a == "--version" {
             return ParseOutcome::Print(format!("rwave {}", crate::VERSION));
+        }
+        if a == "-h" || a == "--help" {
+            return ParseOutcome::Print(help_text());
+        }
+        if VALUE_FLAGS.iter().any(|f| f == a) {
+            skip_next = true;
         }
     }
     if argv.is_empty() {
         return ParseOutcome::Print(help_text());
-    }
-    for a in argv {
-        if a == "-h" || a == "--help" {
-            return ParseOutcome::Print(help_text());
-        }
     }
     match parse_inner(argv) {
         Ok(outcome) => outcome,
@@ -349,6 +365,26 @@ mod tests {
         match p(&["snapshot", "x.vcd"]) {
             ParseOutcome::Error(e) => assert!(e.contains("--at")),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn version_and_help_not_hijacked_by_value_flags() {
+        // `--filter --version` should be "missing value for --filter", not the
+        // version string. The pre-scan must skip tokens that are values of a
+        // value-taking flag.
+        match p(&["info", "x.vcd", "--filter", "--version"]) {
+            ParseOutcome::Run(_) | ParseOutcome::Error(_) => {}
+            ParseOutcome::Print(s) => panic!("unexpectedly printed: {s}"),
+        }
+        match p(&["dump", "x.vcd", "--begin", "--help"]) {
+            ParseOutcome::Run(_) | ParseOutcome::Error(_) => {}
+            ParseOutcome::Print(s) => panic!("unexpectedly printed: {s}"),
+        }
+        // A genuine --version anywhere still works.
+        match p(&["--filter", "clk", "--version", "info", "x.vcd"]) {
+            ParseOutcome::Print(s) => assert!(s.contains(crate::VERSION)),
+            _ => panic!("expected version print"),
         }
     }
 }

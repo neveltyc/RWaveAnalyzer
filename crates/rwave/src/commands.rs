@@ -2035,6 +2035,24 @@ fn search_interval_segment_mode(
         group.push((sid, raw));
     }
 
+    // The streaming loop only runs the initial condition check on the first
+    // event with `t > t0`. If the stream contained zero such events, the check
+    // never fired, so conditions that hold throughout `[t0, t1]` would emit
+    // nothing. Run it now against the accumulated baseline state so a
+    // file-wide-true condition still yields the full interval.
+    if !init_checks_done && !truncated {
+        active = conditions_hold(&state, conditions);
+        seg_start = if active { Some(t0) } else { None };
+        if active && has_show {
+            seg_values = Some(show_values(wave, &state, show_sids));
+            if verbose {
+                seg_meta = Some(show_meta(wave, &state, show_sids));
+            }
+        }
+        // `init_checks_done` is not read past this point; leave it as-is so
+        // the warning isn't emitted under `-D warnings` in CI.
+    }
+
     // Final pending group.
     if !group.is_empty() && !truncated {
         let ct = cur_t.unwrap();

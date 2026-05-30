@@ -340,7 +340,10 @@ pub fn condition_match(
     match op {
         Op::Eq | Op::EqEq => value_matches(value_bits, raw, target, width),
         Op::Ne => {
-            // x/z/undef do NOT satisfy !=.
+            // x/z values do NOT satisfy != (truly-unknown bits are not evidence
+            // of inequality). Weak-strength `h`/`l` *are* defined (1/0) and so
+            // are not "unknown" here. Non-logic signals (real/string/event)
+            // fall through to the literal-compare path inside value_matches.
             if has_unknown(value_bits) {
                 return false;
             }
@@ -349,12 +352,17 @@ pub fn condition_match(
     }
 }
 
+/// Are any bits "unknown" in the strict sense — `x`/`z` or any other
+/// non-binary, non-strength character? Logic values containing only
+/// `0`/`1`/`h`/`l` are considered well-defined (h/l map to 1/0 elsewhere).
+/// Non-bit values (real/string/event, value_bits=None) are NOT unknown — the
+/// raw value is fully defined, just not a logic vector.
 fn has_unknown(value_bits: Option<&str>) -> bool {
     match value_bits {
-        None => true,
+        None => false,
         Some(b) => b.chars().any(|c| {
             let c = c.to_ascii_lowercase();
-            !matches!(c, '0' | '1')
+            !matches!(c, '0' | '1' | 'h' | 'l')
         }),
     }
 }
@@ -463,6 +471,36 @@ mod tests {
         assert_eq!(conds.len(), 2);
         assert_eq!(conds[0].pattern, "valid");
         assert_eq!(conds[0].op, Op::Eq);
+    }
+
+    #[test]
+    fn ne_with_weak_strength_chars_h_and_l() {
+        // h/l are well-defined logic levels (h=1, l=0), so a value carrying
+        // them should NOT be treated as "unknown" for the != path.
+        let t = parse_target_value("0").unwrap();   // numeric 0
+        // "1h" normalizes to "11" = 3; 3 != 0, so this should be true.
+        assert!(condition_match(Some("1h"), Some("1h"), Op::Ne, &t, 2),
+            "1h != 0 should be true (h is a defined 1)");
+        // "0l" normalizes to "00" = 0; 0 != 0 is false (they are equal).
+        assert!(!condition_match(Some("0l"), Some("0l"), Op::Ne, &t, 2));
+        // A genuine unknown still poisons the path.
+        assert!(!condition_match(Some("1x"), Some("1x"), Op::Ne, &t, 2));
+    }
+
+    #[test]
+    fn ne_on_non_logic_signals_no_longer_silently_false() {
+        // Pre-fix, has_unknown(None) returned true, so Op::Ne against any
+        // non-logic signal (real/string/event) silently returned false even
+        // when they obviously differ from the target. Post-fix, Eq runs and
+        // Ne mirrors its negation. A real signal with value "3.14" against
+        // numeric target 0 has no bits → Eq returns false → Ne returns true.
+        let nt = parse_target_value("0").unwrap();
+        assert!(condition_match(None, Some("3.14"), Op::Ne, &nt, 64),
+            "real signal `3.14 != 0` should be true (was silently false)");
+        // For a non-logic value vs pattern target, the raw==raw branch decides
+        // Eq, and Ne is its negation. Equal raw → Ne false.
+        let p = parse_target_value("x").unwrap();   // 4-state literal "x"
+        assert!(!condition_match(None, Some("x"), Op::Ne, &p, 1));
     }
 
     #[test]

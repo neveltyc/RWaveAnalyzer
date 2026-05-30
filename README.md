@@ -71,7 +71,7 @@ binary requires no extra DLLs.
 ```sh
 # one-time setup (macOS):
 brew install rustup zig
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 rustup default stable
 cargo install --locked cargo-zigbuild
 rustup target add x86_64-unknown-linux-musl \
@@ -151,7 +151,7 @@ swapping parsers means adding one file under `backend/`.
 
 ```
 crates/rwave/src/
-  lib.rs          re-exports + crate VERSION (from CARGO_PKG_VERSION)
+  lib.rs          module declarations + crate VERSION (from CARGO_PKG_VERSION)
   cli.rs          argument grammar, help text, validation
   commands.rs     the seven commands, text + JSON emitters
   model.rs        Wave: signal table, heap-merge replay, bounded streaming
@@ -237,6 +237,15 @@ beyond VCD:
   Verilog `parameter`/`localparam` *values* into the FST. A design that declares
   such constants will show them with values in its VCD but without values in the
   converted FST; `rwave` faithfully reports whatever each file actually contains.
+* **Weak-strength logic levels `h`/`l` in `search --condition`.** Per the VCD
+  spec, `h`/`l` are 1/0 with weak drive strength. `rwave` treats them as
+  defined logic levels throughout — `normalize_4state` maps `h→1`/`l→0`, so a
+  signal carrying value `1h` matches `--condition sig=3` (numerically `11`).
+  The Python reference's `val_to_int` rejects any character other than `0`/`1`
+  for numeric conversion, so the reference reports no match in that scenario.
+  This is the same `normalize_4state` policy rwave applies in `fmt_val`; we
+  keep it consistent across the analyzer rather than emulate the reference's
+  stricter parser quirk.
 * **`dump` event order within a single timestamp.** When several signals change
   at the *same* time, the reference emits them in the order their value-changes
   physically appear in the VCD (which depends on the writer — Icarus Verilog,

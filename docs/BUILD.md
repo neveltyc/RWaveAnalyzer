@@ -51,7 +51,7 @@ cross-linker), avoiding fiddly per-target GCC toolchains.
 
 ```sh
 brew install rustup zig
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 # also add the export above to ~/.zshrc so future shells pick it up
 
 rustup default stable
@@ -115,5 +115,5 @@ glibc-based distros — it confirms the binary is genuinely static.
   `.exe` does not require MinGW DLLs at runtime.
 - Build artifacts go to `dist/` (git-ignored).
 - Linker configuration for the musl targets lives in `.cargo/config.toml` and
-  is consulted only by native `cargo build`; `cargo-zigbuild` supplies its own
-  linker and ignores that setting.
+  is consulted by plain `cargo build` (any host, provided `musl-gcc` is on
+  `PATH`); `cargo-zigbuild` supplies its own linker and ignores that setting.

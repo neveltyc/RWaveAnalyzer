@@ -10,19 +10,39 @@
 
 /// Quote a string the way Python's `repr()` does for error messages: single
 /// quotes by default, switching to double quotes only when the value contains a
-/// single quote but no double quote. This matches the reference tool, which
-/// interpolates user input via `{!r}`. Used so `rwave`'s error text is
-/// byte-identical to the Python analyzer's.
+/// single quote but no double quote. Backslashes and ASCII control characters
+/// are always escaped using the same conventions CPython's `unicode_repr` uses
+/// (`\\`, `\n`, `\r`, `\t`, `\xNN`), so `rwave`'s error text is byte-identical
+/// to the Python analyzer's.
 pub fn pyrepr(s: &str) -> String {
     let has_single = s.contains('\'');
     let has_double = s.contains('"');
-    if has_single && !has_double {
-        format!("\"{s}\"")
-    } else {
-        // Default: single quotes, escaping any embedded single quotes.
-        let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
-        format!("'{escaped}'")
+    // Switch to double quotes only when the string contains a single quote but
+    // not a double quote (Python's heuristic).
+    let dquote = has_single && !has_double;
+    let quote_ch = if dquote { '"' } else { '\'' };
+
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote_ch);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote_ch => {
+                out.push('\\');
+                out.push(c);
+            }
+            // ASCII C0 controls + DEL → \xNN (matches CPython repr).
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
     }
+    out.push(quote_ch);
+    out
 }
 
 /// Multipliers (in seconds) for the time-unit suffixes accepted on the CLI.
@@ -314,12 +334,17 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
                 // A scaled time beyond i64 range would saturate on `as i64`,
                 // silently fabricating a value; reject it as "too large" to
                 // match the reference's range check.
+                //
+                // `i64::MAX as f64` rounds *up* to 2^63 (i64::MAX itself isn't
+                // exactly representable as f64), so `>=` is required: a `rounded`
+                // value equal to that f64 would cast to a saturated i64::MAX,
+                // off by one (or more) from the intended tick count.
                 if rounded < 0.0 {
                     return Err(TimeParseError(format!(
                         "time must be non-negative; got {}", pyrepr(s)
                     )));
                 }
-                if rounded > MAX_TIME_TICKS as f64 {
+                if rounded >= MAX_TIME_TICKS as f64 {
                     return Err(TimeParseError(format!(
                         "time value too large; got {}, max ticks is {}",
                         pyrepr(s),
@@ -616,6 +641,39 @@ mod tests {
         // Negative stays "non-negative".
         let e = parse_time("-5", 1e-9).unwrap_err();
         assert!(e.0.contains("non-negative"), "got: {}", e.0);
+    }
+
+    #[test]
+    fn time_unit_overflow_rejects_at_f64_boundary() {
+        // `9.223372036854775808e18 ns` at 1ns timescale scales to f64
+        // `9.223372036854776e18` (== i64::MAX as f64 == 2^63), which casts
+        // *saturating* to i64::MAX. The check must reject this as "too large"
+        // rather than silently produce i64::MAX - 1.
+        let e = parse_time("9223372036854775808.0ns", 1e-9).unwrap_err();
+        assert!(e.0.contains("too large"), "got: {}", e.0);
+        // Values well above i64::MAX in floating-point scaling also rejected.
+        // (Scientific notation isn't accepted by match_time; use a long literal.)
+        let e = parse_time("99999999999999999999.0s", 1.0).unwrap_err();
+        assert!(e.0.contains("too large"), "got: {}", e.0);
+    }
+
+    #[test]
+    fn pyrepr_matches_python_for_quoting_and_escapes() {
+        // Single-quote default, double-quote when string has a single-quote
+        // and no double-quote, mirroring Python's repr().
+        assert_eq!(pyrepr("hello"), "'hello'");
+        assert_eq!(pyrepr("it's"), "\"it's\"");
+        assert_eq!(pyrepr("\""), "'\"'");
+        assert_eq!(pyrepr("'\""), "'\\'\"'");
+        // Backslashes always escape, in both quoting modes.
+        assert_eq!(pyrepr("a\\b"), "'a\\\\b'");
+        assert_eq!(pyrepr("it's a\\b"), "\"it's a\\\\b\"");
+        // ASCII control characters escape to Python's named escapes / \xNN.
+        assert_eq!(pyrepr("a\nb"), "'a\\nb'");
+        assert_eq!(pyrepr("a\tb"), "'a\\tb'");
+        assert_eq!(pyrepr("a\rb"), "'a\\rb'");
+        assert_eq!(pyrepr("\x01"), "'\\x01'");
+        assert_eq!(pyrepr("\x7f"), "'\\x7f'");
     }
 
     #[test]
