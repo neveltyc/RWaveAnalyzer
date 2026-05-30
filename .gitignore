@@ -2,6 +2,9 @@
 /target
 **/target
 
+# Release build artifacts (produced by scripts/build-release.sh)
+/dist
+
 # Cargo lock is kept for the binary crate (reproducible builds), so it is NOT
 # ignored. (If this were a library, we'd ignore it.)
 
