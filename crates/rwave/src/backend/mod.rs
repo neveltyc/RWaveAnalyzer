@@ -26,7 +26,10 @@
 
 use crate::format::ValueKind;
 
+pub mod bitstr;
 pub mod wellen_backend;
+
+pub use bitstr::BitStr;
 
 /// Detected (or declared) container format of a waveform file. Kept neutral so
 /// the rest of the program never imports a backend-specific format enum.
@@ -134,10 +137,12 @@ impl SignalTrace {
 ///
 /// Owning the data here (rather than borrowing from the backend) is what lets
 /// the entire replay path run without holding a backend borrow, and is also
-/// what makes traces cacheable and cheaply comparable.
+/// what makes traces cacheable and cheaply comparable. Logic vectors use
+/// [`BitStr`], which keeps short values (the overwhelming majority) inline and
+/// off the heap.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RawValue {
-    Bits(String),
+    Bits(BitStr),
     Real(f64),
     Str(String),
     Event,

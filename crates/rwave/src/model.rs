@@ -87,7 +87,7 @@ impl ValueRef {
 
     fn from_raw(v: &RawValue) -> ValueRef {
         match v {
-            RawValue::Bits(s) => ValueRef::Bits(s.clone()),
+            RawValue::Bits(s) => ValueRef::Bits(s.as_str().to_string()),
             RawValue::Real(r) => ValueRef::Real(*r),
             RawValue::Str(s) => ValueRef::Str(s.clone()),
             RawValue::Event => ValueRef::Event,
@@ -621,7 +621,7 @@ impl Wave {
 /// Convert a borrowed [`RawValue`] to an [`OwnedValue`] (canonical strings).
 fn owned_from_raw(v: &RawValue) -> OwnedValue {
     match v {
-        RawValue::Bits(s) => OwnedValue::Bits(s.clone()),
+        RawValue::Bits(s) => OwnedValue::Bits(s.as_str().to_string()),
         RawValue::Real(r) => OwnedValue::Real(fmt_real(*r)),
         RawValue::Str(s) => OwnedValue::Str(s.clone()),
         RawValue::Event => OwnedValue::Event,

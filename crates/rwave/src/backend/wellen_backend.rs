@@ -16,7 +16,7 @@ use wellen::{
 };
 
 use super::{
-    BackendError, BackendSid, FileFormat, RawValue, SignalTrace, Timescale, VarDecl,
+    BackendError, BackendSid, BitStr, FileFormat, RawValue, SignalTrace, Timescale, VarDecl,
     WaveformBackend,
 };
 use crate::format::ValueKind;
@@ -242,7 +242,18 @@ fn decode_value(val: wellen::SignalValueRef<'_>) -> RawValue {
     use wellen::SignalValueRef as R;
     match val {
         R::Event => RawValue::Event,
-        R::BitVec(_) => RawValue::Bits(val.to_bit_string().unwrap_or_default()),
+        R::BitVec(bv) => {
+            // Build the MSB-first bit string straight from wellen's bit iterator
+            // into a `BitStr`, which keeps short values (the overwhelming
+            // majority) inline. This avoids the per-change heap `String` that
+            // `to_bit_string()` would allocate. `width()` gives the exact bit
+            // count, matching the number of chars the iterator yields.
+            let width = bv.width() as usize;
+            RawValue::Bits(BitStr::from_ascii_iter(
+                width,
+                bv.iter_msb_to_lsb().map(|b| b.as_ascii()),
+            ))
+        }
         R::Real(x) => RawValue::Real(x),
         R::String(s) => RawValue::Str(s.to_string()),
     }

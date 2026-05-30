@@ -1108,7 +1108,7 @@ fn upper_bound_local(times: &[i64], t: i64) -> usize {
 fn raw_string(v: &crate::backend::RawValue) -> String {
     use crate::backend::RawValue as R;
     match v {
-        R::Bits(s) => s.clone(),
+        R::Bits(s) => s.as_str().to_string(),
         R::Real(r) => format!("{r}"),
         R::Str(s) => s.clone(),
         R::Event => String::new(),
