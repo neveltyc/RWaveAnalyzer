@@ -1,20 +1,24 @@
-# Cross-compilation linker configuration.
+# Cross-compilation linker configuration for the release build.
 #
-# Linux static (fully static binary, no libc dependency): the x86_64 musl
-# target links against musl instead of glibc and produces a standalone
-# executable. Requires the `musl-gcc` wrapper (package: musl-tools).
+# Static Linux x86-64 (fully static, no libc dependency): the musl target links
+# against musl instead of glibc and produces a standalone executable that runs
+# on any x86-64 Linux. When building NATIVELY on Linux this uses the `musl-gcc`
+# wrapper (Debian/Ubuntu package: musl-tools).
 #
-# Windows: the GNU target cross-links with the MinGW-w64 toolchain
-# (package: gcc-mingw-w64-x86-64), producing a native .exe.
+#   rustup target add x86_64-unknown-linux-musl
+#   sudo apt-get install -y musl-tools          # native Linux build only
 #
-# Install the target std libraries with:
-#   rustup target add x86_64-unknown-linux-musl x86_64-pc-windows-gnu
+# Cross-building from another host (e.g. macOS arm64) is handled by
+# `cargo-zigbuild`, which supplies its own cross-linker via Zig and does NOT use
+# the linker setting below -- so no cross-GCC is needed there:
+#
+#   cargo install --locked cargo-zigbuild
+#   brew install zig                            # macOS
+#   scripts/build-release.sh --zig
+#
+# See scripts/build-release.sh and docs/BUILD.md.
 
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"
 # Statically link everything (this is musl's default, stated explicitly).
 rustflags = ["-C", "target-feature=+crt-static"]
-
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-ar = "x86_64-w64-mingw32-ar"

@@ -34,6 +34,26 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   file order, so matching it exactly is not possible without diverging from
   upstream `wellen`. (The reference is VCD-only and cannot read FST.)
 
+### Changed
+
+- **Release build script now targets Linux x86-64 only.** `scripts/build-release.sh`
+  builds a fully static musl binary (`dist/rwave-linux-amd64`) by default, with
+  a `--flavour glibc` option, and supports cross-building from macOS via
+  `cargo-zigbuild` (`--zig`). It checks prerequisites and prints exact install
+  commands for anything missing. The Windows (MinGW) cross-target was dropped to
+  avoid maintaining a Windows build environment; native `cargo build` still
+  works on any platform for development. Added `docs/BUILD.md`.
+
+### Performance
+
+- **Inline bit-strings cut decode-time heap allocation.** Logic values are
+  materialized into a small inline string (`BitStr`) that keeps short values
+  (~99% of changes) off the heap, instead of allocating a `String` per change.
+  Decode of a 222k-signal FST is ~13% faster with byte-identical output. Also
+  optimized signal-table construction (~28% faster open) via a single
+  `full_name` computation per variable, `FxHashMap` grouping, and an unstable
+  final sort.
+
 ## [0.1.0] — 2026-05-30
 
 First release. A Rust waveform analyzer for VCD and FST whose command-line

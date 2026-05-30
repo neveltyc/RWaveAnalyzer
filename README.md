@@ -37,19 +37,23 @@ parser revision. `vendor/fst-reader` additionally carries a local fix for an
 upstream out-of-bounds crash on FSTs with sparse/aliased signal handles (such as
 VCS output); see `CHANGELOG.md`.
 
-### Release binaries (static Linux + Windows)
+### Release binary (static Linux x86-64)
 
 ```sh
-rustup target add x86_64-unknown-linux-musl x86_64-pc-windows-gnu
-# Debian/Ubuntu host packages for cross-linking:
-sudo apt-get install -y musl-tools gcc-mingw-w64-x86-64
+# native Linux build (one-time setup):
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools        # Debian/Ubuntu
 
-./scripts/build-release.sh
-# dist/rwave-linux-amd64        (fully static, musl)
-# dist/rwave-windows-amd64.exe  (MinGW-w64)
+./scripts/build-release.sh                # -> dist/rwave-linux-amd64 (fully static)
+./scripts/build-release.sh --flavour glibc # -> dist/rwave-linux-amd64-glibc
 ```
 
-Cross-linker selection lives in `.cargo/config.toml`.
+The default is a fully static musl binary with no runtime dependencies. To
+cross-build the Linux binary from macOS (Apple Silicon), use
+`./scripts/build-release.sh --zig` (needs `cargo-zigbuild` + Zig). The script
+checks its prerequisites and prints exact install commands for anything missing.
+See `docs/BUILD.md` for the full development and deployment guide; cross-linker
+configuration lives in `.cargo/config.toml`.
 
 ## Usage
 
