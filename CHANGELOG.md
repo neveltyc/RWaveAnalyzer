@@ -10,142 +10,44 @@ _No unreleased changes._
 
 ## [0.0.1] — 2026-05-30
 
-First public release. A Rust waveform analyzer for VCD and FST whose
-command-line surface mirrors the reference `VCD_ANALYZER` Python tool.
+First public release. See the [README](README.md) for the command surface,
+install, and known differences from the Python reference; this entry only
+records what is unique to 0.0.1.
 
-### Commands
+### Highlights
 
-- Seven commands — `info`, `list`, `dump`, `summary`, `snapshot`, `compare`,
-  `search` — each with a human-readable text form and a compact `--json` form
-  whose keys and separators match the reference tool.
-- VCD, FST, and GHW input via a vendored `wellen` front-end, with format
-  auto-detection.
-- Time handling with `fs/ps/ns/us/ms/s` suffixes and raw-tick integers;
-  unit-suffixed times are scaled by the file timescale using banker's rounding
-  to match Python's `round()`. Bare integer ticks accept Python-style `_` digit
-  separators (`1_000`, `1_0_0_0`). Out-of-range bare-integer ticks report
-  `time value too large; got '…', max ticks is 9223372036854775807`, matching
-  the reference rather than the generic "invalid" error.
-- Value formatting covering scalars, multi-bit vectors (decimal + zero-padded
-  hex), 4-state `x`/`z` vectors, reals, strings, and events, plus
-  arbitrary-width buses via an internal big-unsigned-integer type.
-- Signal selection via a glob-lite matcher (`*`, `?`) and case-insensitive
-  substring matching; conditional `search` with `=`, `==`, `!=` operators and
-  multi-condition predicates.
+- Seven `--json`-aware commands: `info`, `list`, `dump`, `summary`,
+  `snapshot`, `compare`, `search` (interval / segment / event modes).
+- VCD and FST input via vendored `wellen`; pure-Rust, zero runtime deps.
+- Binary-heap k-way merge replay (`O(n log k)`), per-signal binary search
+  for `snapshot`/`compare`, memory-bounded streaming for whole-file commands.
 
-### Architecture
+### Artifacts
 
-- Layered design: `cli` → `commands` → `model` → `backend`, with `format`,
-  `filter`, `condition`, and `json` as backend-agnostic leaf utilities. The
-  parser is isolated behind a `WaveformBackend` trait so additional formats can
-  be added without touching the command set; `wellen` is the only
-  implementation today.
+- `rwave-linux-amd64` — static musl
+- `rwave-linux-arm64` — static musl
+- `rwave-windows-amd64.exe` — MinGW, no extra DLLs
+- One `.sha256` per binary
 
-### Performance
+### Fixed (pre-tag bug scan vs. the Python reference)
 
-- Value-change replay uses a binary min-heap k-way merge (`O(n log k)`),
-  replacing a linear-scan merge.
-- `snapshot`/`compare` use per-signal binary search rather than full replay.
-- Whole-file commands (`summary`, and unfiltered `dump`/`snapshot`/`compare`)
-  stream their work in memory-bounded batches, decoding and releasing signal
-  traces per batch so very large files (hundreds of thousands of signals) stay
-  within a few-GB working set. `dump` retains only the earliest `--limit`
-  events via a bounded heap. These paths are output-identical to the eager
-  paths.
-- Logic values are materialized into a small inline string (`BitStr`) that
-  keeps short values (~99% of changes) off the heap, cutting decode-time heap
-  traffic by ~13% on a 222k-signal FST with byte-identical output.
-  Signal-table construction is ~28% faster via a single `full_name` per
-  variable, `FxHashMap` grouping, and an unstable final sort.
+- `parse_time`: silent saturation at the `i64::MAX as f64 == 2^63`
+  boundary; tightened `>` to `>=`.
+- `search` interval/segment: emitted nothing when conditions held throughout
+  `[--begin, --end]` and no events fell past `--begin`. Now emits the full
+  `[t0, t1)` interval; zero-width windows stay silent (`t0 < t1` guard).
+- `cli`: `--version` / `--help` pre-scan no longer hijacks the value of a
+  preceding flag (e.g. `--filter --version`).
+- `pyrepr`: escape `\\`, `\n`, `\r`, `\t`, ASCII `C0` + `DEL` +
+  Latin-1 `C1` + `NBSP` to match CPython `unicode_repr`.
+- `condition`: weak-strength `h`/`l` handled consistently across `==`/`!=`
+  (rwave maps `h→1`, `l→0` per VCD spec; differs from Python's `val_to_int`
+  which rejects them — see README "Known differences").
+- `condition`: `Op::Ne` on non-logic (real/string/event) signals no longer
+  always returns false.
 
-### Release tooling
+### Vendored
 
-- `scripts/build-release.sh` cross-builds release binaries for three
-  deployment targets via `cargo-zigbuild`:
-  - `linux-amd64`   → `x86_64-unknown-linux-musl`   (fully static)
-  - `linux-arm64`   → `aarch64-unknown-linux-musl`  (fully static)
-  - `windows-amd64` → `x86_64-pc-windows-gnu`       (no extra DLLs)
-- A GitHub Actions release workflow builds and uploads all three artifacts
-  on every `v*` tag.
-
-### Fixed
-
-- **Vendored `fst-reader` out-of-bounds crash.** Upstream `fst-reader` 0.16.6
-  sizes the signal include-bitmask in `read_signals` from the number of
-  distinct signals (and the declared max var-id code), but some writers
-  (observed with VCS-generated FSTs) emit value-change geometry whose handle
-  indices exceed both. Reading any signal value from such a file panicked with
-  an index-out-of-bounds in the bitmask. The vendored copy sizes the mask to
-  also cover the largest handle present in the filter, eliminating the crash.
-  This is the only functional change to the vendored parser.
-- **Unit-scaled time at the i64 boundary silently saturated.** `parse_time`
-  rejected `rounded > MAX_TIME_TICKS as f64`, but `i64::MAX as f64` rounds *up*
-  to `2^63`, so a `rounded` value equal to that f64 was let through and
-  silently cast (saturating) to `i64::MAX` — off by one or more from the
-  intended tick count. Tightened to `>=` and added a regression test.
-- **`search` produced no output when conditions held throughout `[--begin,
-  --end]` but no events fell strictly past `--begin`.** The interval/segment
-  loop's initial-condition check fired only on the first event with
-  `t > t0`; if the stream was exhausted by the `t <= t0` early-continue, the
-  check never ran and the final-emit guard saw `active == false`. Now run the
-  initial check at end-of-stream too so a file-wide-true condition reports the
-  full `[t0, t1)` interval. Guarded by `t0 < t1` so a degenerate zero-width
-  window `--begin T --end T` continues to emit nothing (matching the
-  reference). Covered by a new integration test under
-  `crates/rwave/tests/search_init_check.rs`.
-- **`--version`/`--help` could be triggered by a flag *value*.** The pre-scan
-  walked every argv token unconditionally, so `rwave info x.vcd --filter
-  --version` printed the version string instead of "missing value for
-  --filter". The pre-scan now skips tokens that follow a known value-taking
-  flag (`--limit`, `--filter`, `--begin`, `--end`, `--at`, `--condition`,
-  `--show`, `--changed`).
-- **`pyrepr` (Python-style repr quoting for error messages) did not match
-  Python on backslashes or non-printable characters.** The double-quote branch
-  emitted backslashes verbatim and neither branch escaped newline/tab/CR/DEL.
-  Now escapes `\\`, `\n`, `\r`, `\t`, ASCII `C0` (`0x00`–`0x1F`), `DEL`
-  (`0x7F`), and the Latin-1 `C1` controls + `NBSP` (`0x80`–`0xA0`) to `\xNN`
-  in both quoting modes. Covers the practical range of CPython's
-  `unicode_repr`; strict Unicode-category parity for codepoints above U+00A0
-  would need Unicode data we do not bundle.
-- **`condition_match` treated weak-strength logic levels `h`/`l` as "unknown"
-  for the `!=` path,** disagreeing with `normalize_4state` (which maps
-  `h→1`, `l→0`) and `is_clean_binary` (which accepts them). So a signal
-  carrying `1h` against `--condition sig!=0` silently returned false even
-  though `1h` resolves to logical `11` (=3). `has_unknown` now treats `h`/`l`
-  as defined throughout `search --condition`; only `x`/`z` (and any other
-  non-binary, non-strength character) poison the `!=` path. See README
-  "Known differences" — `rwave` consistently treats `h`/`l` as their VCD-spec
-  1/0 values, where the Python reference's `val_to_int` rejects them.
-- **`condition_match` returned false unconditionally for `!=` against
-  non-logic signals** (real, string, event), because `has_unknown(None)` was
-  hard-wired to `true`. So `--condition sig!=0` on a real-valued signal
-  carrying `3.14` was silently false. Non-bit values now bypass the unknown
-  check and fall through to the literal compare inside `value_matches`, so
-  `!=` correctly mirrors `==` for those signal kinds.
-
-### Testing
-
-- Seven Verilog testbenches compiled to matched VCD+FST pairs. `$date` and
-  `$version` blocks are normalized at generation time so committed stimuli
-  carry no host or wall-clock metadata.
-- `verify/run.sh` self-test harness covering command smoke and VCD/FST output
-  parity on the bundled stimulus.
-- `verify/differential.sh` parity check against the reference Python tool;
-  skips cleanly when the reference is absent.
-
-### Known differences from the reference tool
-
-- VCD-specific wording generalized to format-neutral phrasing (e.g. "cannot
-  open waveform file").
-- `list --verbose` reports the backend signal index rather than the raw VCD
-  identifier code (the abstract backend does not expose identifier codes).
-- `comments` is empty and `synthesized_buses` is 0 (no `wellen` equivalent).
-- `vcd2fst` does not carry Verilog parameter/localparam values into the FST;
-  `rwave` reports whatever each file actually contains.
-- `dump` event order within a single timestamp follows declaration order
-  rather than the writer's VCD emission order. Values, timestamps, and the set
-  of emitted events are identical; only the order of simultaneous events can
-  differ, and only for `dump`. `wellen` stores changes per-signal and does not
-  retain cross-signal file order, so matching the reference exactly is not
-  possible without diverging from upstream `wellen`. (The reference is
-  VCD-only and cannot read FST.)
+- `wellen` (BSD-3-Clause) — parser front-end.
+- `fst-reader` (BSD-3-Clause) — plus a local fix for an out-of-bounds crash
+  on FSTs with sparse/aliased signal handles (observed with VCS output).

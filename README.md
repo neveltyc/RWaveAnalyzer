@@ -1,7 +1,7 @@
 # RWaveAnalyzer (`rwave`)
 
 An AI-agent-friendly, debug-oriented waveform analyzer for RTL simulation
-dumps. `rwave` reads **VCD** and **FST** (and GHW) files and exposes a small,
+dumps. `rwave` reads **VCD** and **FST** files and exposes a small,
 scriptable command set — file overview, signal listing, value-change dumps,
 per-signal statistics, point/pair snapshots, and conditional search — with both
 human-readable text and compact JSON output.
@@ -123,6 +123,16 @@ rwave compare design.fst --at 17.5us,17.7us --filter bus
 rwave search design.vcd --condition 'valid=1,ready=1' --show data --changed data
 ```
 
+## Agent skill
+
+This repository includes [`skill/SKILL.md`](skill/SKILL.md) for AI coding
+agents. It is intentionally narrow: a decision tree mapping user intent to
+command, a JSON-fields cheat sheet, the condition syntax, and a handful of
+workflow patterns (first-contact, point-in-time, transaction extraction,
+unexpected-state hunt, clock/reset sanity). Everything else — install,
+flags, time syntax, value formatting, known differences — lives in this
+README and the skill points back to it.
+
 ## Architecture
 
 The crate is layered top-to-bottom, each layer depending only on those below:
@@ -175,6 +185,8 @@ verify/
 scripts/
   build-release.sh   cross-build all three release targets
   gen-stimulus.sh    regenerate stimulus/ from stimulus_src/, sanitized
+skill/
+  SKILL.md           agent-skill descriptor (decision tree + workflow patterns)
 .github/workflows/
   ci.yml          test + verify on push / PR
   release.yml     build + publish three artifacts on v* tags

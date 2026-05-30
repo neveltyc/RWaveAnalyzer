@@ -11,8 +11,8 @@
 //! * [`model`] — the format-neutral domain: a signal table, value-change
 //!   replay, and snapshots. Owns a backend behind a trait object.
 //! * [`backend`] — the parser abstraction. [`backend::WaveformBackend`] is the
-//!   contract; [`backend::wellen_backend`] is the default implementation (VCD /
-//!   FST / GHW via the `wellen` crate). Adding a format = adding a backend.
+//!   contract; [`backend::wellen_backend`] is the default implementation (VCD
+//!   and FST via the `wellen` crate). Adding a format = adding a backend.
 //!
 //! Leaf utilities, depended on by `commands` but not by each other or by any
 //! backend: [`format`] (value/time formatting and parsing), [`filter`] (signal

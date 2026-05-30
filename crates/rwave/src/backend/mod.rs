@@ -7,7 +7,7 @@
 //! [`crate::model`]) from *how* it is parsed (a backend). This module defines
 //! the format-neutral contract every parser front-end must satisfy. The
 //! default backend ([`wellen_backend`]) is built on the `wellen` crate and
-//! understands VCD/FST/GHW, but nothing above this layer depends on wellen:
+//! understands VCD and FST, but nothing above this layer depends on wellen:
 //! adding a new format (or a faster/native reader for an existing one) means
 //! adding another [`WaveformBackend`] implementation, not touching the command
 //! set, formatting, filtering, or condition logic.

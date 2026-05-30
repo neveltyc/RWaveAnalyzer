@@ -94,7 +94,7 @@ Global options:\n\
   --version     Print version and exit\n\
   -h, --help    Print this help and exit\n\
 \n\
-Supports both VCD and FST (and GHW) inputs; the format is auto-detected.\n\
+Supports both VCD and FST inputs; the format is auto-detected.\n\
 Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.\n",
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
