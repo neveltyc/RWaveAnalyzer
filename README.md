@@ -157,13 +157,23 @@ is purely a memory/throughput optimization keyed on selection size.
 ## Testing
 
 ```sh
-cargo test            # unit tests (formatting, filters, conditions, CLI parsing)
-bash verify/run.sh    # smoke + VCD/FST parity on the bundled stimulus
+cargo test                  # unit tests (formatting, filters, conditions, CLI)
+bash verify/run.sh          # smoke + VCD/FST parity on the bundled stimulus
+bash verify/differential.sh # behavioural parity vs the reference Python tool
 ```
 
 `verify/run.sh` requires only the built binary. It checks that every command
 runs on both a VCD and an FST, and that the value-bearing commands produce
 identical results across formats for the same design.
+
+`verify/differential.sh` compares `rwave` against the reference `vcd_analyzer.py`
+across all seven commands on the fixtures and edge-case designs (150 cases). It
+locates the reference via `$VCD_ANALYZER`, `../VCD_ANALYZER/vcd_analyzer.py`, or
+`$PATH`, and **skips cleanly (exit 0)** if none is found, so it is safe to run
+in a clone or CI without the reference. The documented differences below (the
+`list --verbose` id field, the "waveform file" wording, and `dump`
+intra-timestamp ordering) are recognized and tolerated; any other divergence is
+a failure. Run with `VERBOSE=1` to print a diff for each failure.
 
 ## Known differences from the reference tool
 

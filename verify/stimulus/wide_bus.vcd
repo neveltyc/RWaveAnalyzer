@@ -1,0 +1,97 @@
+$date
+	Sat May 30 09:44:46 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1s
+$end
+$scope module wide_bus $end
+$var reg 16 ! addr [15:0] $end
+$var reg 64 " big_bus [63:0] $end
+$var reg 8 # byte_en [7:0] $end
+$var reg 1 $ clk $end
+$var reg 3 % opcode [2:0] $end
+$var reg 1 & rst_n $end
+$var reg 32 ' wide_data [31:0] $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+bz '
+0&
+bx %
+0$
+b0 #
+bx "
+bz !
+$end
+#2
+1&
+#5
+1$
+#10
+0$
+#12
+b11011110101011011011111011101111 '
+#15
+1$
+#20
+0$
+#22
+b11001010111111101011101010111110 '
+#25
+1$
+#30
+0$
+#32
+b0 '
+#35
+1$
+#40
+0$
+#42
+b100100011010001010110011110001001101010111100110111101111 "
+#45
+1$
+#50
+0$
+#52
+b1000000000000000 !
+#55
+1$
+#60
+0$
+#62
+b11111111 #
+#65
+1$
+#70
+0$
+#72
+b101 %
+#75
+1$
+#80
+0$
+#82
+b1111 #
+#85
+1$
+#90
+0$
+#92
+b10 %
+#95
+1$
+#100
+0$
+#105
+1$
+#110
+0$
+#112

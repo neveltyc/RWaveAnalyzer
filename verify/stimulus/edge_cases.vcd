@@ -1,0 +1,115 @@
+$date
+	Sat May 30 09:44:46 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1s
+$end
+$scope module edge_cases $end
+$var reg 1 ! clk $end
+$var reg 1 " one_bit_bus $end
+$var reg 1 # rst_n $end
+$var reg 1 $ static_high $end
+$var reg 1 % static_low $end
+$var reg 3 & three_bit [2:0] $end
+$var reg 1 ' toggle_1 $end
+$var reg 1 ( toggle_fast $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+0(
+0'
+b0 &
+0%
+1$
+0#
+0"
+0!
+$end
+#2
+1#
+#5
+1!
+#10
+0!
+1(
+#12
+1'
+#15
+1!
+#20
+0!
+0(
+#25
+1!
+#30
+0!
+1(
+#32
+0'
+#35
+1!
+#40
+0!
+0(
+#42
+1'
+#45
+1!
+#47
+0'
+#50
+0!
+1(
+#55
+1!
+#60
+0!
+0(
+#62
+b101 &
+#65
+1!
+#70
+0!
+1(
+#72
+b10 &
+#75
+1!
+#80
+0!
+0(
+#82
+1"
+#85
+1!
+#90
+0!
+1(
+#92
+0"
+#95
+1!
+#100
+0!
+0(
+#102
+b111 &
+#105
+1!
+#110
+0!
+1(
+#115
+1!
+#120
+0!
+0(
+#122

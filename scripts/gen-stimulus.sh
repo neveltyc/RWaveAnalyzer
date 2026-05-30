@@ -12,7 +12,7 @@ SRC=verify/stimulus_src
 OUT=verify/stimulus
 mkdir -p "$OUT"
 
-tbs=(counter_fsm xz_tristate hier_deep real_event handshake_proto)
+tbs=(counter_fsm xz_tristate hier_deep real_event handshake_proto edge_cases wide_bus)
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
