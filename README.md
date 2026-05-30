@@ -96,7 +96,7 @@ rwave [--json] [--limit N] [--verbose] <command> <file> [options]
 | Command    | Purpose                                                        |
 |------------|----------------------------------------------------------------|
 | `info`     | File overview: timescale, signal/type counts, time span, scopes |
-| `list`     | Signal paths with bit widths (`--filter` to narrow)             |
+| `list`     | Signal paths with bit widths (`--filter` matches any alias)             |
 | `dump`     | Value-change events in time order (`--begin/--end/--filter`)    |
 | `summary`  | Per-signal stats: change count, rise/fall edges, static detection |
 | `snapshot` | Known signal values at one time point (`--at T`)                |

@@ -79,11 +79,11 @@ fn clip_len(total: usize, limit: usize) -> (usize, bool) {
 }
 
 fn trunc_line(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total} {noun} shown.")
+    format!("... truncated: {shown}/{total} {noun} shown. (use --limit 0 to see all)")
 }
 
 fn trunc_line_lb(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total}+ {noun} shown.")
+    format!("... truncated: {shown}/{total}+ {noun} shown. (use --limit 0 to see all)")
 }
 
 fn count_label(total: usize, truncated: bool) -> String {

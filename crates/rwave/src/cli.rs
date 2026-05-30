@@ -77,7 +77,7 @@ Usage: rwave [--json] [--limit N] [--verbose] <command> <file> [options]\n\
 \n\
 Commands:\n\
   info      <file>                              File overview (timescale, signals, time span, scopes)\n\
-  list      <file> [--filter K1,K2]             List signals with path and bit width\n\
+  list      <file> [--filter K1,K2]             List signals (filter matches any alias path)\n\
   dump      <file> [--begin T] [--end T] [--filter K1,K2]\n\
                                                 Print value-change events in time order\n\
   summary   <file> [--begin T] [--end T] [--filter K1,K2]\n\

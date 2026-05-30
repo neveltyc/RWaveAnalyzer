@@ -85,6 +85,9 @@ For `dump`, **always pass `--begin/--end` and `--filter`** — running it
 unbounded on a large dump streams the whole file.
 
 Filter patterns: substring (`clk`), suffix glob (`*_valid`), prefix glob (`top.u_dma.*`).
+`list` shows all aliases of matched signals, not only the matching paths.
+A signal hit once may surface dozens of alias rows — use `--verbose` to group by `id`.
+
 
 ## Workflow patterns
 
