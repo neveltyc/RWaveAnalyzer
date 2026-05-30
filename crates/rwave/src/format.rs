@@ -10,10 +10,14 @@
 
 /// Quote a string the way Python's `repr()` does for error messages: single
 /// quotes by default, switching to double quotes only when the value contains a
-/// single quote but no double quote. Backslashes and ASCII control characters
-/// are always escaped using the same conventions CPython's `unicode_repr` uses
-/// (`\\`, `\n`, `\r`, `\t`, `\xNN`), so `rwave`'s error text is byte-identical
-/// to the Python analyzer's.
+/// single quote but no double quote. Backslashes and ASCII / Latin-1
+/// supplement control characters are escaped using the conventions CPython's
+/// `unicode_repr` uses (`\\`, `\n`, `\r`, `\t`, `\xNN` for `C0`/`DEL`/`C1`
+/// controls + `NBSP`). Printable characters above U+00A0 pass through
+/// verbatim, which matches CPython for the ASCII-and-control-char inputs the
+/// CLI actually receives. Note: a strict CPython parity for *all* Unicode
+/// would require Py_UNICODE_ISPRINTABLE, which depends on Unicode category
+/// data we do not bundle.
 pub fn pyrepr(s: &str) -> String {
     let has_single = s.contains('\'');
     let has_double = s.contains('"');
@@ -34,8 +38,12 @@ pub fn pyrepr(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            // ASCII C0 controls + DEL → \xNN (matches CPython repr).
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            // ASCII C0 (0x00–0x1F) + DEL (0x7F) + Latin-1 C1 controls
+            // (0x80–0x9F) + NBSP (0xA0) → \xNN, matching CPython repr.
+            c if (c as u32) < 0x20
+                || c as u32 == 0x7f
+                || ((c as u32) >= 0x80 && (c as u32) <= 0xa0) =>
+            {
                 out.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => out.push(c),
@@ -674,6 +682,12 @@ mod tests {
         assert_eq!(pyrepr("a\rb"), "'a\\rb'");
         assert_eq!(pyrepr("\x01"), "'\\x01'");
         assert_eq!(pyrepr("\x7f"), "'\\x7f'");
+        // Latin-1 C1 controls + NBSP.
+        assert_eq!(pyrepr("\u{80}"), "'\\x80'");
+        assert_eq!(pyrepr("\u{9f}"), "'\\x9f'");
+        assert_eq!(pyrepr("\u{a0}"), "'\\xa0'");
+        // Printable Latin-1 above NBSP passes through.
+        assert_eq!(pyrepr("\u{a1}"), "'\u{a1}'");
     }
 
     #[test]

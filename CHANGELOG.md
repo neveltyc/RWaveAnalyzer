@@ -89,7 +89,10 @@ command-line surface mirrors the reference `VCD_ANALYZER` Python tool.
   `t > t0`; if the stream was exhausted by the `t <= t0` early-continue, the
   check never ran and the final-emit guard saw `active == false`. Now run the
   initial check at end-of-stream too so a file-wide-true condition reports the
-  full `[t0, t1)` interval.
+  full `[t0, t1)` interval. Guarded by `t0 < t1` so a degenerate zero-width
+  window `--begin T --end T` continues to emit nothing (matching the
+  reference). Covered by a new integration test under
+  `crates/rwave/tests/search_init_check.rs`.
 - **`--version`/`--help` could be triggered by a flag *value*.** The pre-scan
   walked every argv token unconditionally, so `rwave info x.vcd --filter
   --version` printed the version string instead of "missing value for
@@ -97,12 +100,13 @@ command-line surface mirrors the reference `VCD_ANALYZER` Python tool.
   flag (`--limit`, `--filter`, `--begin`, `--end`, `--at`, `--condition`,
   `--show`, `--changed`).
 - **`pyrepr` (Python-style repr quoting for error messages) did not match
-  Python on backslashes or ASCII control characters.** The double-quote branch
+  Python on backslashes or non-printable characters.** The double-quote branch
   emitted backslashes verbatim and neither branch escaped newline/tab/CR/DEL.
-  Now escapes `\\`, `\n`, `\r`, `\t`, and ASCII `C0` + `DEL` to `\xNN` in both
-  quoting modes, matching CPython's `unicode_repr`. Restores the
-  "byte-identical to the Python analyzer" promise for error text containing
-  those characters.
+  Now escapes `\\`, `\n`, `\r`, `\t`, ASCII `C0` (`0x00`–`0x1F`), `DEL`
+  (`0x7F`), and the Latin-1 `C1` controls + `NBSP` (`0x80`–`0xA0`) to `\xNN`
+  in both quoting modes. Covers the practical range of CPython's
+  `unicode_repr`; strict Unicode-category parity for codepoints above U+00A0
+  would need Unicode data we do not bundle.
 - **`condition_match` treated weak-strength logic levels `h`/`l` as "unknown"
   for the `!=` path,** disagreeing with `normalize_4state` (which maps
   `h→1`, `l→0`) and `is_clean_binary` (which accepts them). So a signal

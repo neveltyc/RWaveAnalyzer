@@ -2040,7 +2040,12 @@ fn search_interval_segment_mode(
     // never fired, so conditions that hold throughout `[t0, t1]` would emit
     // nothing. Run it now against the accumulated baseline state so a
     // file-wide-true condition still yields the full interval.
-    if !init_checks_done && !truncated {
+    //
+    // Guarded by `t0 < t1`: a degenerate window where the user wrote
+    // `--begin T --end T` describes a zero-length interval `[T, T)`; the
+    // final-emit path would otherwise materialize a `[T, T)` row, which the
+    // reference correctly suppresses.
+    if !init_checks_done && !truncated && t0 < t1 {
         active = conditions_hold(&state, conditions);
         seg_start = if active { Some(t0) } else { None };
         if active && has_show {

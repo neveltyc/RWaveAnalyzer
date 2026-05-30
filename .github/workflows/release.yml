@@ -19,22 +19,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - linux-amd64
-          - linux-arm64
-          - windows-amd64
+        include:
+          - target: linux-amd64
+            triple: x86_64-unknown-linux-musl
+          - target: linux-arm64
+            triple: aarch64-unknown-linux-musl
+          - target: windows-amd64
+            triple: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: >-
-            ${{
-              matrix.target == 'linux-amd64'   && 'x86_64-unknown-linux-musl'  ||
-              matrix.target == 'linux-arm64'   && 'aarch64-unknown-linux-musl' ||
-              matrix.target == 'windows-amd64' && 'x86_64-pc-windows-gnu'      || ''
-            }}
+          targets: ${{ matrix.triple }}
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2

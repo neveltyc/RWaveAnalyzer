@@ -488,6 +488,18 @@ mod tests {
     }
 
     #[test]
+    fn ne_with_no_raw_value_returns_false() {
+        // condition_match's early return for raw_value == None must continue
+        // to win over the has_unknown(None)==false change: a signal with no
+        // recorded value at all should not match any condition (Eq or Ne).
+        let t = parse_target_value("0").unwrap();
+        assert!(!condition_match(None, None, Op::Eq, &t, 1));
+        assert!(!condition_match(None, None, Op::Ne, &t, 1));
+        assert!(!condition_match(Some("0"), None, Op::Eq, &t, 1));
+        assert!(!condition_match(Some("0"), None, Op::Ne, &t, 1));
+    }
+
+    #[test]
     fn ne_on_non_logic_signals_no_longer_silently_false() {
         // Pre-fix, has_unknown(None) returned true, so Op::Ne against any
         // non-logic signal (real/string/event) silently returned false even
