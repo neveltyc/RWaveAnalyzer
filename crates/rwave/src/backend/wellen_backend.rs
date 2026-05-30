@@ -130,12 +130,18 @@ impl WaveformBackend for WellenBackend {
 
     fn var_decls(&self) -> Vec<VarDecl> {
         let h = self.hierarchy();
-        let mut out = Vec::new();
+        let vars = h.all_vars();
+        let (lo, _) = vars.size_hint();
+        let mut out = Vec::with_capacity(lo);
         for var in h.all_vars() {
             let (type_str, kind) = vartype_to_str_kind(var.var_type());
+            // `full_name` walks the scope tree and allocates; compute it ONCE and
+            // derive both the display path and the parent-scope path from it,
+            // rather than calling it twice (it dominated table-build time).
+            let (full_path, scope_path) = display_and_scope(var, h);
             out.push(VarDecl {
-                full_path: display_full_name(var, h),
-                scope_path: parent_scope_path(var, h),
+                full_path,
+                scope_path,
                 width: var_width(var, h),
                 type_str,
                 kind,
@@ -302,33 +308,42 @@ fn var_width(var: &Var, h: &Hierarchy) -> u32 {
     1
 }
 
-/// Display path, folding a multi-bit `[msb:lsb]` range into the name to match
-/// conventional VCD display (`tb.data[7:0]`). Scalars and 1-bit selects keep
-/// the plain name; wellen already reassembles bit-exploded buses.
-fn display_full_name(var: &Var, h: &Hierarchy) -> String {
-    let base = var.full_name(h);
-    if let Some(idx) = var.index() {
-        if var.length(h).unwrap_or(0) > 1 {
-            return format!("{base}[{}:{}]", idx.msb(), idx.lsb());
-        }
-    }
-    base
-}
-
-/// Parent scope path via wellen's scope metadata. Because wellen builds the
-/// full name as `parent.local`, and we know the exact local name, we strip the
-/// `.local` suffix precisely rather than splitting on '.', so escaped
-/// identifiers containing dots stay correct. Returns "" for top-level vars.
-fn parent_scope_path(var: &Var, h: &Hierarchy) -> String {
+/// Compute a variable's display path and parent-scope path from a single
+/// `full_name` call. `full_name` reconstructs the dotted hierarchical path by
+/// walking the scope tree and allocating — calling it once per variable instead
+/// of twice roughly halves that cost across a large hierarchy.
+///
+/// * Display path: `full_name`, with a multi-bit `[msb:lsb]` range folded in to
+///   match conventional VCD display (`tb.data[7:0]`). Scalars and 1-bit selects
+///   keep the plain name; wellen already reassembles bit-exploded buses.
+/// * Scope path: `full_name` with its trailing `.<local>` removed, computed by
+///   stripping the exact local-name suffix rather than splitting on '.', so
+///   escaped identifiers containing dots stay correct. `""` for top-level vars.
+fn display_and_scope(var: &Var, h: &Hierarchy) -> (String, String) {
     let full = var.full_name(h);
     let local = var.name(h);
-    if full.len() > local.len() + 1 && full.ends_with(local) {
-        let cut = full.len() - local.len() - 1;
-        if full.as_bytes().get(cut) == Some(&b'.') {
-            return full[..cut].to_string();
+
+    // Parent scope: strip a trailing ".<local>" if present.
+    let scope = {
+        if full.len() > local.len() + 1
+            && full.ends_with(local)
+            && full.as_bytes()[full.len() - local.len() - 1] == b'.'
+        {
+            full[..full.len() - local.len() - 1].to_string()
+        } else {
+            String::new()
         }
-    }
-    String::new()
+    };
+
+    // Display name: fold a multi-bit [msb:lsb] range into the name.
+    let display = match var.index() {
+        Some(idx) if var.length(h).unwrap_or(0) > 1 => {
+            format!("{full}[{}:{}]", idx.msb(), idx.lsb())
+        }
+        _ => full,
+    };
+
+    (display, scope)
 }
 
 fn unit_str(u: TimescaleUnit) -> &'static str {

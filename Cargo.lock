@@ -727,6 +727,7 @@ dependencies = [
 name = "rwave"
 version = "0.1.0"
 dependencies = [
+ "rustc-hash",
  "wellen",
 ]
 

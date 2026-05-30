@@ -21,5 +21,8 @@ path = "src/main.rs"
 [dependencies]
 # Waveform parsing front-end: vendored under vendor/wellen, pinned to 0.23.0.
 wellen = { path = "../../vendor/wellen" }
+# Fast non-cryptographic hasher for the signal-table grouping map (SipHash
+# dominated build time on large hierarchies). Same crate wellen already uses.
+rustc-hash = { workspace = true }
 
 [dev-dependencies]

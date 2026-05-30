@@ -741,6 +741,8 @@ impl PartialOrd for HeapEntry {
 fn build_signal_table(
     backend: &dyn WaveformBackend,
 ) -> (Vec<SignalInfo>, usize, Vec<(String, usize)>) {
+    use rustc_hash::FxHashMap;
+
     struct Group {
         width: u32,
         type_str: &'static str,
@@ -751,52 +753,79 @@ fn build_signal_table(
         decl_order: usize,
     }
 
-    let mut groups: HashMap<BackendSid, Group> = HashMap::new();
-    let mut raw_var_count = 0usize;
-    let mut type_counts: HashMap<&'static str, usize> = HashMap::new();
+    let decls = backend.var_decls();
+    let raw_var_count = decls.len();
 
-    for (decl_idx, decl) in backend.var_decls().into_iter().enumerate() {
-        raw_var_count += 1;
+    // Group declarations by backend handle. Most hierarchies have far fewer
+    // aliased signals than total var-decls, but reserving for the upper bound
+    // avoids rehashing on the way there. FxHashMap (vs the default SipHash map)
+    // is markedly faster for the many integer-keyed inserts here.
+    let mut groups: FxHashMap<BackendSid, Group> =
+        FxHashMap::with_capacity_and_hasher(decls.len(), Default::default());
+    let mut type_counts: FxHashMap<&'static str, usize> = FxHashMap::default();
+
+    for (decl_idx, decl) in decls.into_iter().enumerate() {
         *type_counts.entry(decl.type_str).or_insert(0) += 1;
 
-        let g = groups.entry(decl.backend_sid).or_insert_with(|| Group {
-            width: decl.width,
-            type_str: decl.type_str,
-            kind: decl.kind,
-            backend_sid: decl.backend_sid,
-            paths: Vec::new(),
-            scopes: Vec::new(),
-            decl_order: decl_idx,
-        });
-        if decl_idx < g.decl_order {
-            g.decl_order = decl_idx;
-        }
-        g.paths.push(decl.full_path);
-        if !decl.scope_path.is_empty() && !g.scopes.contains(&decl.scope_path) {
-            g.scopes.push(decl.scope_path);
+        match groups.get_mut(&decl.backend_sid) {
+            Some(g) => {
+                // Existing group (an alias): keep the earliest declaration index
+                // and accumulate the path / scope.
+                if decl_idx < g.decl_order {
+                    g.decl_order = decl_idx;
+                }
+                g.paths.push(decl.full_path);
+                if !decl.scope_path.is_empty() && !g.scopes.contains(&decl.scope_path) {
+                    g.scopes.push(decl.scope_path);
+                }
+            }
+            None => {
+                let mut scopes = Vec::new();
+                if !decl.scope_path.is_empty() {
+                    scopes.push(decl.scope_path);
+                }
+                let mut paths = Vec::with_capacity(1);
+                paths.push(decl.full_path);
+                groups.insert(
+                    decl.backend_sid,
+                    Group {
+                        width: decl.width,
+                        type_str: decl.type_str,
+                        kind: decl.kind,
+                        backend_sid: decl.backend_sid,
+                        paths,
+                        scopes,
+                        decl_order: decl_idx,
+                    },
+                );
+            }
         }
     }
 
-    let mut infos: Vec<SignalInfo> = groups
-        .into_values()
-        .map(|mut g| {
+    let mut infos: Vec<SignalInfo> = Vec::with_capacity(groups.len());
+    for mut g in groups.into_values() {
+        // The vast majority of signals have a single path; only pay the
+        // sort/dedup when there is more than one alias.
+        if g.paths.len() > 1 {
             g.paths.sort();
             g.paths.dedup();
-            let path = g.paths[0].clone();
-            SignalInfo {
-                path,
-                aliases: g.paths,
-                width: g.width,
-                type_str: g.type_str,
-                kind: g.kind,
-                scopes: g.scopes,
-                decl_order: g.decl_order,
-                backend_sid: g.backend_sid,
-            }
-        })
-        .collect();
+        }
+        let path = g.paths[0].clone();
+        infos.push(SignalInfo {
+            path,
+            aliases: g.paths,
+            width: g.width,
+            type_str: g.type_str,
+            kind: g.kind,
+            scopes: g.scopes,
+            decl_order: g.decl_order,
+            backend_sid: g.backend_sid,
+        });
+    }
 
-    infos.sort_by(|a, b| a.path.cmp(&b.path));
+    // Signal paths are unique, so an unstable sort is correct and faster than
+    // a stable one (less memory, no stability bookkeeping).
+    infos.sort_unstable_by(|a, b| a.path.cmp(&b.path));
 
     // Sort type counts by descending count, then name, for stable `info` output.
     let mut counts: Vec<(String, usize)> =
