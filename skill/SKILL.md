@@ -6,10 +6,10 @@ description: VCD/FST waveform analysis for RTL debug. Use when the user has a .v
 # rwave — agent skill
 
 `rwave` is a single static binary that parses VCD and FST and exposes seven
-query commands. **Always pass `--json` from an agent.** Output keys, time
-units, filter syntax, and value formatting are documented in the project
-[README](../README.md); this file covers only what is unique to driving the
-tool from an agent.
+query commands. **Always pass `--json` from an agent.** Prefer FST —
+typically 10x smaller than VCD. Output keys, time units, filter syntax, and
+value formatting are documented in the repo README; this file covers only
+what is unique to driving the tool from an agent.
 
 ## Install
 
@@ -46,30 +46,12 @@ User wants to know...
     └─ search         condition-based, three sub-modes:
         ├─ interval   time ranges where condition is true (no --show, no --changed)
         ├─ segment    intervals + observed values         (with --show)
-        └─ event      per-change snapshots                (with --changed)
+        └─ event      fires when one signal transitions   (--changed SIG)
 ```
 
 `search`'s JSON top-level key depends on the mode: `intervals` /
 `segments` / `events`. Always check `mode` before parsing.
-
-## Command quick reference
-
-`<F>` is the input file. See the README for the full surface; the table
-below is the agent-side cheat sheet of the JSON-form arguments and the
-fields you'll usually parse out.
-
-| Command | Common invocation | Useful JSON fields |
-|---|---|---|
-| `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
-| `list` | `rwave --json list <F> [--filter K]` | `signals[].path`, `signals[].width`, `signals[].type` |
-| `dump` | `rwave --json dump <F> --begin T --end T --filter K` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
-| `summary` | `rwave --json summary <F> [--filter K]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last` |
-| `snapshot` | `rwave --json snapshot <F> --at T [--filter K]` | `signals[].path`, `signals[].value`, `known`, `undefined` |
-| `compare` | `rwave --json compare <F> --at T1,T2 [--filter K]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2` |
-| `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
-
-For `dump`, **always pass `--begin/--end` and `--filter`** — running it
-unbounded on a large dump streams the whole file.
+`--changed` takes one signal pattern, not comma-separated.
 
 ## Condition syntax (search only)
 
@@ -83,7 +65,30 @@ Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`.
   difference"). To find unknowns, ask explicitly with `sig=x`.
 - No OR. Run two searches and merge.
 
+## Command quick reference
+
+`<F>` is the input file. See the repo README for the full surface; the table
+below is the agent-side cheat sheet of the JSON-form arguments and the
+fields you'll usually parse out.
+
+| Command | Common invocation | Useful JSON fields |
+|---|---|---|
+| `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
+| `list` | `rwave --json list <F> [--filter K]` | `signals[].path`, `signals[].width`, `signals[].type` |
+| `dump` | `rwave --json dump <F> --begin T --end T --filter K` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
+| `summary` | `rwave --json summary <F> [--filter K]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `active`, `static` |
+| `snapshot` | `rwave --json snapshot <F> --at T [--filter K]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
+| `compare` | `rwave --json compare <F> --at T1,T2 [--filter K]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
+| `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
+
+For `dump`, **always pass `--begin/--end` and `--filter`** — running it
+unbounded on a large dump streams the whole file.
+
+Filter patterns: substring (`clk`), suffix glob (`*_valid`), prefix glob (`top.u_dma.*`).
+
 ## Workflow patterns
+
+(all assume `--json`)
 
 ### First contact with a waveform file
 
@@ -146,17 +151,13 @@ summary --filter clk,rst,reset
 
 ## Documented behaviors that may surprise
 
-These are project-level choices documented in the
-[README's "Known differences"](../README.md#known-differences-from-the-reference-tool)
-and CHANGELOG; the ones most likely to bite an agent:
-
 - `dump`'s ordering of *simultaneous* events follows declaration order
   (not VCD writer-emission order). Set of events, timestamps, values are
   identical to the reference; only intra-timestamp order can differ.
-- `comments` is always `[]` and `synthesized_buses` is always `0` —
-  `wellen` does not expose either.
+- `comments` is always `[]` and `synthesized_buses` is always `0` 
 - A zero-width `search` window (`--begin T --end T`) yields no rows.
 
 For everything else (time syntax, filter syntax, value formatting,
 format quirks, the FST `parameter`-value drop, performance notes) see
-the [README](../README.md).
+the repo README.
+
