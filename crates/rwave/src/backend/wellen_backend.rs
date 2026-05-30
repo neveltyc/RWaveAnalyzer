@@ -64,12 +64,6 @@ impl WellenBackend {
     fn hierarchy(&self) -> &Hierarchy {
         self.wave.hierarchy()
     }
-
-    /// Absolute tick for a wellen time-table index.
-    #[inline]
-    fn tick_at(&self, idx: u32) -> i64 {
-        self.wave.time_table()[idx as usize] as i64
-    }
 }
 
 impl WaveformBackend for WellenBackend {
@@ -209,14 +203,18 @@ impl WellenBackend {
     /// to materialize the whole history (one pass, no per-change binary
     /// search). Time indices are resolved to absolute ticks here.
     fn decode_signal(&self, sig: &Signal) -> SignalTrace {
-        let times_idx = sig.time_indices();
-        let n = times_idx.len();
+        let n = sig.time_indices().len();
         let mut times = Vec::with_capacity(n);
         let mut values = Vec::with_capacity(n);
 
+        // Hoist the time-table slice out of the hot loop so resolving each
+        // change's absolute tick is a single indexed load, not a method call
+        // per change (this loop runs tens of millions of times on large files).
+        let time_table = self.wave.time_table();
+
         // iter_changes yields (TimeTableIdx, SignalValueRef) in order.
         for (tidx, val) in sig.iter_changes() {
-            times.push(self.tick_at(tidx));
+            times.push(time_table[tidx as usize] as i64);
             values.push(decode_value(val));
         }
 
