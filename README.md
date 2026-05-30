@@ -22,7 +22,22 @@ built for large dumps.
 * **Agent-friendly output.** Every command has a `--json` form with stable keys,
   and time is reported both as raw ticks and human units.
 
-## Build
+## Install
+
+Prebuilt binaries for tagged releases are attached to the
+[GitHub Releases](https://github.com/neveltyc/RWaveAnalyzer/releases) page:
+
+| Platform                 | Asset                          |
+|--------------------------|--------------------------------|
+| Linux x86-64 (static)    | `rwave-linux-amd64`            |
+| Linux aarch64 (static)   | `rwave-linux-arm64`            |
+| Windows x86-64           | `rwave-windows-amd64.exe`      |
+
+Download the right asset, mark it executable (`chmod +x rwave-linux-amd64`),
+and run. The Linux binaries are fully static (no glibc/musl dependency at
+runtime).
+
+## Build from source
 
 Requires a recent stable Rust toolchain (developed against 1.90, edition 2024).
 
@@ -37,23 +52,40 @@ parser revision. `vendor/fst-reader` additionally carries a local fix for an
 upstream out-of-bounds crash on FSTs with sparse/aliased signal handles (such as
 VCS output); see `CHANGELOG.md`.
 
-### Release binary (static Linux x86-64)
+### Release binaries
+
+`scripts/build-release.sh` cross-builds release binaries for the three
+supported deployment platforms via `cargo-zigbuild` (Zig as cross-linker), so
+the same recipe works from any host — macOS, Linux, etc.
+
+| target          | Rust triple                   | output                            |
+|-----------------|-------------------------------|-----------------------------------|
+| `linux-amd64`   | `x86_64-unknown-linux-musl`   | `dist/rwave-linux-amd64`          |
+| `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          |
+| `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    |
+
+The two Linux flavours are fully static (no libc dependency, run on any
+matching-arch Linux including Alpine and minimal containers). The Windows
+binary requires no extra DLLs.
 
 ```sh
-# native Linux build (one-time setup):
-rustup target add x86_64-unknown-linux-musl
-sudo apt-get install -y musl-tools        # Debian/Ubuntu
+# one-time setup (macOS):
+brew install rustup zig
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+rustup default stable
+cargo install --locked cargo-zigbuild
+rustup target add x86_64-unknown-linux-musl \
+                  aarch64-unknown-linux-musl \
+                  x86_64-pc-windows-gnu
 
-./scripts/build-release.sh                # -> dist/rwave-linux-amd64 (fully static)
-./scripts/build-release.sh --flavour glibc # -> dist/rwave-linux-amd64-glibc
+./scripts/build-release.sh                          # all three
+./scripts/build-release.sh --target linux-amd64    # one target
+./scripts/build-release.sh --target linux-amd64,windows-amd64
 ```
 
-The default is a fully static musl binary with no runtime dependencies. To
-cross-build the Linux binary from macOS (Apple Silicon), use
-`./scripts/build-release.sh --zig` (needs `cargo-zigbuild` + Zig). The script
-checks its prerequisites and prints exact install commands for anything missing.
-See `docs/BUILD.md` for the full development and deployment guide; cross-linker
-configuration lives in `.cargo/config.toml`.
+The script checks its prerequisites and prints exact install commands for
+anything missing. See `docs/BUILD.md` for the full deployment guide;
+cross-linker configuration lives in `.cargo/config.toml`.
 
 ## Usage
 
@@ -119,6 +151,7 @@ swapping parsers means adding one file under `backend/`.
 
 ```
 crates/rwave/src/
+  lib.rs          re-exports + crate VERSION (from CARGO_PKG_VERSION)
   cli.rs          argument grammar, help text, validation
   commands.rs     the seven commands, text + JSON emitters
   model.rs        Wave: signal table, heap-merge replay, bounded streaming
@@ -134,11 +167,17 @@ vendor/
   wellen/         vendored parser front-end
   fst-reader/     vendored + locally patched FST reader
 verify/
-  stimulus_src/   Verilog testbenches
-  stimulus/       generated matched VCD+FST pairs
+  stimulus_src/   Verilog testbenches (committed source)
+  stimulus/       generated VCD+FST pairs (metadata-normalized)
+  fixtures/       small handcrafted traces for differential tests
   run.sh          self-test harness (smoke + VCD/FST parity)
+  differential.sh parity check vs the reference Python tool
 scripts/
-  build-release.sh, gen-stimulus.sh
+  build-release.sh   cross-build all three release targets
+  gen-stimulus.sh    regenerate stimulus/ from stimulus_src/, sanitized
+.github/workflows/
+  ci.yml          test + verify on push / PR
+  release.yml     build + publish three artifacts on v* tags
 ```
 
 ## Performance notes

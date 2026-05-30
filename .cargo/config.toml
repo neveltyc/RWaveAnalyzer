@@ -1,24 +1,33 @@
-# Cross-compilation linker configuration for the release build.
+# Cross-compilation linker configuration for the release builds.
 #
-# Static Linux x86-64 (fully static, no libc dependency): the musl target links
-# against musl instead of glibc and produces a standalone executable that runs
-# on any x86-64 Linux. When building NATIVELY on Linux this uses the `musl-gcc`
-# wrapper (Debian/Ubuntu package: musl-tools).
+# `rwave` is pure Rust (no C code, no `build.rs`). The deployment targets are:
 #
-#   rustup target add x86_64-unknown-linux-musl
-#   sudo apt-get install -y musl-tools          # native Linux build only
+#   linux-amd64    x86_64-unknown-linux-musl    fully static
+#   linux-arm64    aarch64-unknown-linux-musl   fully static
+#   windows-amd64  x86_64-pc-windows-gnu        MinGW (no extra DLLs)
 #
-# Cross-building from another host (e.g. macOS arm64) is handled by
-# `cargo-zigbuild`, which supplies its own cross-linker via Zig and does NOT use
-# the linker setting below -- so no cross-GCC is needed there:
+# The entries below cover the **native** Linux build path: on a Linux host of
+# the matching architecture, plain `cargo build --target <triple>` will use
+# musl's `musl-gcc` wrapper as the linker, producing a fully static binary.
+# Install the wrapper once:
 #
-#   cargo install --locked cargo-zigbuild
-#   brew install zig                            # macOS
-#   scripts/build-release.sh --zig
+#   Debian/Ubuntu: sudo apt-get install -y musl-tools
+#   Fedora:        sudo dnf install -y musl-gcc
+#   Alpine:        apk add musl-dev
 #
-# See scripts/build-release.sh and docs/BUILD.md.
+# Cross-building from another host (the common case — e.g. macOS arm64) is
+# handled by `cargo-zigbuild`, which supplies its own cross-linker via Zig and
+# **ignores** the `linker` keys below. No cross-GCC is needed. See
+# `scripts/build-release.sh` and `docs/BUILD.md` for the unified recipe.
 
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"
 # Statically link everything (this is musl's default, stated explicitly).
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# No entry is needed for `x86_64-pc-windows-gnu`: the Rust toolchain ships the
+# MinGW import libraries, and `cargo-zigbuild` provides the linker.

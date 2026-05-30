@@ -1,8 +1,8 @@
 $date
-	Sat May 30 09:44:46 2026
+    1970-01-01 00:00:00 UTC
 $end
 $version
-	Icarus Verilog
+    rwave-stimulus
 $end
 $timescale
 	1s

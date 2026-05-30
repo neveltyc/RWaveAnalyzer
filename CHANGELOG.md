@@ -6,60 +6,14 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
-### Fixed
+_No unreleased changes._
 
-- **Out-of-range time values now report "too large" instead of "invalid".** A
-  bare integer time exceeding the int64 range (e.g. `99999999999999999999`)
-  overflowed Rust's integer parse and fell through to the generic "invalid time
-  value" error, whereas the reference reports `time value too large; got '…',
-  max ticks is 9223372036854775807`. The bare-integer and unit-scaled paths now
-  detect over-range values explicitly (the latter also guards against `as i64`
-  saturation), matching the reference. Added regression tests.
-- **Accept Python-style `_` digit separators in integer tick values.** The
-  reference parses ticks via Python's `int()`, which permits underscores between
-  digits (`1_000`, `1_0_0_0`); `rwave` previously rejected them as invalid. Bare
-  integer ticks now accept underscores with the same rules Python uses (rejecting
-  leading/trailing/doubled underscores, and — like the reference — not accepting
-  underscores in unit-suffixed or hex forms). Added regression tests.
+## [0.0.1] — 2026-05-30
 
-### Documented
+First public release. A Rust waveform analyzer for VCD and FST whose
+command-line surface mirrors the reference `VCD_ANALYZER` Python tool.
 
-- **`dump` event order within a single timestamp.** Clarified in the README that
-  when multiple signals change at the same time, `rwave` orders them by
-  declaration order, while the reference preserves the VCD's value-change
-  emission order (writer-specific; Icarus Verilog emits its initial dump in
-  reverse-declaration order). Values, timestamps, and the emitted event set are
-  identical — only the order of simultaneous events can differ, and only for
-  `dump`. `wellen` stores changes per-signal and does not retain cross-signal
-  file order, so matching it exactly is not possible without diverging from
-  upstream `wellen`. (The reference is VCD-only and cannot read FST.)
-
-### Changed
-
-- **Release build script now targets Linux x86-64 only.** `scripts/build-release.sh`
-  builds a fully static musl binary (`dist/rwave-linux-amd64`) by default, with
-  a `--flavour glibc` option, and supports cross-building from macOS via
-  `cargo-zigbuild` (`--zig`). It checks prerequisites and prints exact install
-  commands for anything missing. The Windows (MinGW) cross-target was dropped to
-  avoid maintaining a Windows build environment; native `cargo build` still
-  works on any platform for development. Added `docs/BUILD.md`.
-
-### Performance
-
-- **Inline bit-strings cut decode-time heap allocation.** Logic values are
-  materialized into a small inline string (`BitStr`) that keeps short values
-  (~99% of changes) off the heap, instead of allocating a `String` per change.
-  Decode of a 222k-signal FST is ~13% faster with byte-identical output. Also
-  optimized signal-table construction (~28% faster open) via a single
-  `full_name` computation per variable, `FxHashMap` grouping, and an unstable
-  final sort.
-
-## [0.1.0] — 2026-05-30
-
-First release. A Rust waveform analyzer for VCD and FST whose command-line
-surface mirrors the reference `VCD_ANALYZER` Python tool.
-
-### Added
+### Commands
 
 - Seven commands — `info`, `list`, `dump`, `summary`, `snapshot`, `compare`,
   `search` — each with a human-readable text form and a compact `--json` form
@@ -68,25 +22,24 @@ surface mirrors the reference `VCD_ANALYZER` Python tool.
   auto-detection.
 - Time handling with `fs/ps/ns/us/ms/s` suffixes and raw-tick integers;
   unit-suffixed times are scaled by the file timescale using banker's rounding
-  to match Python's `round()`.
+  to match Python's `round()`. Bare integer ticks accept Python-style `_` digit
+  separators (`1_000`, `1_0_0_0`). Out-of-range bare-integer ticks report
+  `time value too large; got '…', max ticks is 9223372036854775807`, matching
+  the reference rather than the generic "invalid" error.
 - Value formatting covering scalars, multi-bit vectors (decimal + zero-padded
-  hex), 4-state `x`/`z` vectors, reals, strings, and events, plus arbitrary-width
-  buses via an internal big-unsigned-integer type.
+  hex), 4-state `x`/`z` vectors, reals, strings, and events, plus
+  arbitrary-width buses via an internal big-unsigned-integer type.
 - Signal selection via a glob-lite matcher (`*`, `?`) and case-insensitive
   substring matching; conditional `search` with `=`, `==`, `!=` operators and
   multi-condition predicates.
-- Static, fully self-contained Linux binary (musl) and a Windows binary
-  (MinGW-w64); build automation in `scripts/build-release.sh`.
-- Test stimulus: five Verilog testbenches compiled to matched VCD+FST pairs, and
-  a `verify/run.sh` self-test harness checking command smoke and VCD/FST output
-  parity.
 
 ### Architecture
 
 - Layered design: `cli` → `commands` → `model` → `backend`, with `format`,
   `filter`, `condition`, and `json` as backend-agnostic leaf utilities. The
   parser is isolated behind a `WaveformBackend` trait so additional formats can
-  be added without touching the command set; `wellen` is one implementation.
+  be added without touching the command set; `wellen` is the only
+  implementation today.
 
 ### Performance
 
@@ -96,26 +49,59 @@ surface mirrors the reference `VCD_ANALYZER` Python tool.
 - Whole-file commands (`summary`, and unfiltered `dump`/`snapshot`/`compare`)
   stream their work in memory-bounded batches, decoding and releasing signal
   traces per batch so very large files (hundreds of thousands of signals) stay
-  within a few-GB working set. `dump` retains only the earliest `--limit` events
-  via a bounded heap. These paths are output-identical to the eager paths.
+  within a few-GB working set. `dump` retains only the earliest `--limit`
+  events via a bounded heap. These paths are output-identical to the eager
+  paths.
+- Logic values are materialized into a small inline string (`BitStr`) that
+  keeps short values (~99% of changes) off the heap, cutting decode-time heap
+  traffic by ~13% on a 222k-signal FST with byte-identical output.
+  Signal-table construction is ~28% faster via a single `full_name` per
+  variable, `FxHashMap` grouping, and an unstable final sort.
+
+### Release tooling
+
+- `scripts/build-release.sh` cross-builds release binaries for three
+  deployment targets via `cargo-zigbuild`:
+  - `linux-amd64`   → `x86_64-unknown-linux-musl`   (fully static)
+  - `linux-arm64`   → `aarch64-unknown-linux-musl`  (fully static)
+  - `windows-amd64` → `x86_64-pc-windows-gnu`       (no extra DLLs)
+- A GitHub Actions release workflow builds and uploads all three artifacts
+  on every `v*` tag.
 
 ### Fixed
 
 - **Vendored `fst-reader` out-of-bounds crash.** Upstream `fst-reader` 0.16.6
-  sizes the signal include-bitmask in `read_signals` from the number of distinct
-  signals (and the declared max var-id code), but some writers (observed with
-  VCS-generated FSTs) emit value-change geometry whose handle indices exceed
-  both. Reading any signal value from such a file panicked with an index-out-of-
-  bounds in the bitmask. The vendored copy sizes the mask to also cover the
-  largest handle present in the filter, eliminating the crash. This is the only
-  functional change to the vendored parser.
+  sizes the signal include-bitmask in `read_signals` from the number of
+  distinct signals (and the declared max var-id code), but some writers
+  (observed with VCS-generated FSTs) emit value-change geometry whose handle
+  indices exceed both. Reading any signal value from such a file panicked with
+  an index-out-of-bounds in the bitmask. The vendored copy sizes the mask to
+  also cover the largest handle present in the filter, eliminating the crash.
+  This is the only functional change to the vendored parser.
+
+### Testing
+
+- Five Verilog testbenches plus two FST-focused designs, compiled to matched
+  VCD+FST pairs. `$date`/`$version` blocks are normalized at generation time so
+  committed stimuli carry no host or wall-clock metadata.
+- `verify/run.sh` self-test harness covering command smoke and VCD/FST output
+  parity on the bundled stimulus.
+- `verify/differential.sh` parity check against the reference Python tool;
+  skips cleanly when the reference is absent.
 
 ### Known differences from the reference tool
 
-- VCD-specific wording generalized to format-neutral phrasing (e.g. "cannot open
-  waveform file").
+- VCD-specific wording generalized to format-neutral phrasing (e.g. "cannot
+  open waveform file").
 - `list --verbose` reports the backend signal index rather than the raw VCD
   identifier code (the abstract backend does not expose identifier codes).
 - `comments` is empty and `synthesized_buses` is 0 (no `wellen` equivalent).
 - `vcd2fst` does not carry Verilog parameter/localparam values into the FST;
   `rwave` reports whatever each file actually contains.
+- `dump` event order within a single timestamp follows declaration order
+  rather than the writer's VCD emission order. Values, timestamps, and the set
+  of emitted events are identical; only the order of simultaneous events can
+  differ, and only for `dump`. `wellen` stores changes per-signal and does not
+  retain cross-signal file order, so matching the reference exactly is not
+  possible without diverging from upstream `wellen`. (The reference is
+  VCD-only and cannot read FST.)

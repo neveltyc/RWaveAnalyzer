@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Allow the publish job to create a release and upload assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux-amd64
+          - linux-arm64
+          - windows-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            ${{
+              matrix.target == 'linux-amd64'   && 'x86_64-unknown-linux-musl'  ||
+              matrix.target == 'linux-arm64'   && 'aarch64-unknown-linux-musl' ||
+              matrix.target == 'windows-amd64' && 'x86_64-pc-windows-gnu'      || ''
+            }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Cache cargo registry + per-target build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-release-${{ matrix.target }}-
+
+      - name: Build release binary
+        run: bash scripts/build-release.sh --target ${{ matrix.target }}
+
+      - name: Compute SHA256
+        run: |
+          cd dist
+          for f in rwave-*; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwave-${{ matrix.target }}
+          path: dist/rwave-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-staging
+
+      - name: Flatten artifacts into dist/
+        run: |
+          mkdir -p dist
+          # download-artifact unpacks each artifact into its own subdir; the
+          # files are already uniquely named, so a flat copy is unambiguous.
+          find dist-staging -type f -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: Extract release notes for this tag from CHANGELOG.md
+        id: notes
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # Pull the `## [<tag>] ...` section out of CHANGELOG.md, stopping at
+          # the next `## ` heading. Falls back to a one-liner if the section
+          # isn't found.
+          notes="$(awk -v t="$tag" '
+            $0 ~ "^## \\[" t "\\]" { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md)"
+          if [ -z "${notes//[[:space:]]/}" ]; then
+            notes="Release $GITHUB_REF_NAME"
+          fi
+          {
+            echo "body<<NOTES_EOF"
+            echo "$notes"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: false
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/rwave-linux-amd64
+            dist/rwave-linux-amd64.sha256
+            dist/rwave-linux-arm64
+            dist/rwave-linux-arm64.sha256
+            dist/rwave-windows-amd64.exe
+            dist/rwave-windows-amd64.exe.sha256

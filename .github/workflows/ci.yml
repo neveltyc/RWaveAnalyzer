@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight run on the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (linux-amd64 native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # rwave is the only workspace member with tests. Vendored crates carry
+      # upstream's own test suites — exclude them to keep CI focused on us.
+      - name: cargo test (rwave only)
+        run: cargo test -p rwave --release
+
+      - name: cargo build (native release, sanity)
+        run: cargo build --release
+
+      - name: verify/run.sh against bundled stimuli
+        run: bash verify/run.sh
+
+  cross-build:
+    name: Cross build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux-amd64
+          - linux-arm64
+          - windows-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            ${{
+              matrix.target == 'linux-amd64'   && 'x86_64-unknown-linux-musl'  ||
+              matrix.target == 'linux-arm64'   && 'aarch64-unknown-linux-musl' ||
+              matrix.target == 'windows-amd64' && 'x86_64-pc-windows-gnu'      || ''
+            }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Cache cargo registry + per-target build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-cross-${{ matrix.target }}-
+
+      - name: Build
+        run: bash scripts/build-release.sh --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwave-${{ matrix.target }}
+          path: dist/rwave-*
+          if-no-files-found: error
+          retention-days: 7

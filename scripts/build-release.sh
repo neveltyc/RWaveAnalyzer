@@ -1,140 +1,196 @@
 #!/usr/bin/env bash
-# Build a release `rwave` binary for deployment on Linux x86-64.
+# Build release `rwave` binaries for the supported deployment platforms.
 #
-# Two flavours, selected with --flavour (default: static):
-#   static  -> x86_64-unknown-linux-musl, fully static (no libc dependency).
-#              Runs on any x86-64 Linux, including minimal/musl/container images.
-#              -> dist/rwave-linux-amd64
-#   glibc   -> x86_64-unknown-linux-gnu, dynamically linked against the system
-#              glibc. Smaller, but needs a compatible glibc at runtime.
-#              -> dist/rwave-linux-amd64-glibc
+#   target           Rust triple                    Output                            Linking
+#   --------------   ----------------------------   -------------------------------   ----------
+#   linux-amd64      x86_64-unknown-linux-musl      dist/rwave-linux-amd64            fully static
+#   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static
+#   windows-amd64    x86_64-pc-windows-gnu          dist/rwave-windows-amd64.exe      MinGW (Rust stdlib only; no DLLs required)
 #
-# Works in two scenarios:
-#   * Building natively on a Linux x86-64 host.
-#   * Cross-building from another host (e.g. macOS arm64) to Linux x86-64.
-#     The static/musl flavour cross-builds cleanly with `cargo-zigbuild`
-#     (recommended: it bundles the cross-linker via Zig). Pass --zig to use it.
+# Cross-compilation is unified under `cargo-zigbuild` (Zig as cross-linker), so
+# the same recipe works from macOS, Linux, or any other host:
 #
-# This script checks its prerequisites up front and prints exact install
-# commands for anything missing, instead of failing partway with a cryptic
-# linker error.
+#   one-time setup (macOS):
+#     brew install rustup zig
+#     export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+#     rustup default stable
+#     cargo install --locked cargo-zigbuild
+#     rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+#                       x86_64-pc-windows-gnu
+#
+# A native Linux host that prefers GCC over Zig can still build the
+# matching-arch musl target with plain `cargo build` provided `musl-gcc` is
+# installed (Debian/Ubuntu: `musl-tools`). The cross targets always go through
+# Zig.
 #
 # Usage:
-#   scripts/build-release.sh                # static musl binary (native or --zig)
-#   scripts/build-release.sh --flavour glibc
-#   scripts/build-release.sh --zig          # cross-build static from macOS/other
-#   scripts/build-release.sh --run          # smoke-test the result (native only)
+#   scripts/build-release.sh                              # all three targets
+#   scripts/build-release.sh --target linux-amd64        # one target
+#   scripts/build-release.sh --target linux-amd64,windows-amd64
+#   scripts/build-release.sh --run                       # smoke-test runnable outputs
+#
+# The script checks its prerequisites and prints exact install commands for
+# anything missing, instead of failing partway with a cryptic linker error.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Make Homebrew's keg-only rustup and the cargo bin dir discoverable even when
+# the user's shell rc hasn't been re-sourced.
+export PATH="/opt/homebrew/opt/rustup/bin:${HOME}/.cargo/bin:${PATH}"
+
 # ---- args ----------------------------------------------------------------
-FLAVOUR="static"   # static | glibc
-USE_ZIG=0
+TARGETS_INPUT=""
 RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --flavour) FLAVOUR="${2:-}"; shift 2 ;;
-    --flavour=*) FLAVOUR="${1#*=}"; shift ;;
-    --zig) USE_ZIG=1; shift ;;
+    --target) TARGETS_INPUT="${2:-}"; shift 2 ;;
+    --target=*) TARGETS_INPUT="${1#*=}"; shift ;;
     --run) RUN=1; shift ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-case "$FLAVOUR" in
-  static) TARGET="x86_64-unknown-linux-musl"; OUT="dist/rwave-linux-amd64" ;;
-  glibc)  TARGET="x86_64-unknown-linux-gnu";  OUT="dist/rwave-linux-amd64-glibc" ;;
-  *) echo "invalid --flavour '$FLAVOUR' (expected: static | glibc)" >&2; exit 2 ;;
-esac
+ALL_TARGETS=(linux-amd64 linux-arm64 windows-amd64)
+if [ -z "$TARGETS_INPUT" ]; then
+  TARGETS=("${ALL_TARGETS[@]}")
+else
+  IFS=',' read -r -a TARGETS <<< "$TARGETS_INPUT"
+fi
+
+triple_for() {
+  case "$1" in
+    linux-amd64)    echo "x86_64-unknown-linux-musl" ;;
+    linux-arm64)    echo "aarch64-unknown-linux-musl" ;;
+    windows-amd64)  echo "x86_64-pc-windows-gnu" ;;
+    *) return 1 ;;
+  esac
+}
+
+output_for() {
+  case "$1" in
+    linux-amd64)    echo "dist/rwave-linux-amd64" ;;
+    linux-arm64)    echo "dist/rwave-linux-arm64" ;;
+    windows-amd64)  echo "dist/rwave-windows-amd64.exe" ;;
+    *) return 1 ;;
+  esac
+}
+
+binary_for() {
+  case "$1" in
+    windows-amd64)  echo "target/$(triple_for "$1")/release/rwave.exe" ;;
+    *)              echo "target/$(triple_for "$1")/release/rwave" ;;
+  esac
+}
+
+# Validate target names up front so a typo fails fast.
+for t in "${TARGETS[@]}"; do
+  triple_for "$t" >/dev/null || { echo "unknown target '$t' (expected: ${ALL_TARGETS[*]})" >&2; exit 2; }
+done
 
 info() { printf '>> %s\n' "$*"; }
 ok()   { printf '   %s\n' "$*"; }
 die()  { printf 'XX %s\n' "$*" >&2; exit 1; }
-
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Detect host OS/arch so we can give the right install hints.
-HOST_OS="$(uname -s)"   # Linux | Darwin
-HOST_ARCH="$(uname -m)" # x86_64 | arm64 | aarch64
+HOST_OS="$(uname -s)"     # Linux | Darwin
+HOST_ARCH="$(uname -m)"   # x86_64 | arm64 | aarch64
 
 # ---- prerequisite checks -------------------------------------------------
-have cargo || die "cargo not found. Install Rust from https://rustup.rs and re-run."
-have rustup || info "rustup not found; assuming a non-rustup Rust. Ensure target '$TARGET' is available."
+have cargo  || die "cargo not found. Install Rust (https://rustup.rs) and re-run."
+have rustup || info "rustup not found; assuming a non-rustup Rust. Ensure the required targets are available."
 
-# Are we already on Linux x86-64 (native), or cross-building?
-NATIVE_LINUX_X64=0
-if [ "$HOST_OS" = "Linux" ] && { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; }; then
-  NATIVE_LINUX_X64=1
-fi
+# Decide the build driver per target.
+#   - Native Linux on the matching musl arch + musl-gcc available -> plain cargo build.
+#   - Everything else -> cargo zigbuild (uniform cross story).
+need_zigbuild=0
+for t in "${TARGETS[@]}"; do
+  triple="$(triple_for "$t")"
+  native=0
+  if [ "$HOST_OS" = "Linux" ]; then
+    case "$t-$HOST_ARCH" in
+      linux-amd64-x86_64|linux-amd64-amd64)         have musl-gcc && native=1 ;;
+      linux-arm64-aarch64|linux-arm64-arm64)        have musl-gcc && native=1 ;;
+    esac
+  fi
+  if [ "$native" = "0" ]; then need_zigbuild=1; fi
+done
 
-# Decide on the build driver.
-#   - Native Linux x86-64: plain `cargo build` (musl needs musl-gcc; glibc is built-in).
-#   - Cross from another host: require --zig (cargo-zigbuild) -- the least painful
-#     cross story; we refuse to guess at a hand-configured cross-GCC.
-BUILD_CMD=(cargo build)
-if [ "$USE_ZIG" = "1" ]; then
+if [ "$need_zigbuild" = "1" ]; then
   have cargo-zigbuild || die "cargo-zigbuild not found. Install it with:
-     cargo install --locked cargo-zigbuild
-   and install Zig (the cross-linker it uses):
-     macOS:  brew install zig
-     other:  see https://ziglang.org/download/  (or: pip install ziglang)"
+     cargo install --locked cargo-zigbuild"
   if ! have zig && ! python3 -c 'import ziglang' >/dev/null 2>&1; then
-    die "zig not found. Install it (macOS: 'brew install zig'; or 'pip install ziglang')."
+    die "zig not found. Install it:
+     macOS:  brew install zig
+     other:  https://ziglang.org/download/  (or: pip install ziglang)"
   fi
-  BUILD_CMD=(cargo zigbuild)
-  ok "Cross-build driver: cargo-zigbuild (Zig linker)."
-elif [ "$NATIVE_LINUX_X64" = "1" ]; then
-  if [ "$FLAVOUR" = "static" ] && ! have musl-gcc && ! have x86_64-linux-musl-gcc; then
-    die "musl C toolchain not found (needed for the static/musl build).
-   Install it:
-     Debian/Ubuntu: sudo apt-get install -y musl-tools
-     Fedora:        sudo dnf install -y musl-gcc
-     Alpine:        apk add musl-dev
-   Or build the dynamic flavour:  scripts/build-release.sh --flavour glibc
-   Or cross-build with Zig:       scripts/build-release.sh --zig"
-  fi
-  ok "Native Linux x86-64 build."
-else
-  die "Building for Linux x86-64 from a $HOST_OS/$HOST_ARCH host requires cross-compilation.
-   Re-run with --zig (recommended):
-     cargo install --locked cargo-zigbuild
-     brew install zig           # macOS;  or 'pip install ziglang'
-     scripts/build-release.sh --zig
-   (--zig works for the default static flavour and for --flavour glibc.)"
 fi
 
-# Ensure the Rust target's std library is installed (rustup only).
+# Ensure required Rust targets' std libs are present (rustup only).
 if have rustup; then
-  if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
-    info "Adding Rust target $TARGET ..."
-    rustup target add "$TARGET"
-  fi
+  installed="$(rustup target list --installed 2>/dev/null || true)"
+  for t in "${TARGETS[@]}"; do
+    triple="$(triple_for "$t")"
+    if ! printf '%s\n' "$installed" | grep -qx "$triple"; then
+      info "Adding Rust target $triple ..."
+      rustup target add "$triple"
+    fi
+  done
 fi
 
-# ---- build ---------------------------------------------------------------
 mkdir -p dist
-info "Building rwave (release, $FLAVOUR -> $TARGET) ..."
-"${BUILD_CMD[@]}" --release --target "$TARGET"
 
-BIN="target/$TARGET/release/rwave"
-[ -f "$BIN" ] || die "build reported success but $BIN is missing."
-cp "$BIN" "$OUT"
+# ---- build loop ----------------------------------------------------------
+build_one() {
+  local t="$1"
+  local triple; triple="$(triple_for "$t")"
+  local bin; bin="$(binary_for "$t")"
+  local out; out="$(output_for "$t")"
 
-ok "Binary: $OUT"
-if have file; then ok "$(file "$OUT")"; fi
-SIZE_KB=$(( $(wc -c < "$OUT") / 1024 ))
-ok "Size:   ${SIZE_KB} KB"
-
-# Smoke test only makes sense if the binary is runnable on this host.
-if [ "$RUN" = "1" ]; then
-  if [ "$NATIVE_LINUX_X64" = "1" ]; then
-    info "Smoke test: $OUT --version"
-    "$OUT" --version
-  else
-    info "Skipping --run: cross-built Linux binary is not runnable on this $HOST_OS host."
+  # Pick driver for THIS target.
+  local -a cmd=(cargo build)
+  local native=0
+  if [ "$HOST_OS" = "Linux" ]; then
+    case "$t-$HOST_ARCH" in
+      linux-amd64-x86_64|linux-amd64-amd64)   have musl-gcc && native=1 ;;
+      linux-arm64-aarch64|linux-arm64-arm64)  have musl-gcc && native=1 ;;
+    esac
   fi
+  if [ "$native" = "0" ]; then cmd=(cargo zigbuild); fi
+
+  info "Building $t  ($triple, driver: ${cmd[*]}) ..."
+  "${cmd[@]}" --release --target "$triple"
+
+  [ -f "$bin" ] || die "build reported success but $bin is missing."
+  cp "$bin" "$out"
+
+  ok "Binary: $out"
+  if have file; then ok "$(file "$out")"; fi
+  local kb; kb=$(( $(wc -c < "$out") / 1024 ))
+  ok "Size:   ${kb} KB"
+}
+
+for t in "${TARGETS[@]}"; do
+  build_one "$t"
+done
+
+# ---- optional smoke test -------------------------------------------------
+if [ "$RUN" = "1" ]; then
+  for t in "${TARGETS[@]}"; do
+    out="$(output_for "$t")"
+    runnable=0
+    case "$t-$HOST_OS-$HOST_ARCH" in
+      linux-amd64-Linux-x86_64|linux-amd64-Linux-amd64)   runnable=1 ;;
+      linux-arm64-Linux-aarch64|linux-arm64-Linux-arm64)  runnable=1 ;;
+    esac
+    if [ "$runnable" = "1" ]; then
+      info "Smoke test: $out --version"
+      "$out" --version
+    else
+      info "Skipping --run for $t: not runnable on $HOST_OS/$HOST_ARCH."
+    fi
+  done
 fi
 
 info "Done."
