@@ -1,46 +1,48 @@
 # bench/ — cross-version performance baseline
 
-Three files do the work:
+Two files do the work:
 
 | file | role |
 |---|---|
-| `stress.fst.xz` | committed dataset (~160 KB compressed, ~2 MB decompressed). 4,394 signals, 77M value changes, 1.5 ms simulated. Deterministic. |
-| `gen.py` | how `stress.fst.xz` was produced. Pure Python via [`pylibfst`](https://pypi.org/project/pylibfst/). Not run in CI. |
-| `run.py` | the benchmark itself. Auto-decompresses the dataset and runs `rwave` under GNU time for nine commands. Used by the CI bench workflow. |
+| `stress.fst.xz` | committed dataset (~8 MB compressed, ~63 MB decompressed). A real Verilator-generated FST from a [VeeRwolf](https://github.com/chipsalliance/Cores-VeeR-EL2) RISC-V SoC running [Zephyr RTOS](https://github.com/zephyrproject-rtos): 10,220 unique signals, 20 µs of simulated boot, deep AXI/Wishbone/JTAG/UART hierarchy. |
+| `run.py` | the benchmark itself. Auto-decompresses the dataset and runs `rwave` under GNU time across nine practical agent queries; emits a compact 3-row Markdown table + JSON dump. |
 
 ## Run the bench
 
 ```sh
 cargo build --release           # builds target/release/rwave
-python3 bench/run.py             # auto-decompresses, runs the nine commands
+python3 bench/run.py            # auto-decompresses, runs the nine commands
 ```
 
-No Python deps required for `run.py` itself — it shells out to `rwave` and
-parses `xz` / GNU time output. On macOS install GNU time once with
+No Python deps required for `run.py` — it shells out to `rwave` and parses
+`xz` / GNU time output. On macOS install GNU time once with
 `brew install gnu-time`; on Linux distros it's the `time` package.
 
-## Regenerate the dataset (rare)
+The decompressed FST (`bench/stress.fst`, ~63 MB) is git-ignored and
+recreated on first run.
 
-Only when the activity model is intentionally changed:
+## What's measured
+
+Every command is **scoped via `--filter` or `--condition`** to one module —
+this mirrors realistic agent use. Unfiltered whole-file commands on this
+trace consume **7–8 GB peak RSS** and run for 50+ seconds; they're
+deliberately *not* in the bench because they don't fit standard 7 GB CI
+runners. If you want to verify those numbers locally:
 
 ```sh
-python3 -m venv /tmp/v && /tmp/v/bin/pip install pylibfst
-/tmp/v/bin/python bench/gen.py --size medium
-xz -9 -k bench/build/stress.fst
-mv bench/build/stress.fst.xz bench/stress.fst.xz
+# locally only — needs > 8 GB RAM and ~60s
+gtime -f "%e s, %M KB" target/release/rwave --json summary bench/stress.fst
 ```
 
-`gen.py` has three presets (`small` ~5 MB, `medium` ~30 MB pre-xz,
-`huge` ~100 MB). The committed dataset is `medium`. **Always re-run the
-bench after regenerating** so the comparison baseline tracks reality.
+## Trace provenance
 
-## What the dataset models
+The FST was captured from a real open-source simulation run by
+[@neveltyc](https://github.com/neveltyc):
+[VeeRwolf](https://github.com/chipsalliance/Cores-VeeR-EL2) (Verilator)
+running a Zephyr RTOS boot image, 20 µs of simulated time. The original
+~63 MB FST was re-compressed with `xz -9` (single-stream, no tar wrapper)
+to fit the repo at ~8 MB.
 
-A simplified 4-cluster × 16-core SoC with three activity tiers:
-
-- **Tier 1** — clocks, pipeline stages, retire — change every cycle.
-- **Tier 2** — buses, ALU/LSU operands, NoC — change ~10% of cycles.
-- **Tier 3** — regfile entries, CSRs, exception flags — change <0.1% of cycles.
-
-This mirrors what real chip dumps look like at scale: many thousand signals
-declared, most mostly idle, a few clocks driving the bulk of value changes.
+Because the trace is deterministic and fully checked in, cross-version
+rwave benchmark comparisons are reproducible: same bytes, same numbers
+modulo host CPU noise.
