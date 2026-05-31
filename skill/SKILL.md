@@ -52,6 +52,7 @@ User wants to know...
 `search`'s JSON top-level key depends on the mode: `intervals` /
 `segments` / `events`. Always check `mode` before parsing.
 `--changed` takes one signal pattern, not comma-separated.
+To catch both edges, run two searches: `!=0` for rising, `=0` for falling.
 
 ## Condition syntax (search only)
 
@@ -83,6 +84,7 @@ fields you'll usually parse out.
 
 For `dump`, **always pass `--begin/--end` and `--filter`** — running it
 unbounded on a large dump streams the whole file.
+For `snapshot` and `compare` on large files, **always pass `--filter`** — unfiltered scans emit every signal.
 
 Filter patterns: substring (`clk`), suffix glob (`*_valid`), prefix glob (`top.u_dma.*`).
 `list` shows all aliases of matched signals, not only the matching paths.
@@ -138,6 +140,19 @@ summary --filter clk,rst,reset
 # clk should toggle with balanced rise/fall
 # rst should be static after the initial assertion
 ```
+
+### Event-driven signal investigation
+
+Use `search --condition --show` to bulk-extract field values across events —
+one call replaces multiple `snapshot` calls. Catch both edges with
+complementary `search --changed` (rising: `!=0`, falling: `=0`). Then drill
+down with `compare` for jump deltas, `dump --limit 0` for full traces, and
+`snapshot` for precise checkpoints.
+When a transition is visible in a different signal's trace, use `dump --limit 0` +
+external post-processing — not `search --changed`.
+
+`dump` with multiple signals interleaves their events chronologically —
+see e.g. a push flag and data bus transition side-by-side in one timeline.
 
 ## Agent-side gotchas
 

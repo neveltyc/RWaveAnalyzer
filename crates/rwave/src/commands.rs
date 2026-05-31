@@ -383,6 +383,9 @@ fn cmd_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
     }
 
     println!("Matched: {}/{}", total, wave.signal_count());
+    if total == 0 {
+        println!("no match; try a broader filter or run without --filter to browse");
+    }
     for e in entries.iter().take(shown_n) {
         println!(
             "  {} {}  {}",
