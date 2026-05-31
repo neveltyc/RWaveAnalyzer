@@ -38,12 +38,14 @@ DEFAULT_OUT  = HERE / "build" / "results.json"
 
 
 def ensure_fst(fst: Path, xz: Path) -> None:
-    """If the .fst is missing but .xz is present, decompress it."""
+    """If the .fst is missing but .xz is present, decompress it. Progress
+    messages go to stderr so stdout stays clean (CI captures stdout as the
+    release-body markdown via `tee`)."""
     if fst.exists():
         return
     if not xz.exists():
         sys.exit(f"error: neither {fst} nor {xz} exists")
-    print(f"  decompressing {xz.name} -> {fst.name} ...")
+    print(f"  decompressing {xz.name} -> {fst.name} ...", file=sys.stderr)
     subprocess.run(["xz", "-dk", str(xz)], check=True)
 
 
