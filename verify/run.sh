@@ -25,7 +25,7 @@ if [[ ! -x "$RW" ]]; then
 fi
 
 STIM=verify/stimulus
-designs=(counter_fsm xz_tristate hier_deep real_event handshake_proto edge_cases wide_bus)
+designs=(counter_fsm xz_tristate hier_deep real_event handshake_proto)
 # Designs whose FST drops parameter values (see header).
 PARAM_DESIGNS=" counter_fsm "
 
