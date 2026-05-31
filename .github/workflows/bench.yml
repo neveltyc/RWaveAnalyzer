@@ -64,8 +64,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          # Pull current release body
-          current=$(gh release view "$tag" --json body --jq '.body')
+
+          # Bench and release workflows trigger on the same tag push and run
+          # in parallel; release.yml needs ~5 minutes to publish before we can
+          # `gh release view` its body. Poll for up to 15 minutes.
+          for attempt in $(seq 1 30); do
+            if current=$(gh release view "$tag" --json body --jq '.body' 2>/dev/null); then
+              echo "release $tag is live after $attempt poll(s)"
+              break
+            fi
+            echo "release $tag not yet published; sleeping 30s ..."
+            sleep 30
+          done
+          if [ -z "${current+set}" ]; then
+            echo "release $tag never appeared after 15 min; bailing out" >&2
+            exit 1
+          fi
 
           # Strip the "# rwave bench results" header and the trailing
           # "_JSON dump: ..._" line from the bench output; keep the
