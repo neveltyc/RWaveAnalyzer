@@ -23,6 +23,11 @@
 *.vvp
 /verify/stimulus_src/*.vvp
 
+# Bench: stress.fst.xz is committed; the decompressed FST and any
+# regenerated artefacts under build/ are not.
+/bench/stress.fst
+/bench/build/
+
 # Local scratch
 /scratch/
 /tmp/

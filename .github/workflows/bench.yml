@@ -1,0 +1,86 @@
+name: Bench
+
+# Performance baseline against the committed bench/stress.fst.xz. Runs:
+#   - on every `v*` tag push, then appends a results table to the release body
+#   - on manual workflow_dispatch (uploads results as a workflow artifact only)
+#
+# The dataset (~160 KB compressed, ~2 MB decompressed; 4,394 signals,
+# 77M value changes) is checked in, so this workflow only needs cargo + python3
+# + xz + gnu-time — all preinstalled on ubuntu-latest runners.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # so the tag-push job can `gh release edit`
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Performance baseline (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-bench-
+
+      - name: Build rwave (release)
+        run: cargo build --release
+
+      - name: Run benchmark
+        run: |
+          mkdir -p bench/build
+          python3 bench/run.py | tee bench/build/bench-output.md
+
+      - name: Upload JSON + Markdown as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.ref_name }}
+          path: |
+            bench/build/results.json
+            bench/build/bench-output.md
+          retention-days: 90
+
+      - name: Append results to the release notes (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Pull current release body
+          current=$(gh release view "$tag" --json body --jq '.body')
+
+          # Strip the "# rwave bench results" header and the trailing
+          # "_JSON dump: ..._" line from the bench output; keep the
+          # metadata bullets + table.
+          trimmed=$(awk '
+            /^# rwave bench results/ { next }
+            /^_JSON dump/            { next }
+            { print }
+          ' bench/build/bench-output.md)
+
+          {
+            printf '%s\n\n' "$current"
+            printf -- '---\n\n'
+            printf '### Performance baseline (ubuntu-latest, single run)\n'
+            printf '%s\n' "$trimmed"
+          } > /tmp/release-body.md
+
+          gh release edit "$tag" --notes-file /tmp/release-body.md
