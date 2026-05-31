@@ -38,6 +38,7 @@ install command for anything missing.
 | `linux-amd64`   | `x86_64-unknown-linux-musl`   | `dist/rwave-linux-amd64`          | fully static; runs on any x86-64 Linux (incl. containers/Alpine) |
 | `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          | fully static; runs on any aarch64 Linux           |
 | `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    | MinGW; no extra DLLs (Rust stdlib only)           |
+| `macos-arm64`   | `aarch64-apple-darwin`        | `dist/rwave-macos-arm64`          | native Mach-O; built only from a macOS host (cross-build from Linux to Darwin needs the Apple SDK and is not supported) |
 
 All three are produced by a single command and use the same cross-compilation
 driver, so the recipe works identically from macOS, Linux, or any other host.

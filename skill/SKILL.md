@@ -24,7 +24,7 @@ chmod +x ~/.local/bin/rwave
 ```
 
 Other assets on the same release page: `rwave-linux-arm64`,
-`rwave-windows-amd64.exe`. Each has a matching `.sha256`.
+`rwave-macos-arm64`, `rwave-windows-amd64.exe`. Each has a matching `.sha256`.
 
 ## Pick the right command
 

@@ -6,9 +6,13 @@
 #   linux-amd64      x86_64-unknown-linux-musl      dist/rwave-linux-amd64            fully static
 #   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static
 #   windows-amd64    x86_64-pc-windows-gnu          dist/rwave-windows-amd64.exe      MinGW (Rust stdlib only; no DLLs required)
+#   macos-arm64      aarch64-apple-darwin           dist/rwave-macos-arm64            native (Apple Silicon)
 #
-# Cross-compilation is unified under `cargo-zigbuild` (Zig as cross-linker), so
-# the same recipe works from macOS, Linux, or any other host:
+# Linux & Windows targets are produced from any host via `cargo-zigbuild`
+# (Zig as cross-linker). The macOS target MUST be built from a macOS host —
+# cross-compiling to Darwin from Linux needs the Apple SDK and is
+# deliberately not supported here. (Intel-Mac binaries are not shipped;
+# Apple Silicon has been the only macOS arch worth supporting since 2023.)
 #
 #   one-time setup (macOS):
 #     brew install rustup zig
@@ -16,7 +20,7 @@
 #     rustup default stable
 #     cargo install --locked cargo-zigbuild
 #     rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-#                       x86_64-pc-windows-gnu
+#                       x86_64-pc-windows-gnu aarch64-apple-darwin
 #
 # A native Linux host that prefers GCC over Zig can still build the
 # matching-arch musl target with plain `cargo build` provided `musl-gcc` is
@@ -59,7 +63,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ALL_TARGETS=(linux-amd64 linux-arm64 windows-amd64)
+ALL_TARGETS=(linux-amd64 linux-arm64 windows-amd64 macos-arm64)
 if [ -z "$TARGETS_INPUT" ]; then
   TARGETS=("${ALL_TARGETS[@]}")
 else
@@ -71,6 +75,7 @@ triple_for() {
     linux-amd64)    echo "x86_64-unknown-linux-musl" ;;
     linux-arm64)    echo "aarch64-unknown-linux-musl" ;;
     windows-amd64)  echo "x86_64-pc-windows-gnu" ;;
+    macos-arm64)    echo "aarch64-apple-darwin" ;;
     *) return 1 ;;
   esac
 }
@@ -80,6 +85,7 @@ output_for() {
     linux-amd64)    echo "dist/rwave-linux-amd64" ;;
     linux-arm64)    echo "dist/rwave-linux-arm64" ;;
     windows-amd64)  echo "dist/rwave-windows-amd64.exe" ;;
+    macos-arm64)    echo "dist/rwave-macos-arm64" ;;
     *) return 1 ;;
   esac
 }
@@ -109,19 +115,30 @@ have cargo  || die "cargo not found. Install Rust (https://rustup.rs) and re-run
 have rustup || info "rustup not found; assuming a non-rustup Rust. Ensure the required targets are available."
 
 # Decide the build driver per target.
+#   - macOS targets: must be built from a macOS host. Plain `cargo build`
+#     (native dylib link); Apple Silicon host cross-builds x86_64-apple-darwin
+#     via rustup's downloaded std lib, no extra tooling.
 #   - Native Linux on the matching musl arch + musl-gcc available -> plain cargo build.
-#   - Everything else -> cargo zigbuild (uniform cross story).
+#   - Everything else (Linux/Windows musl from any host) -> cargo zigbuild.
 need_zigbuild=0
 for t in "${TARGETS[@]}"; do
-  triple="$(triple_for "$t")"
-  native=0
-  if [ "$HOST_OS" = "Linux" ]; then
-    case "$t-$HOST_ARCH" in
-      linux-amd64-x86_64|linux-amd64-amd64)         have musl-gcc && native=1 ;;
-      linux-arm64-aarch64|linux-arm64-arm64)        have musl-gcc && native=1 ;;
-    esac
-  fi
-  if [ "$native" = "0" ]; then need_zigbuild=1; fi
+  case "$t" in
+    macos-*)
+      if [ "$HOST_OS" != "Darwin" ]; then
+        die "$t can only be built on a macOS host (cross-compile from $HOST_OS to Darwin needs the Apple SDK and is not supported)."
+      fi
+      ;;
+    *)
+      native=0
+      if [ "$HOST_OS" = "Linux" ]; then
+        case "$t-$HOST_ARCH" in
+          linux-amd64-x86_64|linux-amd64-amd64)         have musl-gcc && native=1 ;;
+          linux-arm64-aarch64|linux-arm64-arm64)        have musl-gcc && native=1 ;;
+        esac
+      fi
+      if [ "$native" = "0" ]; then need_zigbuild=1; fi
+      ;;
+  esac
 done
 
 if [ "$need_zigbuild" = "1" ]; then
@@ -157,14 +174,22 @@ build_one() {
 
   # Pick driver for THIS target.
   local -a cmd=(cargo build)
-  local native=0
-  if [ "$HOST_OS" = "Linux" ]; then
-    case "$t-$HOST_ARCH" in
-      linux-amd64-x86_64|linux-amd64-amd64)   have musl-gcc && native=1 ;;
-      linux-arm64-aarch64|linux-arm64-arm64)  have musl-gcc && native=1 ;;
-    esac
-  fi
-  if [ "$native" = "0" ]; then cmd=(cargo zigbuild); fi
+  case "$t" in
+    macos-*)
+      # native cargo build on a macOS host; no extra tooling needed.
+      cmd=(cargo build)
+      ;;
+    *)
+      local native=0
+      if [ "$HOST_OS" = "Linux" ]; then
+        case "$t-$HOST_ARCH" in
+          linux-amd64-x86_64|linux-amd64-amd64)   have musl-gcc && native=1 ;;
+          linux-arm64-aarch64|linux-arm64-arm64)  have musl-gcc && native=1 ;;
+        esac
+      fi
+      if [ "$native" = "0" ]; then cmd=(cargo zigbuild); fi
+      ;;
+  esac
 
   info "Building $t  ($triple, driver: ${cmd[*]}) ..."
   "${cmd[@]}" --release --target "$triple"
@@ -190,6 +215,7 @@ if [ "$RUN" = "1" ]; then
     case "$t-$HOST_OS-$HOST_ARCH" in
       linux-amd64-Linux-x86_64|linux-amd64-Linux-amd64)   runnable=1 ;;
       linux-arm64-Linux-aarch64|linux-arm64-Linux-arm64)  runnable=1 ;;
+      macos-arm64-Darwin-arm64|macos-arm64-Darwin-aarch64) runnable=1 ;;
     esac
     if [ "$runnable" = "1" ]; then
       info "Smoke test: $out --version"

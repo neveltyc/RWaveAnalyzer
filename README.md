@@ -31,6 +31,7 @@ Prebuilt binaries for tagged releases are attached to the
 |--------------------------|--------------------------------|
 | Linux x86-64 (static)    | `rwave-linux-amd64`            |
 | Linux aarch64 (static)   | `rwave-linux-arm64`            |
+| macOS Apple Silicon      | `rwave-macos-arm64`            |
 | Windows x86-64           | `rwave-windows-amd64.exe`      |
 
 Download the right asset, mark it executable (`chmod +x rwave-linux-amd64`),
@@ -63,6 +64,7 @@ the same recipe works from any host — macOS, Linux, etc.
 | `linux-amd64`   | `x86_64-unknown-linux-musl`   | `dist/rwave-linux-amd64`          |
 | `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          |
 | `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    |
+| `macos-arm64`   | `aarch64-apple-darwin`        | `dist/rwave-macos-arm64`          |
 
 The two Linux flavours are fully static (no libc dependency, run on any
 matching-arch Linux including Alpine and minimal containers). The Windows
@@ -76,7 +78,8 @@ rustup default stable
 cargo install --locked cargo-zigbuild
 rustup target add x86_64-unknown-linux-musl \
                   aarch64-unknown-linux-musl \
-                  x86_64-pc-windows-gnu
+                  x86_64-pc-windows-gnu \
+                  aarch64-apple-darwin
 
 ./scripts/build-release.sh                          # all three
 ./scripts/build-release.sh --target linux-amd64    # one target
