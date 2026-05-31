@@ -225,7 +225,7 @@ runs on both a VCD and an FST, and that the value-bearing commands produce
 identical results across formats for the same design.
 
 `verify/differential.sh` compares `rwave` against the reference `vcd_analyzer.py`
-across all seven commands on the fixtures and edge-case designs (150 cases). It
+across all seven commands on the fixtures and edge-case designs (136 cases). It
 locates the reference via `$VCD_ANALYZER`, `../VCD_ANALYZER/vcd_analyzer.py`, or
 `$PATH`, and **skips cleanly (exit 0)** if none is found, so it is safe to run
 in a clone or CI without the reference. The documented differences below (the
