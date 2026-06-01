@@ -160,6 +160,97 @@ impl std::fmt::Display for ModelError {
     }
 }
 
+/// File extensions [`WellenBackend`] handles directly. Any extension
+/// outside this set is routed to the plugin loader; an empty extension
+/// (no dot in the filename) also goes to wellen, which auto-detects by
+/// magic bytes.
+const BUILT_IN_EXTENSIONS: &[&str] = &["vcd", "fst", "ghw"];
+
+fn extract_extension(path: &str) -> String {
+    // Use Path::extension so dots inside directory names (e.g.
+    // "dir.with.dot/data") don't confuse the dispatcher.
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn is_built_in_extension(ext: &str) -> bool {
+    BUILT_IN_EXTENSIONS.iter().any(|b| *b == ext)
+}
+
+#[cfg(test)]
+mod open_dispatch_tests {
+    //! Verify `Wave::open`'s extension-based dispatch logic at the
+    //! pure-function level — `extract_extension` and
+    //! `is_built_in_extension`. Behavioural tests against actual files
+    //! live in `tests/` and the runtime smoke checks in `verify/`.
+
+    use super::*;
+
+    #[test]
+    fn extract_lowercase_normalises_uppercase() {
+        assert_eq!(extract_extension("data.FOO"), "foo");
+        assert_eq!(extract_extension("data.Foo"), "foo");
+    }
+
+    #[test]
+    fn extract_uses_last_extension_for_multi_dot_filenames() {
+        assert_eq!(extract_extension("archive.tar.gz"), "gz");
+        assert_eq!(extract_extension("v1.0.data.foo"), "foo");
+    }
+
+    #[test]
+    fn extract_handles_directory_dots() {
+        // Without Path-aware extraction, this used to (mis)parse as a
+        // "with/data" extension. Now: file is "data", no extension.
+        assert_eq!(extract_extension("dir.with.dot/data"), "");
+        assert_eq!(extract_extension("dir.with.dot/data.foo"), "foo");
+        assert_eq!(extract_extension("/abs.path/here/file.fst"), "fst");
+    }
+
+    #[test]
+    fn extract_no_extension_returns_empty() {
+        assert_eq!(extract_extension("data"), "");
+        assert_eq!(extract_extension(""), "");
+        assert_eq!(extract_extension("/some/path"), "");
+    }
+
+    #[test]
+    fn extract_hidden_file_with_no_real_extension() {
+        // Standard convention: ".foo" is a hidden file with no extension.
+        assert_eq!(extract_extension(".foo"), "");
+        assert_eq!(extract_extension("dir/.gitignore"), "");
+    }
+
+    #[test]
+    fn extract_trailing_dot_yields_empty() {
+        // Path::extension on "foo." returns Some("") — still routes
+        // to wellen because is_built_in_extension("") is false and
+        // the dispatcher treats empty as "no plugin to ask".
+        assert_eq!(extract_extension("foo."), "");
+    }
+
+    #[test]
+    fn extract_dot_only_filename_yields_empty() {
+        // "." and ".." aren't real files but shouldn't blow up.
+        assert_eq!(extract_extension("."), "");
+        assert_eq!(extract_extension(".."), "");
+    }
+
+    #[test]
+    fn built_in_recognises_exact_lowercase() {
+        for b in BUILT_IN_EXTENSIONS {
+            assert!(is_built_in_extension(b));
+        }
+        assert!(!is_built_in_extension("foo"));
+        assert!(!is_built_in_extension(""));
+        assert!(!is_built_in_extension("vcd2"));
+        assert!(!is_built_in_extension("xvcd"));
+    }
+}
+
 impl Wave {
     /// Build a domain model from an already-opened backend.
     pub fn from_backend(backend: Box<dyn WaveformBackend>) -> Wave {
@@ -174,10 +265,31 @@ impl Wave {
         }
     }
 
-    /// Convenience constructor using the default (wellen) backend.
+    /// Open a file, dispatching by file extension:
+    /// * `.vcd` / `.fst` / `.ghw` (or no extension) → built-in `wellen` backend.
+    /// * any other extension `<ext>` → plugin-loader path, which looks for
+    ///   `rwave_<ext>` in `site-packages` (see `docs/PLUGIN.md`).
+    ///
+    /// rwave keeps no registry of which plugins exist; the convention
+    /// "extension `<ext>` is served by the plugin packaged as `rwave_<ext>`"
+    /// is the whole protocol. On platforms where the plugin path is
+    /// disabled (anything other than linux-x86_64 / windows-x86_64),
+    /// opening a non-built-in extension produces a clean
+    /// platform-not-supported error.
     pub fn open(path: &str) -> Result<Wave, ModelError> {
+        use crate::backend::plugin_backend::PluginBackend;
         use crate::backend::wellen_backend::WellenBackend;
         use crate::backend::BackendError;
+
+        let ext = extract_extension(path);
+        if !ext.is_empty() && !is_built_in_extension(&ext) {
+            match PluginBackend::open(path, &ext) {
+                Ok(b) => return Ok(Wave::from_backend(Box::new(b))),
+                Err(BackendError::Open(m)) => return Err(ModelError::Open(m)),
+                Err(BackendError::Parse(m)) => return Err(ModelError::Load(m)),
+            }
+        }
+
         match WellenBackend::open(path) {
             Ok(b) => Ok(Wave::from_backend(Box::new(b))),
             Err(BackendError::Open(m)) => Err(ModelError::Open(m)),

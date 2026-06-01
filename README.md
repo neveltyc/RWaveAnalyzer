@@ -29,14 +29,15 @@ Prebuilt binaries for tagged releases are attached to the
 
 | Platform                 | Asset                          |
 |--------------------------|--------------------------------|
-| Linux x86-64 (static)    | `rwave-linux-amd64`            |
+| Linux x86-64 (glibc)     | `rwave-linux-amd64`            |
 | Linux aarch64 (static)   | `rwave-linux-arm64`            |
 | macOS Apple Silicon      | `rwave-macos-arm64`            |
 | Windows x86-64           | `rwave-windows-amd64.exe`      |
 
 Download the right asset, mark it executable (`chmod +x rwave-linux-amd64`),
-and run. The Linux binaries are fully static (no glibc/musl dependency at
-runtime).
+and run. `linux-amd64` is glibc-dynamic (manylinux2014 baseline) so it
+can `dlopen` plugins; `linux-arm64` is fully static. Alpine and other
+musl-only x86-64 systems: build from source.
 
 ## Build from source
 
@@ -61,14 +62,13 @@ the same recipe works from any host — macOS, Linux, etc.
 
 | target          | Rust triple                   | output                            |
 |-----------------|-------------------------------|-----------------------------------|
-| `linux-amd64`   | `x86_64-unknown-linux-musl`   | `dist/rwave-linux-amd64`          |
+| `linux-amd64`   | `x86_64-unknown-linux-gnu`    | `dist/rwave-linux-amd64`          |
 | `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          |
 | `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    |
 | `macos-arm64`   | `aarch64-apple-darwin`        | `dist/rwave-macos-arm64`          |
 
-The two Linux flavours are fully static (no libc dependency, run on any
-matching-arch Linux including Alpine and minimal containers). The Windows
-binary requires no extra DLLs.
+`linux-amd64` is glibc-dynamic (plugins need `dlopen`); `linux-arm64`
+is fully static; Windows needs no extra DLLs.
 
 ```sh
 # one-time setup (macOS):
@@ -76,7 +76,7 @@ brew install rustup zig
 export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 rustup default stable
 cargo install --locked cargo-zigbuild
-rustup target add x86_64-unknown-linux-musl \
+rustup target add x86_64-unknown-linux-gnu \
                   aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu \
                   aarch64-apple-darwin
@@ -125,6 +125,57 @@ rwave snapshot design.fst --at 17.5us
 rwave compare design.fst --at 17.5us,17.7us --filter bus
 rwave search design.vcd --condition 'valid=1,ready=1' --show data --changed data
 ```
+
+## Plugin formats
+
+The built-in backend handles VCD, FST, and GHW. Other waveform formats
+are loaded at runtime from plugin shared libraries that conform to the
+ABI in [`docs/PLUGIN.md`](docs/PLUGIN.md) and declared by
+[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h).
+rwave itself ships no plugin implementation; the C ABI is the public
+contract.
+
+The convention — no registry. rwave does not maintain a list of which
+plugins exist. The contract is: file extension `<ext>` is served by the
+plugin packaged as `rwave_<ext>`, whose shared library is named
+`librwave_<ext>_backend.{so,dll}`. Adding a new format is entirely
+plugin-side; rwave needs no change to route a previously-unknown
+extension to a freshly installed plugin.
+
+Plugin support is amd64-only. On Linux x86_64 and Windows x86_64 rwave
+will look up a plugin when it sees a non-built-in extension; on other
+platforms (linux-arm64, macos) the same extension produces a clean
+`<format> extension is not supported on this platform.` error without
+attempting any filesystem or process work.
+
+Plugin discovery (Linux/Windows amd64 only):
+
+1. `$RWAVE_PLUGIN_<FORMAT>` (uppercased extension), absolute path to
+   the plugin shared library. Power-user escape hatch.
+2. The standard site-packages locations a wheel install lands in
+   (`$VIRTUAL_ENV/{lib,Lib}/python3.*/site-packages/rwave_<format>/...`,
+   `~/.local/lib/python3.*/site-packages/...`).
+
+If nothing is found, rwave prints a hint naming the package and
+platform tag — version-agnostic by design, because rwave's version
+and the plugin's wheel version are independent:
+
+```
+Error: <format> support not installed. Install a rwave_<format> wheel for <platform>.
+```
+
+ABI version mismatch (plugin built against a different
+`RWAVE_BACKEND_ABI_VERSION` than this rwave expects) is reported
+separately so the remediation is clear:
+
+```
+Error: <format> backend ABI mismatch (plugin v<X>, rwave expects v<Y>).
+       Reinstall a rwave_<format> wheel matching rwave's ABI version.
+```
+
+Plugin protocol, the three independent versions (rwave / plugin / ABI),
+the discovery rules, and the conformance checklist for authors live in
+[`docs/PLUGIN.md`](docs/PLUGIN.md).
 
 ## Agent skill
 

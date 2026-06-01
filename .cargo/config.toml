@@ -1,24 +1,9 @@
-# Cross-compilation linker configuration for the release builds.
+# Linker config for the musl targets (native Linux builds). The gnu and
+# windows-gnu targets use system defaults. cargo-zigbuild supplies its
+# own linker and ignores these entries. See docs/BUILD.md.
 #
-# `rwave` is pure Rust (no C code, no `build.rs`). The deployment targets are:
-#
-#   linux-amd64    x86_64-unknown-linux-musl    fully static
-#   linux-arm64    aarch64-unknown-linux-musl   fully static
-#   windows-amd64  x86_64-pc-windows-gnu        MinGW (no extra DLLs)
-#
-# The entries below cover the **native** Linux build path: on a Linux host of
-# the matching architecture, plain `cargo build --target <triple>` will use
-# musl's `musl-gcc` wrapper as the linker, producing a fully static binary.
-# Install the wrapper once:
-#
-#   Debian/Ubuntu: sudo apt-get install -y musl-tools
-#   Fedora:        sudo dnf install -y musl-gcc
-#   Alpine:        apk add musl-dev
-#
-# Cross-building from another host (the common case — e.g. macOS arm64) is
-# handled by `cargo-zigbuild`, which supplies its own cross-linker via Zig and
-# **ignores** the `linker` keys below. No cross-GCC is needed. See
-# `scripts/build-release.sh` and `docs/BUILD.md` for the unified recipe.
+# musl-gcc install: apt install musl-tools / dnf install musl-gcc /
+# apk add musl-dev.
 
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"

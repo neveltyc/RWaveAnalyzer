@@ -3,7 +3,7 @@
 
 [package]
 name = "rwave"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["neveltyc"]
@@ -24,5 +24,9 @@ wellen = { path = "../../vendor/wellen" }
 # Fast non-cryptographic hasher for the signal-table grouping map (SipHash
 # dominated build time on large hierarchies). Same crate wellen already uses.
 rustc-hash = { workspace = true }
+# Runtime dynamic loading for external format backends (see docs/PLUGIN.md).
+# Only the platforms in plugin::platform::SUPPORTED actually call into it;
+# on others the loader module is cfg-stubbed out and libloading is unused.
+libloading = "0.8"
 
 [dev-dependencies]

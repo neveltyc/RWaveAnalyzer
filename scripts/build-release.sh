@@ -3,29 +3,28 @@
 #
 #   target           Rust triple                    Output                            Linking
 #   --------------   ----------------------------   -------------------------------   ----------
-#   linux-amd64      x86_64-unknown-linux-musl      dist/rwave-linux-amd64            fully static
-#   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static
+#   linux-amd64      x86_64-unknown-linux-gnu       dist/rwave-linux-amd64            glibc dynamic (manylinux2014 baseline)
+#   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static (no plugin path on aarch64)
 #   windows-amd64    x86_64-pc-windows-gnu          dist/rwave-windows-amd64.exe      MinGW (Rust stdlib only; no DLLs required)
 #   macos-arm64      aarch64-apple-darwin           dist/rwave-macos-arm64            native (Apple Silicon)
 #
-# Linux & Windows targets are produced from any host via `cargo-zigbuild`
-# (Zig as cross-linker). The macOS target MUST be built from a macOS host —
-# cross-compiling to Darwin from Linux needs the Apple SDK and is
-# deliberately not supported here. (Intel-Mac binaries are not shipped;
-# Apple Silicon has been the only macOS arch worth supporting since 2023.)
+# linux-amd64 is glibc-dynamic so it can dlopen plugins (musl-static
+# can't). linux-arm64 stays static (plugin path is cfg-disabled on
+# aarch64). Linux/Windows targets cross-build via cargo-zigbuild from
+# any host. macOS targets require a macOS host (Apple SDK).
 #
 #   one-time setup (macOS):
 #     brew install rustup zig
 #     export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 #     rustup default stable
 #     cargo install --locked cargo-zigbuild
-#     rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+#     rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
 #                       x86_64-pc-windows-gnu aarch64-apple-darwin
 #
-# A native Linux host that prefers GCC over Zig can still build the
-# matching-arch musl target with plain `cargo build` provided `musl-gcc` is
-# installed (Debian/Ubuntu: `musl-tools`). The cross targets always go through
-# Zig.
+# A native Linux host can build the matching-arch target with plain
+# `cargo build` — linux-amd64 needs no special linker (system gcc),
+# linux-arm64 needs `musl-gcc` (Debian/Ubuntu: `musl-tools`). The
+# cross targets always go through Zig.
 #
 # Usage:
 #   scripts/build-release.sh                              # all three targets
@@ -72,7 +71,7 @@ fi
 
 triple_for() {
   case "$1" in
-    linux-amd64)    echo "x86_64-unknown-linux-musl" ;;
+    linux-amd64)    echo "x86_64-unknown-linux-gnu" ;;
     linux-arm64)    echo "aarch64-unknown-linux-musl" ;;
     windows-amd64)  echo "x86_64-pc-windows-gnu" ;;
     macos-arm64)    echo "aarch64-apple-darwin" ;;
@@ -118,8 +117,10 @@ have rustup || info "rustup not found; assuming a non-rustup Rust. Ensure the re
 #   - macOS targets: must be built from a macOS host. Plain `cargo build`
 #     (native dylib link); Apple Silicon host cross-builds x86_64-apple-darwin
 #     via rustup's downloaded std lib, no extra tooling.
-#   - Native Linux on the matching musl arch + musl-gcc available -> plain cargo build.
-#   - Everything else (Linux/Windows musl from any host) -> cargo zigbuild.
+#   - Native Linux on the matching arch -> plain cargo build:
+#       linux-amd64 (gnu): uses system gcc, always available on Linux hosts.
+#       linux-arm64 (musl): needs musl-gcc (Debian/Ubuntu: musl-tools).
+#   - Everything else -> cargo zigbuild.
 need_zigbuild=0
 for t in "${TARGETS[@]}"; do
   case "$t" in
@@ -132,7 +133,7 @@ for t in "${TARGETS[@]}"; do
       native=0
       if [ "$HOST_OS" = "Linux" ]; then
         case "$t-$HOST_ARCH" in
-          linux-amd64-x86_64|linux-amd64-amd64)         have musl-gcc && native=1 ;;
+          linux-amd64-x86_64|linux-amd64-amd64)         native=1 ;;
           linux-arm64-aarch64|linux-arm64-arm64)        have musl-gcc && native=1 ;;
         esac
       fi
@@ -165,6 +166,24 @@ fi
 
 mkdir -p dist
 
+# ---- path-remap hardening ------------------------------------------------
+# Strip host paths from third-party crate file!() strings that survive
+# strip=true. Last-match-wins, so list general -> specific.
+HARDEN_RUSTFLAGS="--remap-path-prefix=${HOME}=/home"
+HARDEN_RUSTFLAGS="$HARDEN_RUSTFLAGS --remap-path-prefix=${HOME}/.cargo=/cargo"
+HARDEN_RUSTFLAGS="$HARDEN_RUSTFLAGS --remap-path-prefix=${HOME}/.rustup=/rustup"
+if [ -n "${CARGO_HOME:-}" ]; then
+  HARDEN_RUSTFLAGS="$HARDEN_RUSTFLAGS --remap-path-prefix=${CARGO_HOME}=/cargo"
+fi
+if [ -n "${RUSTUP_HOME:-}" ]; then
+  HARDEN_RUSTFLAGS="$HARDEN_RUSTFLAGS --remap-path-prefix=${RUSTUP_HOME}=/rustup"
+fi
+HARDEN_RUSTFLAGS="$HARDEN_RUSTFLAGS --remap-path-prefix=$(pwd)=/src"
+
+# Compose with any user-supplied RUSTFLAGS, putting ours last so they win
+# on overlapping prefixes.
+export RUSTFLAGS="${RUSTFLAGS:-} $HARDEN_RUSTFLAGS"
+
 # ---- build loop ----------------------------------------------------------
 build_one() {
   local t="$1"
@@ -183,7 +202,7 @@ build_one() {
       local native=0
       if [ "$HOST_OS" = "Linux" ]; then
         case "$t-$HOST_ARCH" in
-          linux-amd64-x86_64|linux-amd64-amd64)   have musl-gcc && native=1 ;;
+          linux-amd64-x86_64|linux-amd64-amd64)   native=1 ;;
           linux-arm64-aarch64|linux-arm64-arm64)  have musl-gcc && native=1 ;;
         esac
       fi
@@ -191,8 +210,18 @@ build_one() {
       ;;
   esac
 
-  info "Building $t  ($triple, driver: ${cmd[*]}) ..."
-  "${cmd[@]}" --release --target "$triple"
+  # For the linux-amd64 zigbuild path, pin the glibc baseline to 2.17
+  # (manylinux2014). cargo-zigbuild reads the `.2.17` suffix as the
+  # minimum glibc version; the Rust target remains x86_64-unknown-linux-gnu.
+  # Without this, zigbuild may link against its bundled (newer) glibc and
+  # the binary won't run on older long-LTS distros.
+  local build_target="$triple"
+  if [ "$t" = "linux-amd64" ] && [ "${cmd[*]}" = "cargo zigbuild" ]; then
+    build_target="$triple.2.17"
+  fi
+
+  info "Building $t  ($build_target, driver: ${cmd[*]}) ..."
+  "${cmd[@]}" --release --target "$build_target"
 
   [ -f "$bin" ] || die "build reported success but $bin is missing."
   cp "$bin" "$out"

@@ -27,6 +27,7 @@
 use crate::format::ValueKind;
 
 pub mod bitstr;
+pub mod plugin_backend;
 pub mod wellen_backend;
 
 pub use bitstr::BitStr;

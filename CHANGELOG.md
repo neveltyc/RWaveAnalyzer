@@ -8,6 +8,84 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 _No unreleased changes._
 
+## [0.0.3] — 2026-06-02
+
+### Highlights
+
+- **External-format plugins.** rwave can now load waveform formats
+  beyond the built-in VCD/FST/GHW by `dlopen`ing a plugin shared
+  library at runtime — see [`docs/PLUGIN.md`](docs/PLUGIN.md) and the
+  C header [`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h)
+  for the protocol. rwave itself ships no plugin implementation; the
+  C ABI is the public contract.
+
+### Added
+
+- `crates/rwave/include/rwave_backend.h` — public C ABI. One exported
+  symbol per plugin: `rwave_backend()` returning a const vtable.
+  Versioning lives in the vtable's `abi_version` field, not the symbol
+  name. `RWAVE_BACKEND_ABI_VERSION = 1`.
+- `crates/rwave/src/plugin/` — discovery (`$RWAVE_PLUGIN_<FORMAT>`
+  env var, then site-packages scan) keyed on the file extension, and
+  the four user-facing error variants (`PlatformUnsupported`,
+  `NotInstalled`, `AbiMismatch`, `LoadFailed`). No format registry —
+  the convention "extension `<ext>` is served by the plugin packaged
+  as `rwave_<ext>`" is the whole protocol; adding a new format is a
+  plugin-side concern with no rwave change required.
+- `crates/rwave/src/backend/plugin_backend.rs` — generic
+  `WaveformBackend` forwarder that talks to the vtable and adapts
+  streamed (`sid`, `time`, `value`) emit calls into per-signal
+  `SignalTrace`s.
+- `Wave::open` now dispatches by extension: `.vcd` / `.fst` / `.ghw`
+  (or no extension) → built-in `wellen` backend; any other extension
+  → plugin loader path.
+- README gains a "Plugin formats" section.
+
+### Versioning model (three independent counters)
+
+| Counter | Owner | Bumps when |
+|---|---|---|
+| rwave version | rwave | any rwave change |
+| plugin version | plugin author | any plugin change (vendor lib update, decoder fix) |
+| ABI version | this protocol | breaking vtable changes only |
+
+The wheel filename in the "not installed" hint is intentionally
+version-agnostic — coupling rwave's version into it would falsely
+imply that bumping rwave forces a plugin rebuild, which it does not
+unless the ABI itself bumps.
+
+### Platform support for the plugin path
+
+Compile-time gated to `linux x86_64` and `windows x86_64`. On other
+targets (linux-arm64, macos) opening a non-built-in extension produces
+a clean "extension is not supported on this platform" error without
+attempting any filesystem or process work. Built-in VCD/FST/GHW paths
+are unaffected.
+
+### Changed
+
+- `Cargo.toml` — version bump to `0.0.3`.
+- New dependency: `libloading 0.8` (used only on platforms where the
+  plugin path is enabled; the stub on other targets does not call it).
+- `rwave-linux-amd64` switched from musl-static to glibc-dynamic
+  (manylinux2014 baseline) so it can `dlopen` plugins; static musl
+  libc does not implement `dlopen`. `rwave-linux-arm64` stays static
+  (plugins are compile-time gated off on aarch64). Alpine / musl-only
+  x86-64: build from source.
+- Release binaries are now built with `--remap-path-prefix` for
+  `$HOME`, cargo, and rustup paths, so third-party crate source paths
+  no longer leak the build host's user and directory layout.
+
+### Internal
+
+- `cargo test`: +3 unit tests covering `LoadError` text shapes
+  (`error_platform_unsupported_message`,
+  `error_not_installed_message_is_version_agnostic`,
+  `error_abi_mismatch_message_mentions_both_versions`).
+- Defensive bound on `Vec::set_len` after the plugin's `var_decls`
+  call: clamp `written` to the previously-queried `total` so a
+  misbehaving plugin cannot drive `set_len` past capacity.
+
 ## [0.0.2] — 2026-05-31
 
 ### Highlights

@@ -35,8 +35,8 @@ install command for anything missing.
 
 | target          | Rust triple                   | output                            | linking                                          |
 |-----------------|-------------------------------|-----------------------------------|--------------------------------------------------|
-| `linux-amd64`   | `x86_64-unknown-linux-musl`   | `dist/rwave-linux-amd64`          | fully static; runs on any x86-64 Linux (incl. containers/Alpine) |
-| `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          | fully static; runs on any aarch64 Linux           |
+| `linux-amd64`   | `x86_64-unknown-linux-gnu`    | `dist/rwave-linux-amd64`          | glibc dynamic (manylinux2014 baseline, glibc ≥ 2.17); needs `dlopen` for the plugin path |
+| `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          | fully static; plugin path is compile-time disabled on aarch64 |
 | `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    | MinGW; no extra DLLs (Rust stdlib only)           |
 | `macos-arm64`   | `aarch64-apple-darwin`        | `dist/rwave-macos-arm64`          | native Mach-O; built only from a macOS host (cross-build from Linux to Darwin needs the Apple SDK and is not supported) |
 
@@ -57,7 +57,7 @@ export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
 rustup default stable
 cargo install --locked cargo-zigbuild
-rustup target add x86_64-unknown-linux-musl \
+rustup target add x86_64-unknown-linux-gnu \
                   aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu
 ```
@@ -68,15 +68,16 @@ rustup target add x86_64-unknown-linux-musl \
 # rustup from https://rustup.rs (or your distro's package), then:
 sudo apt-get install -y zig      # or: pip install ziglang
 cargo install --locked cargo-zigbuild
-rustup target add x86_64-unknown-linux-musl \
+rustup target add x86_64-unknown-linux-gnu \
                   aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu
 ```
 
-A native Linux host of matching arch may alternatively use `musl-gcc`
-(Debian/Ubuntu: `apt-get install musl-tools`) and plain `cargo build` for the
-local-arch Linux target; the script auto-detects this and skips Zig for that
-target. The other two targets always go through Zig.
+A native Linux host may build the matching-arch target with plain
+`cargo build` and skip Zig: `linux-amd64` uses the system `gcc` linker
+(always available on Linux hosts), `linux-arm64` needs `musl-gcc`
+(Debian/Ubuntu: `apt-get install musl-tools`). The script auto-detects
+either situation and only invokes Zig for genuinely cross targets.
 
 ### Building
 
@@ -99,22 +100,18 @@ container of the target arch:
 
 ```sh
 docker run --rm --platform linux/amd64 -v "$PWD/dist:/d:ro" \
-  alpine:3 /d/rwave-linux-amd64 --version
+  debian:bookworm-slim /d/rwave-linux-amd64 --version
 docker run --rm --platform linux/arm64 -v "$PWD/dist:/d:ro" \
   alpine:3 /d/rwave-linux-arm64 --version
 ```
 
-Alpine ships only musl, so a successful run there is a stronger check than
-glibc-based distros — it confirms the binary is genuinely static.
-
 ## Notes
 
-- The static musl binaries have no runtime dependencies, which makes them the
-  most portable choice for deployment and the recommended default for Linux.
-- The Windows binary is built against `x86_64-pc-windows-gnu` (MinGW). Because
-  `rwave` is pure Rust and the Rust stdlib is statically linked, the resulting
-  `.exe` does not require MinGW DLLs at runtime.
+- `linux-amd64` is glibc-dynamic (manylinux2014 baseline) so it can
+  `dlopen` plugins. `linux-arm64` is fully static; the plugin path is
+  compile-time gated off on aarch64.
+- The Windows `.exe` needs no DLLs (Rust stdlib statically linked).
 - Build artifacts go to `dist/` (git-ignored).
-- Linker configuration for the musl targets lives in `.cargo/config.toml` and
-  is consulted by plain `cargo build` (any host, provided `musl-gcc` is on
-  `PATH`); `cargo-zigbuild` supplies its own linker and ignores that setting.
+- `.cargo/config.toml` carries linker config for the musl target only;
+  the gnu and Windows targets use system defaults. `cargo-zigbuild`
+  supplies its own linker and ignores both.
