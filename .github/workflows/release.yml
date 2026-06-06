@@ -21,7 +21,7 @@ jobs:
       matrix:
         include:
           - target: linux-amd64
-            triple: x86_64-unknown-linux-musl
+            triple: x86_64-unknown-linux-gnu
             runs-on: ubuntu-latest
             needs-zigbuild: true
           - target: linux-arm64
@@ -67,6 +67,22 @@ jobs:
 
       - name: Build release binary
         run: bash scripts/build-release.sh --target ${{ matrix.target }}
+
+      - name: Verify glibc baseline (linux-amd64 must stay <= 2.17)
+        if: matrix.target == 'linux-amd64'
+        run: |
+          bin=dist/rwave-linux-amd64
+          bad=$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9.]+' | sort -V -u | awk -F'_' '
+            {
+              split($2, v, ".")
+              if (v[1] > 2 || (v[1] == 2 && v[2] > 17)) print $0
+            }')
+          if [ -n "$bad" ]; then
+            echo "FAIL: $bin requires glibc above 2.17 baseline:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          echo "OK: $bin glibc requirements within 2.17 baseline"
 
       - name: Compute SHA256
         run: |

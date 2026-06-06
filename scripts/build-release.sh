@@ -21,10 +21,11 @@
 #     rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
 #                       x86_64-pc-windows-gnu aarch64-apple-darwin
 #
-# A native Linux host can build the matching-arch target with plain
-# `cargo build` — linux-amd64 needs no special linker (system gcc),
-# linux-arm64 needs `musl-gcc` (Debian/Ubuntu: `musl-tools`). The
-# cross targets always go through Zig.
+# A native Linux host can build linux-arm64 with plain `cargo build`
+# if `musl-gcc` is present. linux-amd64 always goes through Zig (even
+# on a matching-arch host) so the glibc 2.17 baseline is pinned;
+# without that, the binary picks up the runner's glibc and may need
+# 2.32+. Cross targets always go through Zig.
 #
 # Usage:
 #   scripts/build-release.sh                              # all three targets
@@ -117,10 +118,8 @@ have rustup || info "rustup not found; assuming a non-rustup Rust. Ensure the re
 #   - macOS targets: must be built from a macOS host. Plain `cargo build`
 #     (native dylib link); Apple Silicon host cross-builds x86_64-apple-darwin
 #     via rustup's downloaded std lib, no extra tooling.
-#   - Native Linux on the matching arch -> plain cargo build:
-#       linux-amd64 (gnu): uses system gcc, always available on Linux hosts.
-#       linux-arm64 (musl): needs musl-gcc (Debian/Ubuntu: musl-tools).
-#   - Everything else -> cargo zigbuild.
+#   - linux-arm64 on a matching-arch Linux host with musl-gcc -> native.
+#   - Everything else (incl. linux-amd64 always) -> cargo zigbuild.
 need_zigbuild=0
 for t in "${TARGETS[@]}"; do
   case "$t" in
@@ -130,10 +129,13 @@ for t in "${TARGETS[@]}"; do
       fi
       ;;
     *)
+      # linux-amd64 always goes through zigbuild so the `.2.17` glibc
+      # baseline pin (further below) is enforced even when the host arch
+      # matches. Without this, a Linux x86_64 host linked against its
+      # own (newer) glibc and the binary required GLIBC_2.34.
       native=0
       if [ "$HOST_OS" = "Linux" ]; then
         case "$t-$HOST_ARCH" in
-          linux-amd64-x86_64|linux-amd64-amd64)         native=1 ;;
           linux-arm64-aarch64|linux-arm64-arm64)        have musl-gcc && native=1 ;;
         esac
       fi
@@ -199,10 +201,10 @@ build_one() {
       cmd=(cargo build)
       ;;
     *)
+      # linux-amd64 forced to zigbuild for the .2.17 glibc baseline pin.
       local native=0
       if [ "$HOST_OS" = "Linux" ]; then
         case "$t-$HOST_ARCH" in
-          linux-amd64-x86_64|linux-amd64-amd64)   native=1 ;;
           linux-arm64-aarch64|linux-arm64-arm64)  have musl-gcc && native=1 ;;
         esac
       fi
