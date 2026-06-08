@@ -3,7 +3,7 @@
 
 [package]
 name = "rwave"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["neveltyc"]

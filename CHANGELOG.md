@@ -8,6 +8,37 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 _No unreleased changes._
 
+## [0.0.4] — 2026-06-08
+
+### Fixed
+
+- **Windows plugin discovery.** `pip install`ed plugins were never
+  auto-discovered on Windows — only the `$RWAVE_PLUGIN_<F>` env var
+  worked. rwave probed the wrong filename and the wrong paths:
+  - The probed cdylib name carried a bogus `lib` prefix. Windows
+    cdylibs are `rwave_<f>_backend.dll`, not `librwave_<f>_backend.dll`.
+  - A venv keeps packages in `…\Lib\site-packages` (no `pythonX.Y`
+    level); the scan assumed the Unix `lib/pythonX.Y/site-packages`
+    shape and missed them.
+  - `pip install --user` lands in
+    `%APPDATA%\Python\Python3XX\site-packages`, which was never
+    scanned. It now is.
+  Linux discovery is unchanged.
+
+### Changed
+
+- `linux-amd64` release binaries are pinned to the glibc 2.17
+  (manylinux2014) baseline again. A native-build shortcut on the CI
+  runner had bypassed the zigbuild `.2.17` pin and shipped a binary
+  requiring glibc 2.34. `release.yml` now also asserts the baseline
+  with `objdump` and fails if any symbol needs glibc > 2.17.
+
+### Docs
+
+- `docs/PLUGIN.md` and `README.md`: corrected the Windows plugin
+  filename (no `lib` prefix) and documented the per-platform
+  site-packages layouts.
+
 ## [0.0.3] — 2026-06-02
 
 ### Highlights

@@ -14,7 +14,9 @@ by rwave without rebuilding the rwave binary.
 2. rwave takes the file extension as the format token, e.g. `foo` for
    `data.foo`. The convention is: a plugin handling extension `<ext>`
    is packaged as `rwave_<ext>` and exports its cdylib as
-   `librwave_<ext>_backend.{so,dll}`. No registry on rwave's side.
+   `librwave_<ext>_backend.so` (Linux) / `rwave_<ext>_backend.dll`
+   (Windows — cdylibs carry no `lib` prefix there). No registry on
+   rwave's side.
 3. rwave looks for that plugin shared library on disk (see Discovery).
 4. rwave `dlopen`s it and resolves the symbol `rwave_backend`.
 5. rwave calls that function once per process. It returns a const vtable.
@@ -61,8 +63,17 @@ When rwave needs a plugin for format `<f>`, it searches in this order:
 1. Environment variable `RWAVE_PLUGIN_<F>` (uppercase format name),
    set to an absolute path to the plugin shared library. Example for
    format `foo`: `RWAVE_PLUGIN_FOO=/abs/path/to/librwave_foo_backend.so`.
-2. `$VIRTUAL_ENV/lib/python3.*/site-packages/rwave_<f>/librwave_<f>_backend.{so,dll}`.
-3. `~/.local/lib/python3.*/site-packages/rwave_<f>/...` (same filename pattern).
+2. The active virtualenv's site-packages (`$VIRTUAL_ENV`):
+   - Linux:   `$VIRTUAL_ENV/lib/python3.*/site-packages/rwave_<f>/`
+   - Windows: `%VIRTUAL_ENV%\Lib\site-packages\rwave_<f>\`
+3. The per-user site-packages:
+   - Linux:   `~/.local/lib/python3.*/site-packages/rwave_<f>/`
+   - Windows: `%APPDATA%\Python\Python3XX\site-packages\rwave_<f>\`
+     (where `pip install --user` lands).
+
+The probed library filename is `librwave_<f>_backend.so` on Linux and
+`rwave_<f>_backend.dll` on Windows — Windows cdylibs carry no `lib`
+prefix, so do not expect a `librwave_…dll`.
 
 The Python-side paths exist because the canonical distribution channel
 for plugins is a Python wheel (see Distribution). The env var is the
@@ -222,8 +233,9 @@ rwave_<format>-<plugin_version>-py3-none-<platform>.whl
 
 ```
 rwave_<format>/
-├── __init__.py                       # empty; required for site-packages discovery
-└── librwave_<format>_backend.<ext>   # .so on Linux, .dll on Windows
+├── __init__.py                          # empty; required for site-packages discovery
+└── <lib>                                # librwave_<format>_backend.so  (Linux)
+                                         # rwave_<format>_backend.dll    (Windows — no lib prefix)
 ```
 
 Supporting files (vendor libraries, license data) may live in

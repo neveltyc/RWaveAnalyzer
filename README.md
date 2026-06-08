@@ -138,8 +138,9 @@ contract.
 The convention — no registry. rwave does not maintain a list of which
 plugins exist. The contract is: file extension `<ext>` is served by the
 plugin packaged as `rwave_<ext>`, whose shared library is named
-`librwave_<ext>_backend.{so,dll}`. Adding a new format is entirely
-plugin-side; rwave needs no change to route a previously-unknown
+`librwave_<ext>_backend.so` on Linux / `rwave_<ext>_backend.dll` on
+Windows (Windows cdylibs carry no `lib` prefix). Adding a new format is
+entirely plugin-side; rwave needs no change to route a previously-unknown
 extension to a freshly installed plugin.
 
 Plugin support is amd64-only. On Linux x86_64 and Windows x86_64 rwave
@@ -152,9 +153,12 @@ Plugin discovery (Linux/Windows amd64 only):
 
 1. `$RWAVE_PLUGIN_<FORMAT>` (uppercased extension), absolute path to
    the plugin shared library. Power-user escape hatch.
-2. The standard site-packages locations a wheel install lands in
-   (`$VIRTUAL_ENV/{lib,Lib}/python3.*/site-packages/rwave_<format>/...`,
-   `~/.local/lib/python3.*/site-packages/...`).
+2. The standard site-packages locations a wheel install lands in:
+   - active venv (`$VIRTUAL_ENV`): `lib/python3.*/site-packages/` on
+     Linux, `Lib\site-packages\` on Windows.
+   - per-user: `~/.local/lib/python3.*/site-packages/` on Linux,
+     `%APPDATA%\Python\Python3XX\site-packages\` on Windows (where
+     `pip install --user` lands).
 
 If nothing is found, rwave prints a hint naming the package and
 platform tag — version-agnostic by design, because rwave's version

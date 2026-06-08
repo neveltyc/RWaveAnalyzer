@@ -6,9 +6,10 @@
 //! rwave does not maintain a registry of which extensions go to which
 //! plugin. The convention is: file extension `<ext>` routes to the
 //! plugin whose package directory is `rwave_<ext>/` and whose shared
-//! library is `librwave_<ext>_backend.{so,dll}`. Adding a new format is
-//! a plugin-side concern — the plugin author picks the package name; no
-//! rwave code change is required.
+//! library is `librwave_<ext>_backend.so` on Linux / `rwave_<ext>_backend.dll`
+//! on Windows (Windows cdylibs carry no `lib` prefix — that's a Unix
+//! convention). Adding a new format is a plugin-side concern — the plugin
+//! author picks the package name; no rwave code change is required.
 //!
 //! ## What lives here
 //!
@@ -96,13 +97,16 @@ impl std::error::Error for LoadError {}
 ///
 /// Order:
 /// 1. `$RWAVE_PLUGIN_<FORMAT>` (uppercase), if set and the file exists.
-/// 2. `$VIRTUAL_ENV/{lib,Lib}/python3.*/site-packages/rwave_<format>/...`.
-/// 3. `~/.local/lib/python3.*/site-packages/rwave_<format>/...`.
+/// 2. The active virtualenv's site-packages, if `$VIRTUAL_ENV` is set.
+/// 3. The per-user site-packages:
+///    * Linux:   `~/.local/lib/python3.*/site-packages/`
+///    * Windows: `%APPDATA%\Python\Python3XX\site-packages/` (where
+///      `pip install --user` lands).
 ///
-/// System-wide installs (e.g. system Python's site-packages) are left
-/// to the env-var escape hatch — querying them would require spawning
-/// `python3 -c "import sysconfig; ..."`, which we want to keep off the
-/// open path until there is real demand.
+/// The probed path is `<site-packages>/rwave_<format>/<libname>`, where
+/// `<libname>` is `librwave_<format>_backend.so` on Linux and
+/// `rwave_<format>_backend.dll` on Windows. System-wide installs are
+/// left to the env-var escape hatch.
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "windows", target_arch = "x86_64"),
@@ -149,52 +153,75 @@ fn scan_site_packages(format: &str) -> Option<PathBuf> {
     let pkg = format!("rwave_{format}");
     let libname = libname_for(format);
 
-    // (root, libdir-name)
-    let roots: Vec<(PathBuf, &'static str)> = collect_roots();
-
-    for (root, libdir) in roots {
-        let dir = root.join(libdir);
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Match python3, python3.9, python3.10, ... Skip python2 etc.
-            if name_str == "python3" || name_str.starts_with("python3.") {
-                let cand = entry.path().join("site-packages").join(&pkg).join(&libname);
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
+    for site_packages in candidate_site_packages() {
+        let cand = site_packages.join(&pkg).join(&libname);
+        if cand.is_file() {
+            return Some(cand);
         }
     }
     None
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64"),
-))]
-fn collect_roots() -> Vec<(PathBuf, &'static str)> {
-    let mut roots: Vec<(PathBuf, &'static str)> = Vec::new();
-
+/// Resolved `site-packages` directories to probe, most-specific first.
+/// Platform-specific: a Python install's on-disk layout differs between
+/// Unix and Windows (directory names, whether there is a `pythonX.Y`
+/// level, and where `pip install --user` lands).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn candidate_site_packages() -> Vec<PathBuf> {
+    // Unix layout: <lib-root>/python3.*/site-packages.
+    let mut lib_roots: Vec<PathBuf> = Vec::new();
     if let Some(venv) = std::env::var_os("VIRTUAL_ENV") {
-        // Unix venvs use lib/, Windows venvs use Lib/. Try both — empty
-        // ones get skipped by the read_dir.
-        roots.push((PathBuf::from(&venv), "lib"));
-        roots.push((PathBuf::from(&venv), "Lib"));
+        lib_roots.push(PathBuf::from(venv).join("lib"));
     }
-
     if let Some(home) = std::env::var_os("HOME") {
-        roots.push((PathBuf::from(home).join(".local"), "lib"));
+        lib_roots.push(PathBuf::from(home).join(".local").join("lib"));
     }
-    // Windows user-site: %APPDATA%\Python\Python3X\site-packages\... — the
-    // structure differs enough that we leave it to the env var override
-    // for now rather than enumerate Python versions blindly.
 
-    roots
+    let mut out = Vec::new();
+    for root in lib_roots {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            // python3, python3.9, python3.10, ...  (skip python2.*)
+            if s == "python3" || s.starts_with("python3.") {
+                out.push(entry.path().join("site-packages"));
+            }
+        }
+    }
+    out
+}
+
+/// See the Linux variant. On Windows the layout is flatter: a venv keeps
+/// packages in `<venv>\Lib\site-packages` (no `pythonX.Y` level), and
+/// `pip install --user` lands in `%APPDATA%\Python\Python3XX\site-packages`
+/// (`%APPDATA%` already resolves to the Roaming profile).
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn candidate_site_packages() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+
+    // Active virtualenv: <venv>\Lib\site-packages.
+    if let Some(venv) = std::env::var_os("VIRTUAL_ENV") {
+        out.push(PathBuf::from(venv).join("Lib").join("site-packages"));
+    }
+
+    // pip --user: %APPDATA%\Python\Python3XX\site-packages. Enumerate the
+    // Python3XX dirs rather than guess the interpreter version.
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let pyroot = PathBuf::from(appdata).join("Python");
+        if let Ok(entries) = std::fs::read_dir(&pyroot) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("Python3") {
+                    out.push(entry.path().join("site-packages"));
+                }
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -204,7 +231,9 @@ fn libname_for(format: &str) -> String {
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn libname_for(format: &str) -> String {
-    format!("librwave_{format}_backend.dll")
+    // Windows cdylibs carry no `lib` prefix (that's a Unix convention),
+    // so the wheel ships `rwave_<fmt>_backend.dll`, not `librwave_...`.
+    format!("rwave_{format}_backend.dll")
 }
 
 // ---------------------------------------------------------------------------
