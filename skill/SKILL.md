@@ -175,7 +175,7 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
 - `comments` is always `[]` and `synthesized_buses` is always `0` 
 - A zero-width `search` window (`--begin T --end T`) yields no rows.
 
-For everything else (time syntax, filter syntax, value formatting,
-format quirks, the FST `parameter`-value drop, performance notes) see
-the repo README.
+For everything else (time syntax, filter syntax, value formatting) see
+the repo README; for format quirks, the FST `parameter`-value drop, and
+performance notes see `docs/DESIGN.md`.
 
