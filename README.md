@@ -1,354 +1,315 @@
-# RWaveAnalyzer (`rwave`)
+<p align="center">
+  <h1 align="center">RWaveAnalyzer</h1>
+  <p align="center">
+    A fast, single-binary CLI for inspecting RTL simulation waveforms &mdash;
+    <b>VCD</b>, <b>FST</b>, and <b>GHW</b>, with experimental support for <b>WLF</b> and <b>FSDB</b> &mdash;
+    built for RTL debug, CI, and AI agents.
+  </p>
+</p>
 
-An AI-agent-friendly, debug-oriented waveform analyzer for RTL simulation
-dumps. `rwave` reads **VCD**, **FST**, and **GHW** natively — plus **WLF**
-(Mentor/Questa) and **FSDB** (Synopsys/Verdi) on the linux-amd64 build — and
-exposes a small, scriptable command set: file overview, signal listing,
-value-change dumps, per-signal statistics, point/pair snapshots, and
-conditional search, with both human-readable text and compact JSON output.
+<p align="center">
+  <img alt="Release" src="https://img.shields.io/github/v/release/neveltyc/RWaveAnalyzer?sort=semver&style=flat-square&color=3366cc">
+  <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/neveltyc/RWaveAnalyzer/ci.yml?branch=main&style=flat-square&label=CI">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
+</p>
 
-The command surface intentionally mirrors the reference Python tool
-[`VCD_ANALYZER`](https://github.com/neveltyc/VCD_ANALYZER) so the two are
-drop-in compatible at the CLI, while `rwave` additionally understands FST and is
-built for large dumps.
+---
 
-## Why another analyzer
+## Why RWaveAnalyzer?
 
-* **Format-neutral core.** VCD is just the first format. The parser is isolated
-  behind a backend trait, so adding a new waveform format (or a faster reader
-  for an existing one) does not touch the command set, formatting, or search.
-* **Built for scale.** Value-change replay is a binary-heap k-way merge
-  (`O(n log k)`); whole-file commands stream their work in memory-bounded
-  batches so multi-hundred-thousand-signal dumps don't exhaust RAM.
-* **Agent-friendly output.** Every command has a `--json` form with stable keys,
-  and time is reported both as raw ticks and human units.
+You have a multi-gigabyte FST from an overnight regression, and you need to know
+exactly when `arvalid` and `arready` were both high, or what `state[3:0]` held at
+17.55 µs. Opening Verdi or GTKWave means waiting for a GUI to start, clicking
+down the hierarchy, and reading values off a cursor. RWaveAnalyzer answers the
+same questions from the terminal, in a single command:
+
+```sh
+rwave search sim.fst --condition 'arvalid=1,arready=1' --show araddr,arlen
+```
+
+The tool is a single self-contained binary called `rwave`. It reads the open
+**VCD**, **FST**, and **GHW** formats, and on linux-amd64 it adds experimental
+support for the **WLF** (Mentor/Questa) and **FSDB** (Synopsys/Verdi) databases,
+which it reads through each vendor's own library (see [WLF and FSDB](#experimental-support-for-wlf-and-fsdb)).
+Every command also has a `--json` mode with stable keys, so the same tool drives
+a human at a prompt, a CI gate, and an AI agent equally well. Whole-file commands
+stream their work in bounded memory, so a dump with hundreds of thousands of
+signals does not exhaust RAM.
+
+## Quick start
+
+Point any command at a `.vcd`, `.fst`, `.ghw` (or `.wlf` / `.fsdb`) file:
+
+```sh
+# What's in this file?
+rwave info sim.fst
+
+# Show me the clock and reset
+rwave list sim.fst --filter clk,rst
+
+# What happened between 100 ns and 200 ns?
+rwave dump sim.fst --begin 100ns --end 200ns --filter state
+
+# When were valid and ready both high?
+rwave search sim.fst --condition 'valid=1,ready=1' --show data
+
+# What are all known values at exactly 17.55 us?
+rwave snapshot sim.fst --at 17.55us --filter state,init_done
+
+# What changed between two times?
+rwave compare sim.fst --at 17.5us,17.7us --filter bus
+
+# Which signals are active versus static?
+rwave summary sim.fst --filter alu
+```
+
+Add `--json` to any command for compact, machine-readable output.
 
 ## Install
 
-Prebuilt binaries are attached to each tagged
-[GitHub Release](https://github.com/neveltyc/RWaveAnalyzer/releases):
+Download the `rwave` binary for your platform from the
+[latest release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest):
 
-| Binary | Core (VCD/FST/GHW) | WLF | FSDB |
-|---|:---:|:---:|:---:|
-| `rwave-linux-amd64`        | ✓ | ✓ | ✓ |
-| `rwave-windows-amd64.exe`  | ✓ | — | — |
-| `rwave-linux-arm64`        | ✓ | — | — |
-| `rwave-macos-arm64`        | ✓ | — | — |
-
-Download the right one, mark it executable, and run:
+| Platform | Binary | VCD · FST · GHW | WLF | FSDB |
+|:--|:--|:--:|:--:|:--:|
+| Linux x86-64          | `rwave-linux-amd64`       | ✓ | ✓ | ✓ |
+| Linux ARM64           | `rwave-linux-arm64`       | ✓ | — | — |
+| Windows x86-64        | `rwave-windows-amd64.exe` | ✓ | — | — |
+| macOS (Apple Silicon) | `rwave-macos-arm64`       | ✓ | — | — |
 
 ```sh
-chmod +x rwave-linux-amd64
-./rwave-linux-amd64 info design.fst
+curl -fsSL -o rwave \
+  https://github.com/neveltyc/RWaveAnalyzer/releases/latest/download/rwave-linux-amd64
+chmod +x rwave
+./rwave --version
 ```
 
-The VCD/FST/GHW core works on every binary. The experimental WLF/FSDB
-backends are **linux-amd64 only** and need the vendor's simulator + library
-configured (see
-[Vendor formats](#vendor-formats--plugins)). `rwave-linux-amd64` is
-glibc-dynamic (manylinux2014, glibc ≥ 2.17), so it runs on every mainstream
-Linux from 2014 on; Alpine/musl-only systems build the core from source.
+Every binary reads VCD/FST/GHW; WLF and FSDB are linux-amd64 only (see
+[WLF and FSDB](#experimental-support-for-wlf-and-fsdb)). The `rwave-linux-amd64` build is dynamically linked
+against glibc with a 2.17 baseline (manylinux2014), so it runs on every
+mainstream Linux distribution released since 2014.
 
-## Build from source
+## Building from source
 
-Requires a recent stable Rust toolchain (developed against 1.90, edition 2024).
+The only requirement for a local build is a recent stable Rust toolchain
+(developed against 1.90, edition 2024). The build is pure Rust — there is no C
+code, no `build.rs`, and no system dependency to install — so a plain `cargo`
+invocation produces a binary for the host machine:
 
 ```sh
-cargo build --release
-# binary: target/release/rwave
+cargo build --release      # → target/release/rwave
 ```
 
-This builds for the host. The WLF/FSDB backends (default features `wlf`,
-`fsdb`) are target-gated to `x86_64` linux; on any other host they compile
-out, leaving the VCD/FST/GHW core. `--no-default-features` forces the pure
-core anywhere.
+The WLF and FSDB backends are gated behind the default-on `wlf` and `fsdb`
+features and are further restricted to `x86_64` Linux at compile time; on any
+other host they compile out and you are left with the VCD/FST/GHW core.
+`--no-default-features` forces that pure core on any platform. The parser
+front-end (`wellen`) and its FST reader are vendored under `vendor/`, so the
+build needs no network access and always uses the exact, pinned parser revision.
 
-The parser front-end (`wellen`) and its FST dependency (`fst-reader`) are
-**vendored** under `vendor/` — the build needs no network and pins the exact
-parser revision. `vendor/fst-reader` additionally carries a local fix for an
-upstream out-of-bounds crash on FSTs with sparse/aliased signal handles (such as
-VCS output); see `CHANGELOG.md`.
+To produce the four release binaries, `scripts/build-release.sh` cross-compiles
+them with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (Zig
+as the cross-linker), so the same recipe works from any host — only the macOS
+target requires a macOS machine. Each target receives the correct feature set
+automatically, and `linux-amd64` is pinned to the glibc 2.17 baseline.
 
-### Release binaries
-
-`scripts/build-release.sh` cross-builds the four release binaries via
-`cargo-zigbuild` (Zig as cross-linker), so the same recipe works from any
-host (a macOS host is needed only for the macOS target). Each target gets the
-right feature set automatically — WLF/FSDB are target-gated — and
-`linux-amd64` is glibc-dynamic with a pinned glibc 2.17 baseline.
-
-| target | triple | output |
-|---|---|---|
+| Target | Triple | Output |
+|:--|:--|:--|
 | `linux-amd64`   | `x86_64-unknown-linux-gnu`   | `dist/rwave-linux-amd64`       |
 | `linux-arm64`   | `aarch64-unknown-linux-musl` | `dist/rwave-linux-arm64`       |
 | `windows-amd64` | `x86_64-pc-windows-gnu`      | `dist/rwave-windows-amd64.exe` |
 | `macos-arm64`   | `aarch64-apple-darwin`       | `dist/rwave-macos-arm64`       |
 
 ```sh
-# one-time setup (macOS):
+# one-time setup (macOS)
 brew install rustup zig
-export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 rustup default stable
 cargo install --locked cargo-zigbuild
 rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu aarch64-apple-darwin
 
-./scripts/build-release.sh                        # all four
-./scripts/build-release.sh --target linux-amd64   # one target
+./scripts/build-release.sh                        # all four targets
+./scripts/build-release.sh --target linux-amd64   # a single target
 ```
 
-The script checks its prerequisites and prints exact install commands for
-anything missing. See `docs/BUILD.md`; cross-linker configuration lives in
-`.cargo/config.toml`.
+The script checks its prerequisites up front and prints the exact install
+command for anything that is missing. [docs/BUILD.md](docs/BUILD.md) covers the
+cross-compilation setup, the per-target linking choices, and the Linux recipe in
+full.
 
-## Usage
+## Commands
 
 ```
 rwave [--json] [--limit N] [--verbose] <command> <file> [options]
 ```
 
-| Command    | Purpose                                                        |
-|------------|----------------------------------------------------------------|
-| `info`     | File overview: timescale, signal/type counts, time span, scopes |
-| `list`     | Signal paths with bit widths (`--filter` matches any alias)             |
-| `dump`     | Value-change events in time order (`--begin/--end/--filter`)    |
-| `summary`  | Per-signal stats: change count, rise/fall edges, static detection |
-| `snapshot` | Known signal values at one time point (`--at T`)                |
-| `compare`  | Value diff between two time points (`--at T1,T2`)               |
-| `search`   | Conditional search with associated-signal observation           |
+| Command | What it does |
+|:--|:--|
+| `info`     | Timescale, signal and type counts, time span, and scopes — the file at a glance |
+| `list`     | Enumerate signals with path, width, and type (`--filter` matches any alias) |
+| `dump`     | Print every value change in a time window, in time order |
+| `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges |
+| `snapshot` | All known signal values at one time point (`--at T`) |
+| `compare`  | What changed between two time points (`--at T1,T2`) |
+| `search`   | Find the intervals where a condition holds, optionally watching related signals |
 
-Global options: `--json` (structured output), `--limit N` (max rows; default
-200, `0` = unlimited), `--verbose` (extra fields; also lifts truncation when
-`--limit` is omitted).
+Every command accepts a `--begin`/`--end` time window and a `--filter`. Times
+take the unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example
+`17.5us`); a bare integer is interpreted as raw ticks. Filters are
+comma-separated and match by substring or `*`-glob. The global flags are `--json`
+for structured output, `--limit N` to cap the number of rows (the default is
+200, and `0` means unlimited), and `--verbose` for extra fields. A search
+condition is a comma-separated AND-list of `SIG=VAL` or `SIG!=VAL` terms, with
+values written in decimal, hexadecimal (`0xff`), binary (`b1010`), or 4-state.
+Run `rwave <command> --help` for the complete reference.
 
-Times accept `fs/ps/ns/us/ms/s` suffixes (e.g. `17.5us`); a bare integer is raw
-ticks. Unit-suffixed times are scaled by the file's timescale using
-banker's rounding, matching the reference tool.
+## JSON output
 
-### Examples
+Under `--json`, every command emits compact structured JSON. Each time is given
+both as a raw tick count (the `*_ticks` fields) and in human-readable form (the
+`*_h` fields), so the output is equally usable by a script, a CI gate, or an AI
+agent rather than only by a person reading the terminal:
 
 ```sh
-rwave info design.fst
-rwave list design.vcd --filter clk,rst
-rwave --json dump design.fst --begin 10us --end 12us --filter cpu.state
-rwave summary design.vcd --filter alu
-rwave snapshot design.fst --at 17.5us
-rwave compare design.fst --at 17.5us,17.7us --filter bus
-rwave search design.vcd --condition 'valid=1,ready=1' --show data --changed data
+rwave --json info sim.fst
+rwave --json search sim.fst --condition 'state=5' --show data
 ```
 
-## Vendor formats & plugins
+## Experimental support for WLF and FSDB
 
-rwave resolves a file by its extension:
+In addition to the open formats, RWaveAnalyzer has experimental support for two
+vendor waveform databases on linux-amd64: Mentor/Siemens **WLF**, written by
+Questa and ModelSim, and Synopsys **FSDB**, written by Verdi. It reads each one
+through the vendor's own reader library, so there is no separate `wlf2vcd` or
+`fsdb2vcd` conversion step and no intermediate file to keep around.
 
-| extension          | backend                              | available in          |
-|--------------------|--------------------------------------|-----------------------|
-| `vcd` `fst` `ghw`  | native (`wellen`)                    | every build           |
-| `wlf`              | **built-in** — Mentor `libwlf`       | linux amd64           |
-| `fsdb`             | **built-in** — Synopsys Verdi NPI    | linux amd64           |
-| anything else      | external plugin                      | `$RWAVE_PLUGIN_<EXT>`   |
+Because rwave calls into the vendor library, that library has to be available on
+the machine. rwave does not ship it; instead, you point rwave at the copy that
+comes with your own licensed tool installation, using an environment variable:
 
-These backends are compiled into the linux-amd64 binary. They `dlopen` the
-vendor library at runtime, located via an env var — nothing proprietary is
-bundled or linked:
+| Format | Vendor | Reader library | Environment variable |
+|:--|:--|:--|:--|
+| `.wlf`  | Mentor/Siemens Questa, ModelSim | `libwlf.so` | `RWAVE_WLF_LIB`  |
+| `.fsdb` | Synopsys Verdi                  | `libNPI.so` | `RWAVE_FSDB_LIB` |
 
-| env var          | points at                                          |
-|------------------|----------------------------------------------------|
-| `RWAVE_WLF_LIB`  | `libwlf.so` (a Questa/ModelSim install)            |
-| `RWAVE_FSDB_LIB` | `libNPI.so` (a licensed Verdi install)             |
+Set the variable to the absolute path of the library, and then run any command
+exactly as you would for a VCD or FST file:
 
 ```sh
+# WLF — libwlf.so from your Questa / ModelSim installation
+export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so
+rwave info run.wlf
+
+# FSDB — libNPI.so from your Verdi installation
 export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
 rwave info sim.fsdb
 ```
 
-**Requirements (on the machine reading WLF/FSDB).** The corresponding vendor
-simulator must be installed with a **valid license**: Mentor/Siemens Questa
-(or ModelSim) for WLF, Synopsys Verdi for FSDB — FSDB additionally needs a
-**Verdi-Ultra** license feature. Licensing is the vendor's domain; follow
-their documentation (rwave neither configures nor manages it). You also
-supply the vendor `.so` and point rwave at it with the env vars above.
+This support is experimental and limited to linux-amd64. The vendor's tool must
+be installed and licensed on the same machine — FSDB in particular needs a
+Verdi-Ultra license feature — and for FSDB you should source your Verdi
+environment first, so that `libNPI.so` can locate `$VERDI_HOME` and its own
+dependent libraries. Configuring and licensing the vendor software is outside
+rwave's control.
 
-To use a different FSDB reader, set `$RWAVE_PLUGIN_FSDB` to an external
-backend `.so` — an external plugin **overrides** the built-in of the same
-extension.
+If you need a reader for some other format, or a different implementation of one
+of these, rwave will load any backend that implements its C ABI from
+`$RWAVE_PLUGIN_<EXT>`. That interface is documented in
+[docs/PLUGIN.md](docs/PLUGIN.md).
 
-> **Experimental — disclaimer.** WLF and FSDB support is experimental and
-> **linux-amd64 only**. rwave reads these formats *only* through each EDA
-> vendor's own public reader
-> interface. It bundles **no proprietary binaries and no vendor source code**,
-> links none of them at build time, and redistributes no vendor software — it
-> `dlopen`s, at runtime, the library *you* supply from *your* licensed install.
-> Using these formats therefore requires the vendor's software and license on
-> your machine; obtaining and configuring those, under the vendor's terms, is
-> your responsibility.
+## Disclaimer
 
-**External plugins.** Any other extension `<ext>` is served by a backend
-cdylib whose absolute path you give in `$RWAVE_PLUGIN_<EXT>` (uppercased).
-rwave `dlopen`s it and drives the C ABI in
-[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h) —
-no search path, no registry: one env var, one `.so`. Memory ownership,
-threading, and a conformance checklist live in
-[`docs/PLUGIN.md`](docs/PLUGIN.md).
+RWaveAnalyzer reads WLF and FSDB only through each vendor's own public reader
+interface. It contains no proprietary binaries and no vendor source code, links
+against none of them at build time, and redistributes no vendor software; at run
+time it loads the reader library that you supply from your own licensed
+installation. Reading these formats therefore requires the vendor's software and
+a valid license on your machine, and obtaining and configuring those under the
+vendor's terms is your responsibility.
 
-Diagnostics: `.wlf`/`.fsdb` on a build without that backend prints
-`<fmt> support is only available in the linux-x86_64 build.`; an unhandled
-extension prints `no backend for .<ext> files. Set RWAVE_PLUGIN_<EXT> ...`; an
-external plugin built against a different `RWAVE_BACKEND_ABI_VERSION` is
-rejected with a version-mismatch message.
+## For AI agents
 
-## Agent skill
-
-This repository includes [`skill/SKILL.md`](skill/SKILL.md) for AI coding
-agents. It is intentionally narrow: a decision tree mapping user intent to
-command, a JSON-fields cheat sheet, the condition syntax, and a handful of
-workflow patterns (first-contact, point-in-time, transaction extraction,
-unexpected-state hunt, clock/reset sanity). Everything else — install,
-flags, time syntax, value formatting, known differences — lives in this
-README and the skill points back to it.
+The repository ships an agent skill at [skill/SKILL.md](skill/SKILL.md): a
+decision tree that maps user intent to a command, a cheat sheet of the JSON
+fields, the condition grammar, the WLF/FSDB setup, and a handful of debugging
+workflows. Point your agent at it, and the `--json` output of every command does
+the rest.
 
 ## Architecture
 
-The crate is layered top-to-bottom, each layer depending only on those below:
+The crate is layered top to bottom, and each layer depends only on the ones
+below it:
 
 ```
         cli            argument parsing only
          │
-      commands         per-command logic + presentation (text/JSON)
+      commands         per-command logic and presentation (text / JSON)
          │
        model           format-neutral domain: signal table, replay, snapshots
          │
       backend          WaveformBackend trait (the parser contract)
          │
-   backend::wellen_backend   the only code that touches `wellen`
+  wellen_backend       the only code that touches the wellen parser
 ```
 
-Leaf utilities used by `commands` but coupled to nothing below them:
-`format` (value/time formatting and parsing), `filter` (signal pattern
-matching), `condition` (search predicates), and `json` (a compact serializer).
+The decisive boundary is the **`WaveformBackend`** trait. A backend hands the
+model fully decoded, owned per-signal traces (parallel time and value arrays);
+the model owns all of the replay, merging, and snapshot logic and works purely
+over slices. Because the trait surface is coarse — there is no per-sample virtual
+call — the hot path stays monomorphic, and adding a parser means adding a single
+file under `backend/`. The vendor and plugin formats enter through that same
+boundary: a backend can come from a vtable compiled into the binary
+(`plugin/builtin/`) or from a `dlopen`ed library (`plugin/loader.rs`), and either
+one is driven through `plugin_backend.rs` and the C ABI in
+[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h).
 
-The key boundary is **`WaveformBackend`**. It hands the model fully decoded,
-owned per-signal traces (parallel time/value arrays); the model owns all replay,
-merging, and snapshot logic over plain slices. Because the trait surface is
-coarse (no per-sample virtual call), the hot path stays monomorphic, and
-swapping parsers means adding one file under `backend/`.
+At the top level the repository is organized as follows:
 
 ```
-crates/rwave/src/
-  lib.rs          module declarations + crate VERSION (from CARGO_PKG_VERSION)
-  cli.rs          argument grammar, help text, validation
-  commands.rs     the seven commands, text + JSON emitters
-  model.rs        Wave: signal table, heap-merge replay, bounded streaming
-  backend/
-    mod.rs        WaveformBackend trait + neutral types
-    wellen_backend.rs   wellen adapter (VCD/FST/GHW)
-    plugin_backend.rs   drives a C-ABI vtable (built-in or external) as a backend
-  plugin/
-    ffi.rs        Rust mirror of the C ABI (include/rwave_backend.h)
-    loader.rs     $RWAVE_PLUGIN_<EXT> discovery + user-facing error strings
-    builtin/      compiled-in vtables — wlf/ (libwlf), fsdb/ (Verdi NPI)
-  format.rs       fmt_val, time parse/format, Python-repr quoting
-  filter.rs       glob-lite + substring signal matching
-  condition.rs    search condition parsing/evaluation, big-uint compare
-  json.rs         compact JSON builder (matches Python json.dumps separators)
-  main.rs         argv → Wave::open → dispatch, exit codes, SIGPIPE
-vendor/
-  wellen/         vendored parser front-end
-  fst-reader/     vendored + locally patched FST reader
-verify/
-  stimulus_src/   Verilog testbenches (committed source)
-  stimulus/       generated VCD+FST pairs (metadata-normalized)
-  fixtures/       small handcrafted traces for differential tests
-  run.sh          self-test harness (smoke + VCD/FST parity)
-  differential.sh parity check vs the reference Python tool
-scripts/
-  build-release.sh   cross-build the four release binaries
-  gen-stimulus.sh    regenerate stimulus/ from stimulus_src/, sanitized
-skill/
-  SKILL.md           agent-skill descriptor (decision tree + workflow patterns)
-.github/workflows/
-  ci.yml          test + verify on push / PR
-  release.yml     build + publish the four binaries on v* tags
+crates/rwave/      the rwave crate (CLI, model, backends, plugin ABI)
+vendor/            vendored parser front-end: wellen + a patched fst-reader
+verify/            self-test and differential harnesses with committed stimulus
+scripts/           release build and stimulus-generation scripts
+skill/             the agent-skill descriptor
+docs/              extended documentation (BUILD, PLUGIN)
+.github/workflows/ CI (ci.yml), release (release.yml), and benchmark (bench.yml)
 ```
 
-## Performance notes
+## Performance
 
-* **Replay**: a binary min-heap k-way merge over selected signals' traces,
-  `O(n log k)` for `n` changes across `k` signals; ties within a timestamp
+- **Replay** is a binary min-heap k-way merge over the selected signals' traces,
+  `O(n log k)` for `n` changes across `k` signals; ties within one timestamp
   resolve to writer (declaration) order.
-* **Snapshots / compare**: per-signal binary search for the last value at or
-  before the target time — no full replay.
-* **Whole-file commands** (`summary`, and unfiltered `dump`/`snapshot`/`compare`)
-  decode signals in memory-bounded batches and release each batch, so peak
-  memory is proportional to a batch rather than the whole file. `summary`
-  computes its per-signal-independent statistics directly from each trace with
-  an allocation-light inner loop. `dump` retains only the earliest `--limit`
-  events via a bounded heap.
+- **Snapshots and `compare`** binary-search each signal for the last value at or
+  before the target time, with no full replay.
+- **Whole-file commands** — `summary`, and unfiltered `dump`/`snapshot`/`compare`
+  — decode signals in memory-bounded batches and release each batch as they go,
+  so peak memory is proportional to one batch rather than to the whole file.
+  `summary` computes its per-signal statistics directly from each trace in an
+  allocation-light loop, and `dump` keeps only the earliest `--limit` events in a
+  bounded heap.
 
-These paths produce byte-identical output to the simple eager paths; the switch
-is purely a memory/throughput optimization keyed on selection size.
+These streaming paths produce byte-identical output to the simple eager paths;
+the switch between them is purely a memory and throughput optimization keyed on
+how many signals were selected.
 
 ## Testing
 
 ```sh
-cargo test                  # unit tests (formatting, filters, conditions, CLI)
-bash verify/run.sh          # smoke + VCD/FST parity on the bundled stimulus
-bash verify/differential.sh # behavioural parity vs the reference Python tool
+cargo test                  # unit tests: formatting, filters, conditions, CLI
+bash verify/run.sh          # smoke test plus VCD/FST parity on bundled stimulus
+bash verify/differential.sh # behavioral parity against the reference Python tool
 ```
 
-`verify/run.sh` requires only the built binary. It checks that every command
-runs on both a VCD and an FST, and that the value-bearing commands produce
-identical results across formats for the same design.
-
-`verify/differential.sh` compares `rwave` against the reference `vcd_analyzer.py`
-across all seven commands on the fixtures and edge-case designs (136 cases). It
-locates the reference via `$VCD_ANALYZER`, `../VCD_ANALYZER/vcd_analyzer.py`, or
-`$PATH`, and **skips cleanly (exit 0)** if none is found, so it is safe to run
-in a clone or CI without the reference. The documented differences below (the
-`list --verbose` id field, the "waveform file" wording, and `dump`
-intra-timestamp ordering) are recognized and tolerated; any other divergence is
-a failure. Run with `VERBOSE=1` to print a diff for each failure.
-
-## Known differences from the reference tool
-
-`rwave` reproduces the `VCD_ANALYZER` CLI output, with a few principled
-exceptions that stem from using a real parser front-end and from generalizing
-beyond VCD:
-
-* **Format-neutral wording.** Messages that named "VCD" specifically are
-  generalized (e.g. `cannot open waveform file`), since `rwave` handles
-  multiple formats.
-* **`list --verbose` identifier field.** The reference prints the raw VCD
-  identifier code (`!`, `$`, …). `rwave` reports the backend's signal index
-  instead, because the abstract backend does not expose VCD identifier codes.
-* **Comments / synthesized buses.** `wellen`'s reader does not preserve VCD
-  `$comment` blocks, so `comments` is empty; `synthesized_buses` is reported as
-  0 (no backend equivalent).
-* **FST conversion artifact (tooling, not `rwave`).** `vcd2fst` does not carry
-  Verilog `parameter`/`localparam` *values* into the FST. A design that declares
-  such constants will show them with values in its VCD but without values in the
-  converted FST; `rwave` faithfully reports whatever each file actually contains.
-* **Weak-strength logic levels `h`/`l` in `search --condition`.** Per the VCD
-  spec, `h`/`l` are 1/0 with weak drive strength. `rwave` treats them as
-  defined logic levels throughout — `normalize_4state` maps `h→1`/`l→0`, so a
-  signal carrying value `1h` matches `--condition sig=3` (numerically `11`).
-  The Python reference's `val_to_int` rejects any character other than `0`/`1`
-  for numeric conversion, so the reference reports no match in that scenario.
-  This is the same `normalize_4state` policy rwave applies in `fmt_val`; we
-  keep it consistent across the analyzer rather than emulate the reference's
-  stricter parser quirk.
-* **`dump` event order within a single timestamp.** When several signals change
-  at the *same* time, the reference emits them in the order their value-changes
-  physically appear in the VCD (which depends on the writer — Icarus Verilog,
-  for instance, emits its initial `$dumpvars` block in reverse-declaration
-  order). `wellen` stores changes per-signal and does not preserve that
-  cross-signal file order, so `rwave` orders simultaneous events by declaration
-  order instead. **All values, timestamps, and the set of emitted events are
-  identical** — only the relative order of events sharing a timestamp can
-  differ, and only for `dump`. (The reference tool is VCD-only and cannot read
-  FST at all, so there is no cross-format reference for FST ordering.)
+`verify/run.sh` needs only the built binary: it confirms that every command runs
+on both a VCD and an FST, and that the value-bearing commands produce identical
+results across the two formats for the same design. `verify/differential.sh`
+compares rwave against the reference `vcd_analyzer.py` across all seven commands
+on the fixtures and edge-case designs. It locates the reference through
+`$VCD_ANALYZER`, a sibling checkout, or `$PATH`, and skips cleanly when none is
+present, so it is safe to run in a fresh clone or in CI.
 
 ## License
 
-MIT. See `LICENSE`. Vendored components retain their own licenses:
-`vendor/wellen` (BSD-3-Clause) and `vendor/fst-reader` (BSD-3-Clause).
+MIT — see [LICENSE](LICENSE). The vendored components keep their own licenses:
+`vendor/wellen` and `vendor/fst-reader` are both BSD-3-Clause.
