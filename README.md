@@ -1,52 +1,81 @@
-# rwave
+<p align="center">
+  <h1 align="center">RWaveAnalyzer</h1>
+  <p align="center">
+    A fast, single-binary CLI for inspecting RTL simulation waveforms &mdash;
+    <b>VCD</b>, <b>FST</b>, <b>GHW</b>, and even the proprietary <b>WLF</b> &amp; <b>FSDB</b> &mdash;
+    built for RTL debug, CI, and AI agents.
+  </p>
+</p>
 
-> A fast, headless waveform analyzer for RTL simulation — built for scripting and AI agents.
+<p align="center">
+  <img alt="Release" src="https://img.shields.io/github/v/release/neveltyc/RWaveAnalyzer?sort=semver&style=flat-square&color=3366cc">
+  <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/neveltyc/RWaveAnalyzer/ci.yml?branch=main&style=flat-square&label=CI">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
+</p>
 
-[![Release](https://img.shields.io/github/v/release/neveltyc/RWaveAnalyzer?sort=semver)](https://github.com/neveltyc/RWaveAnalyzer/releases/latest)
-[![CI](https://github.com/neveltyc/RWaveAnalyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/neveltyc/RWaveAnalyzer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+---
 
-`rwave` answers questions about a simulation dump from the command line — what's
-inside, which signals exist, what changed between two times, when a condition
-holds — and prints either readable text or stable JSON. It reads **VCD**,
-**FST**, and **GHW** out of the box (plus **WLF** and **FSDB** on linux-amd64),
-so one small binary replaces a click-through waveform viewer for triage,
-regressions, CI checks, and AI-agent debugging.
+## Why RWaveAnalyzer?
 
-```console
-$ rwave search sim.fst --condition 'valid=1,ready=1'
-Found: 3 interval(s)
-  30ns        ..50ns         valid=1,ready=1
-  70ns        ..80ns         valid=1,ready=1
-  90ns        ..110ns        valid=1,ready=1
+You have a multi-gigabyte FST from an overnight regression and you need to know
+exactly when `arvalid` and `arready` were both high — or what `state[3:0]` held
+at 17.55 µs. Opening Verdi or GTKWave means waiting for a GUI, clicking down the
+hierarchy, and squinting at a cursor. `rwave` answers from the terminal, in one
+command:
+
+```sh
+rwave search sim.fst --condition 'arvalid=1,arready=1' --show araddr,arlen
 ```
 
-## Features
+Two things set it apart:
 
-- **Reads what your simulator wrote.** VCD, FST, and GHW natively; WLF
-  (Mentor/Questa) and FSDB (Synopsys/Verdi) on linux-amd64 — experimental, see
-  [below](#experimental-wlf--fsdb).
-- **Seven focused commands.** Overview, signal list, value-change dump,
-  per-signal stats, point snapshot, two-point diff, and conditional search —
-  no GUI, no modes to learn.
-- **JSON on everything.** `--json` gives every command a stable, machine-readable
-  form; time is reported as both raw ticks and human units (`460ns`). Built for
-  agents and CI.
-- **Scales to big dumps.** Streaming, memory-bounded commands and an `O(n log k)`
-  k-way-merge replay handle hundreds of thousands of signals without exhausting
-  RAM.
-- **One binary, nothing to install.** Pure Rust, no Python, no GUI toolkit, no
-  runtime dependencies for the core.
+- **It reads every format your flow produces.** The open **VCD**, **FST**, and
+  **GHW** — *and* the proprietary **WLF** (Mentor/Questa) and **FSDB**
+  (Synopsys/Verdi) dumps, the latter two read directly through each vendor's own
+  library with no conversion step. See [WLF & FSDB](#wlf--fsdb).
+- **Every command speaks JSON.** A `--json` mode with stable keys turns the same
+  tool into a backend for CI gates and AI agents, not just a human at a prompt.
 
-## Installation
+It is a single self-contained binary — pure Rust, no Python, no GUI, nothing to
+install — and it streams its work so a dump with hundreds of thousands of
+signals never exhausts RAM.
 
-### Prebuilt binaries
+## Quick start
 
-Download the binary for your platform from the
+Point any command at a `.vcd`, `.fst`, `.ghw` (or `.wlf` / `.fsdb`) file:
+
+```sh
+# What's in this file?
+rwave info sim.fst
+
+# Show me the clock and reset
+rwave list sim.fst --filter clk,rst
+
+# What happened between 100 ns and 200 ns?
+rwave dump sim.fst --begin 100ns --end 200ns --filter state
+
+# When were valid and ready both high?
+rwave search sim.fst --condition 'valid=1,ready=1' --show data
+
+# What are all known values at exactly 17.55 us?
+rwave snapshot sim.fst --at 17.55us --filter state,init_done
+
+# What changed between two times?
+rwave compare sim.fst --at 17.5us,17.7us --filter bus
+
+# Which signals are active vs static?
+rwave summary sim.fst --filter alu
+```
+
+Add `--json` to any command for compact, machine-readable output.
+
+## Install
+
+Download the `rwave` binary for your platform from the
 [latest release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest):
 
 | Platform | Binary | VCD · FST · GHW | WLF | FSDB |
-|---|---|:---:|:---:|:---:|
+|:--|:--|:--:|:--:|:--:|
 | Linux x86-64          | `rwave-linux-amd64`       | ✓ | ✓ | ✓ |
 | Linux ARM64           | `rwave-linux-arm64`       | ✓ | — | — |
 | Windows x86-64        | `rwave-windows-amd64.exe` | ✓ | — | — |
@@ -59,132 +88,100 @@ chmod +x rwave
 ./rwave --version
 ```
 
-Every binary reads VCD/FST/GHW. `rwave-linux-amd64` is glibc-dynamic
-(glibc ≥ 2.17 / manylinux2014), so it runs on any mainstream Linux since 2014.
+Every binary reads VCD/FST/GHW; WLF and FSDB are linux-amd64 only (see
+[WLF & FSDB](#wlf--fsdb)). `rwave-linux-amd64` is glibc-dynamic (glibc ≥ 2.17),
+so it runs on any mainstream Linux since 2014.
 
-### From source
+**From source** — all you need is a recent stable Rust toolchain (built against
+1.90):
 
 ```sh
 cargo build --release      # → target/release/rwave
 ```
 
-A recent stable Rust toolchain is all you need (built against 1.90, edition
-2024). The parser front-end is vendored, so the build is offline and pins an
-exact parser revision. To cross-compile the release binaries, see
-[docs/BUILD.md](docs/BUILD.md).
+The parser is vendored, so the build is offline and reproducible; see
+[docs/BUILD.md](docs/BUILD.md) for cross-compiling the release binaries.
 
-## Quick start
-
-Point any command at a `.vcd`, `.fst`, or `.ghw` file. Start with `info` for the
-lay of the land:
-
-```console
-$ rwave info sim.fst
-File      : sim.fst
-Size      : 4198400 bytes
-Timescale : 1ps
-Signals   : 1043
-Types     : wire=712, reg=301, parameter=30
-Time      : 0s ~ 1.2ms (1.2ms)
-  scope: tb
-  scope: tb.dut
-```
-
-Then drill in — list signals, dump a window, find when something happens:
-
-```sh
-rwave list     sim.fst --filter clk,rst              # which signals exist?
-rwave dump     sim.fst --begin 10us --end 12us --filter cpu.state
-rwave summary  sim.fst --filter alu                  # which signals are active?
-rwave snapshot sim.fst --at 17.5us                   # all values at one instant
-rwave compare  sim.fst --at 17.5us,17.7us            # what changed between two times?
-rwave search   sim.fst --condition 'valid=1,ready=1' # when does a condition hold?
-```
-
-Add `--json` to any command for a stable, scriptable form — this is what an
-agent or CI job consumes (abbreviated; every text field has a JSON counterpart):
-
-```console
-$ rwave --json info sim.fst
-{"file":"sim.fst","timescale":"1ps","signal_count":1043,
- "var_types":{"wire":712,"reg":301,"parameter":30},
- "time_min_ticks":0,"time_max_ticks":1200000000,"duration_h":"1.2ms",
- "scopes":["tb","tb.dut"]}
-```
-
-## Usage
+## Commands
 
 ```
 rwave [--json] [--limit N] [--verbose] <command> <file> [options]
 ```
 
-| Command | What it answers |
-|---|---|
-| `info`     | What's in this file? — timescale, signal/type counts, time span, scopes |
-| `list`     | Which signals exist? — paths + bit widths (`--filter` matches any alias) |
-| `dump`     | What happened between two times? — value-change events in time order |
-| `summary`  | Which signals are active vs static? — per-signal change/edge counts |
-| `snapshot` | What is everything at time T? — `--at T` |
-| `compare`  | What changed between two times? — `--at T1,T2` |
-| `search`   | When does a condition hold? — `--condition`, with `--show` / `--changed` |
+| Command | What it does |
+|:--|:--|
+| `info`     | Timescale, signal/type counts, time span, scopes — the file at a glance |
+| `list`     | Enumerate signals with path, width, and type (`--filter` matches any alias) |
+| `dump`     | Print every value change in a time window, in order |
+| `summary`  | Per-signal stats: active/static, change count, rise/fall edges |
+| `snapshot` | All known signal values at one time point (`--at T`) |
+| `compare`  | What changed between two times (`--at T1,T2`) |
+| `search`   | Find intervals where a condition holds, optionally watching related signals |
 
-**Global options:** `--json` (structured output) · `--limit N` (max rows;
-default 200, `0` = unlimited) · `--verbose` (extra fields; also lifts truncation
-when `--limit` is omitted).
+All commands take `--begin`/`--end` windows with unit suffixes
+(`fs ps ns us ms s`; a bare integer is raw ticks) and `--filter` with substring
+or `*`-glob patterns. Global flags: `--json` (structured output), `--limit N`
+(max rows; default 200, `0` = unlimited), `--verbose` (extra fields). A search
+condition is a comma-separated AND-list of `SIG=VAL` / `SIG!=VAL`, with values in
+decimal, hex (`0xff`), binary (`b1010`), or 4-state. Run `rwave <command> --help`
+for the full reference.
 
-- **Times** accept `fs/ps/ns/us/ms/s` suffixes (e.g. `17.5us`); a bare integer
-  is raw ticks.
-- **Filters** are comma-separated and match by substring or `*` glob (e.g.
-  `--filter '*valid,top.dma.*'`).
-- **Conditions** (search only) are a comma-separated AND-list of `SIG=VAL` /
-  `SIG!=VAL`, with values in decimal, hex (`0xff`), binary (`b1010`), or 4-state.
+## JSON output
 
-For the full surface — every flag, the search sub-modes, value formatting — run
-`rwave <command> --help`.
+Under `--json` every command emits compact structured JSON with raw tick counts
+(`*_ticks`) alongside human-readable times (`*_h`) — built for agents, scripts,
+and CI gates rather than eyeballs:
 
-## Experimental: WLF & FSDB
+```sh
+rwave --json info sim.fst
+rwave --json search sim.fst --condition 'state=5' --show data
+```
 
-On **linux-amd64**, rwave additionally reads two proprietary vendor formats:
+## WLF & FSDB
 
-| Format | Vendor | Read via | Point rwave at it with |
-|---|---|---|---|
+Beyond the open formats, **rwave reads the two dominant proprietary EDA dumps
+directly** — no `wlf2vcd` / `fsdb2vcd` step, no intermediate file:
+
+| Format | Vendor | Read through | Point rwave at it with |
+|:--|:--|:--|:--|
 | `.wlf`  | Mentor/Siemens Questa, ModelSim | `libwlf`  | `RWAVE_WLF_LIB`  → `libwlf.so`  |
 | `.fsdb` | Synopsys Verdi                  | Verdi NPI | `RWAVE_FSDB_LIB` → `libNPI.so`  |
 
-Set the env var to the vendor library from your own licensed install, then use
-rwave exactly as for any other format:
+rwave loads the reader library from *your own* licensed tool install at runtime,
+so there is nothing proprietary to ship. Set the env var and use rwave exactly as
+for any other format:
 
 ```sh
+# WLF — point at libwlf.so from your Questa / ModelSim install
+export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so
+rwave info run.wlf
+
+# FSDB — point at libNPI.so from your Verdi install
 export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
 rwave info sim.fsdb
 ```
 
-These backends `dlopen` the vendor library at runtime, so the vendor's simulator
-must be installed with a **valid license** (FSDB additionally requires a
-**Verdi-Ultra** license feature). For FSDB, source your Verdi environment first
-so `libNPI.so` can resolve `$VERDI_HOME` and its own dependencies. Licensing and
-environment setup are the vendor's domain.
+This support is **experimental and linux-amd64 only**. The vendor's simulator
+must be installed with a valid license (FSDB additionally needs a **Verdi-Ultra**
+feature); for FSDB, source your Verdi environment first so `libNPI.so` can
+resolve `$VERDI_HOME` and its own dependencies. Need a different reader for a
+format, or support for a brand-new one? rwave loads any backend implementing its
+small C ABI from `$RWAVE_PLUGIN_<EXT>` — see [docs/PLUGIN.md](docs/PLUGIN.md).
 
-> [!IMPORTANT]
-> **WLF/FSDB support is experimental and linux-amd64 only.** rwave reads these
-> formats *only* through each vendor's own public reader interface. It bundles
-> **no proprietary binaries and no vendor source code**, links none at build
-> time, and redistributes no vendor software — at runtime it `dlopen`s the
-> library *you* supply from *your* licensed install. Using these formats
-> therefore requires the vendor's software and license on your machine;
-> obtaining and configuring those, under the vendor's terms, is your
+> Disclaimer — rwave reads WLF and FSDB only through each vendor's own public
+> reader interface. It bundles no proprietary binaries and no vendor source code,
+> links none at build time, and redistributes no vendor software; at runtime it
+> `dlopen`s the library you supply from your own licensed install. Using these
+> formats requires the vendor's software and license on your machine, and
+> obtaining and configuring those under the vendor's terms is your
 > responsibility.
-
-Need a different reader for a format, or support for a brand-new one? rwave loads
-any backend that implements its small C ABI from `$RWAVE_PLUGIN_<EXT>` — see
-[docs/PLUGIN.md](docs/PLUGIN.md).
 
 ## For AI agents
 
 The repo ships an agent skill at [skill/SKILL.md](skill/SKILL.md): a decision
 tree from user intent to command, a JSON-field cheat sheet, the condition
-grammar, and a handful of debugging workflows. Point your agent at it and let
-the `--json` output of every command do the rest.
+grammar, the WLF/FSDB setup, and a handful of debugging workflows. Point your
+agent at it and let the `--json` output of every command do the rest.
 
 ## Documentation
 

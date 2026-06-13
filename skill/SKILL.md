@@ -25,6 +25,22 @@ chmod +x ~/.local/bin/rwave
 ~/.local/bin/rwave --version
 ```
 
+## Vendor formats (WLF / FSDB)
+
+On a **linux-amd64** host rwave also reads Questa `.wlf` and Verdi `.fsdb`
+directly — point it at the vendor reader library from the user's licensed
+install via an env var, then query as usual:
+
+```bash
+export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so          # for .wlf
+export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"  # for .fsdb (needs a Verdi-Ultra license)
+rwave --json info dump.fsdb
+```
+
+If the env var is unset, the library/license is missing, or the build is not
+linux-amd64, `.wlf`/`.fsdb` fail with a one-line `Error:` — fall back to
+converting the dump to VCD or FST first.
+
 ## Pick the right command
 
 ```
