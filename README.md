@@ -30,7 +30,7 @@ rwave search sim.fst --condition 'arvalid=1,arready=1' --show araddr,arlen
 The tool is a single self-contained binary called `rwave`. It reads the open
 **VCD**, **FST**, and **GHW** formats, and on linux-amd64 it adds experimental
 support for the **WLF** (Mentor/Questa) and **FSDB** (Synopsys/Verdi) databases,
-which it reads through each vendor's own library (see [WLF & FSDB](#wlf--fsdb)).
+which it reads through each vendor's own library (see [WLF and FSDB](#experimental-support-for-wlf-and-fsdb)).
 Every command also has a `--json` mode with stable keys, so the same tool drives
 a human at a prompt, a CI gate, and an AI agent equally well. Whole-file commands
 stream their work in bounded memory, so a dump with hundreds of thousands of
@@ -85,7 +85,7 @@ chmod +x rwave
 ```
 
 Every binary reads VCD/FST/GHW; WLF and FSDB are linux-amd64 only (see
-[WLF & FSDB](#wlf--fsdb)). The `rwave-linux-amd64` build is dynamically linked
+[WLF and FSDB](#experimental-support-for-wlf-and-fsdb)). The `rwave-linux-amd64` build is dynamically linked
 against glibc with a 2.17 baseline (manylinux2014), so it runs on every
 mainstream Linux distribution released since 2014.
 
@@ -175,7 +175,7 @@ rwave --json info sim.fst
 rwave --json search sim.fst --condition 'state=5' --show data
 ```
 
-## WLF & FSDB
+## Experimental support for WLF and FSDB
 
 In addition to the open formats, RWaveAnalyzer has experimental support for two
 vendor waveform databases on linux-amd64: Mentor/Siemens **WLF**, written by
@@ -217,7 +217,7 @@ of these, rwave will load any backend that implements its C ABI from
 `$RWAVE_PLUGIN_<EXT>`. That interface is documented in
 [docs/PLUGIN.md](docs/PLUGIN.md).
 
-### Disclaimer
+## Disclaimer
 
 RWaveAnalyzer reads WLF and FSDB only through each vendor's own public reader
 interface. It contains no proprietary binaries and no vendor source code, links
@@ -308,33 +308,6 @@ compares rwave against the reference `vcd_analyzer.py` across all seven commands
 on the fixtures and edge-case designs. It locates the reference through
 `$VCD_ANALYZER`, a sibling checkout, or `$PATH`, and skips cleanly when none is
 present, so it is safe to run in a fresh clone or in CI.
-
-## Compatibility with VCD_ANALYZER
-
-rwave's command-line surface mirrors the reference Python tool
-[VCD_ANALYZER](https://github.com/neveltyc/VCD_ANALYZER), so the two are
-interchangeable at the CLI. A few differences are intentional and follow from
-using a real parser front-end and from generalizing beyond VCD:
-
-- **Format-neutral wording.** Messages that named "VCD" specifically are
-  generalized (for example, `cannot open waveform file`), because rwave handles
-  several formats.
-- **`list --verbose` identifier field.** The reference prints the raw VCD
-  identifier code; rwave reports the backend's signal index instead, because the
-  abstract backend does not expose VCD identifier codes.
-- **Comments and synthesized buses.** The `wellen` reader does not preserve VCD
-  `$comment` blocks, so `comments` is always empty, and `synthesized_buses` is
-  reported as `0`.
-- **FST conversion artifact.** `vcd2fst` does not carry Verilog
-  `parameter`/`localparam` *values* into the FST, so a constant that shows a value
-  in the VCD will show none in the converted FST. rwave faithfully reports
-  whatever each file actually contains; this is a property of the conversion
-  tool, not of rwave.
-- **`dump` ordering within one timestamp.** When several signals change at the
-  same time, the reference emits them in the order they physically appear in the
-  VCD, whereas rwave orders them by declaration. The values, timestamps, and the
-  set of emitted events are identical — only the relative order of events that
-  share a timestamp can differ, and only for `dump`.
 
 ## License
 
