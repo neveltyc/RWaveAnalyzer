@@ -1,31 +1,54 @@
 name: Bench
 
 # Performance baseline against the committed bench/stress.fst.xz. Runs:
-#   - on every `v*` tag push, then appends a results table to the release body
+#   - after the Release workflow finishes for a `v*` tag, then appends a
+#     results table to that release's body
 #   - on manual workflow_dispatch (uploads results as a workflow artifact only)
 #
-# The dataset (~160 KB compressed, ~2 MB decompressed; 4,394 signals,
-# 77M value changes) is checked in, so this workflow only needs cargo + python3
-# + xz + gnu-time — all preinstalled on ubuntu-latest runners.
+# Why `workflow_run` instead of `push: tags`: bench and release used to trigger
+# on the same tag push and then wrote the *same* GitHub release concurrently
+# (release.yml's softprops create vs. bench's `gh release edit`). That race
+# could detach the release from its tag, leaving an `untagged-<sha>` release
+# that isn't marked latest (it hit v0.1.0). Triggering bench only after Release
+# completes makes the release body a single-writer sequence — softprops fully
+# publishes first, then bench appends.
+#
+# The dataset is checked in (bench/stress.fst.xz), so this workflow only needs
+# cargo + python3 + xz + gnu-time — all preinstalled on ubuntu-latest runners.
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
 
 permissions:
-  contents: write   # so the tag-push job can `gh release edit`
+  contents: write   # so the post-release job can `gh release edit`
 
 env:
   CARGO_TERM_COLOR: always
+  # The ref we act on. For a release run, workflow_run.head_branch is the tag
+  # name of the upstream (tag-triggered) Release run; for a manual dispatch it
+  # is null, so we fall back to the dispatch ref.
+  REF_NAME: ${{ github.event.workflow_run.head_branch || github.ref_name }}
 
 jobs:
   bench:
     name: Performance baseline (ubuntu-latest)
     runs-on: ubuntu-latest
+    # Release runs: only proceed if Release succeeded and it was a v* tag.
+    # Manual dispatch always runs (artifact-only; it never edits a release).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Bench the exact commit the release was cut from (the tag's commit);
+          # for a manual dispatch this is null and falls back to the default ref.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -52,32 +75,37 @@ jobs:
       - name: Upload JSON + Markdown as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bench-results-${{ github.ref_name }}
+          name: bench-results-${{ env.REF_NAME }}
           path: |
             bench/build/results.json
             bench/build/bench-output.md
           retention-days: 90
 
-      - name: Append results to the release notes (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Append results to the release notes (release runs only)
+        if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${REF_NAME}"
 
-          # Bench and release workflows trigger on the same tag push and run
-          # in parallel; release.yml needs ~5 minutes to publish before we can
-          # `gh release view` its body. Poll for up to 15 minutes.
-          for attempt in $(seq 1 30); do
+          # Release has already completed (this job runs on its completion), so
+          # the release exists and softprops is done writing it. A short retry
+          # only absorbs GitHub API replication lag — no 15-minute poll, and no
+          # concurrent writer to race with.
+          found=0
+          current=""
+          for attempt in $(seq 1 6); do
             if current=$(gh release view "$tag" --json body --jq '.body' 2>/dev/null); then
-              echo "release $tag is live after $attempt poll(s)"
+              echo "release $tag is live after $attempt attempt(s)"
+              found=1
               break
             fi
-            echo "release $tag not yet published; sleeping 30s ..."
-            sleep 30
+            echo "release $tag not visible yet; sleeping 10s ..."
+            sleep 10
           done
-          if [ -z "${current+set}" ]; then
-            echo "release $tag never appeared after 15 min; bailing out" >&2
+          if [ "$found" -ne 1 ]; then
+            echo "release $tag never appeared after the Release workflow completed; bailing out" >&2
             exit 1
           fi
 
