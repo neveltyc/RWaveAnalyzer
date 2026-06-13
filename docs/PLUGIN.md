@@ -1,27 +1,30 @@
 # rwave plugin protocol
 
-rwave reads VCD and FST natively via its built-in `wellen` backend.
-Additional waveform formats are not compiled into the rwave binary. They
-are loaded at runtime from plugin shared libraries that conform to the
-stable C ABI described here.
+rwave reads VCD, FST, and GHW natively via its built-in `wellen` backend.
+Two more formats ship **compiled into** the linux-amd64 binary — WLF
+(Mentor) and FSDB (Synopsys Verdi NPI) — and any other format is loaded
+at runtime from an **external** plugin shared library. Built-in and
+external backends speak the *same* stable C ABI described here; they
+differ only in how rwave obtains the vtable (a compiled-in pointer vs.
+`dlopen` + `dlsym`).
 
-This document is the contract. A plugin that follows it will be loaded
-by rwave without rebuilding the rwave binary.
+This document is the contract. An external plugin that follows it is
+loaded by rwave without rebuilding the rwave binary.
 
 ## Lifecycle
 
-1. User runs an rwave command on a file whose format is not built in.
-2. rwave takes the file extension as the format token, e.g. `foo` for
-   `data.foo`. The convention is: a plugin handling extension `<ext>`
-   is packaged as `rwave_<ext>` and exports its cdylib as
-   `librwave_<ext>_backend.so` (Linux) / `rwave_<ext>_backend.dll`
-   (Windows — cdylibs carry no `lib` prefix there). No registry on
-   rwave's side.
-3. rwave looks for that plugin shared library on disk (see Discovery).
-4. rwave `dlopen`s it and resolves the symbol `rwave_backend`.
-5. rwave calls that function once per process. It returns a const vtable.
-6. rwave validates `abi_version` in the vtable. Mismatch is fatal.
-7. For each file, rwave calls `vtable.open(path)` to get an opaque
+1. User runs an rwave command on a file whose extension is not native
+   (`vcd`/`fst`/`ghw`). rwave takes the extension as the format token,
+   e.g. `foo` for `data.foo`.
+2. rwave resolves a vtable for that token (see Discovery): an external
+   plugin named by `$RWAVE_PLUGIN_<EXT>` wins; otherwise a compiled-in
+   built-in (`wlf`/`fsdb`) is used.
+3. For an external plugin, rwave `dlopen`s the `.so` and resolves the
+   symbol `rwave_backend`, calling it once. For a built-in, rwave calls
+   the equivalent compiled-in entry point. Either way it gets a const
+   vtable.
+4. rwave validates `abi_version` in the vtable. Mismatch is fatal.
+5. For each file, rwave calls `vtable.open(path)` to get an opaque
    `RwaveSession*` and drives metadata, hierarchy, and trace queries
    through the vtable. `vtable.close()` releases the file.
 
@@ -30,57 +33,44 @@ between matching `open` / `close` calls.
 
 ## Platform support
 
-Plugins load at runtime, so they do not affect rwave's own build matrix.
-However, rwave only **attempts** plugin loading on platforms where a
-plugin ecosystem is known to be viable:
-
-| Platform        | Plugin loading attempted |
-|-----------------|--------------------------|
-| linux x86_64    | yes                      |
-| windows x86_64  | yes                      |
-| linux aarch64   | no                       |
-| macos aarch64   | no                       |
-| macos x86_64    | no                       |
-
-On platforms where plugin loading is disabled, opening a non-built-in
-format errors with `<format> extension is not supported on this
-platform.` without trying to load anything.
-
-The list is conservative. PRs adding platforms (with a matching plugin
-ecosystem) are welcome.
+- **External plugins** (`$RWAVE_PLUGIN_<EXT>`) load via `dlopen` on any
+  platform whose rwave build is dynamically linked.
+- **Built-in WLF/FSDB** (experimental, amd64) compile in only for `x86_64`
+  linux — the target with a runtime-loadable vendor library. On any other
+  build, `.wlf`/`.fsdb` errors with `<format> support is only available in the
+  linux-x86_64 build.` They sit behind default-on Cargo features (`wlf`,
+  `fsdb`); `--no-default-features` drops them.
 
 ### Linux release binary
 
 The prebuilt `rwave-linux-amd64` is glibc-dynamic (manylinux2014
 baseline) so it can `dlopen`. Source builds against
-`x86_64-unknown-linux-musl` are static and cannot — `.wlf` opens fail
-with `Dynamic loading not supported`. Built-in formats are unaffected.
+`x86_64-unknown-linux-musl` are static and cannot — `.wlf`/`.fsdb` opens
+and external plugins fail with `Dynamic loading not supported`. The
+native VCD/FST/GHW core is unaffected.
 
 ## Discovery
 
-When rwave needs a plugin for format `<f>`, it searches in this order:
+When rwave needs a backend for a non-native format `<f>`, it resolves the
+vtable in this order:
 
-1. Environment variable `RWAVE_PLUGIN_<F>` (uppercase format name),
-   set to an absolute path to the plugin shared library. Example for
-   format `foo`: `RWAVE_PLUGIN_FOO=/abs/path/to/librwave_foo_backend.so`.
-2. The active virtualenv's site-packages (`$VIRTUAL_ENV`):
-   - Linux:   `$VIRTUAL_ENV/lib/python3.*/site-packages/rwave_<f>/`
-   - Windows: `%VIRTUAL_ENV%\Lib\site-packages\rwave_<f>\`
-3. The per-user site-packages:
-   - Linux:   `~/.local/lib/python3.*/site-packages/rwave_<f>/`
-   - Windows: `%APPDATA%\Python\Python3XX\site-packages\rwave_<f>\`
-     (where `pip install --user` lands).
+1. **External override** — environment variable `RWAVE_PLUGIN_<F>`
+   (uppercase format token), an absolute path to a backend cdylib.
+   Example: `RWAVE_PLUGIN_FSDB=/abs/path/to/librwave_fsdb_backend.so`.
+   If set and the file exists, rwave `dlopen`s it.
+2. **Built-in** — `wlf`/`fsdb` where compiled in (amd64; WLF also on
+   windows), the compiled-in vtable.
+3. Otherwise rwave emits the "no backend" error (below).
 
-The probed library filename is `librwave_<f>_backend.so` on Linux and
-`rwave_<f>_backend.dll` on Windows — Windows cdylibs carry no `lib`
-prefix, so do not expect a `librwave_…dll`.
+That is the whole rule: one env var per format, or a built-in. No search
+path, no registry, no Python/site-packages involvement. The override
+always wins, so an external `.fsdb` backend set via `RWAVE_PLUGIN_FSDB`
+supersedes the built-in NPI one.
 
-The Python-side paths exist because the canonical distribution channel
-for plugins is a Python wheel (see Distribution). The env var is the
-escape hatch for development, system-wide installs the scan misses,
-and unusual install layouts.
-
-If all of the above fail, rwave emits the "support not installed" error.
+Each backend locates *its own* vendor library separately, at init: the
+built-in WLF reads `$RWAVE_WLF_LIB` (→ `libwlf.so`/`.dll`), the built-in FSDB
+reads `$RWAVE_FSDB_LIB` (→ `libNPI.so`). Those name the *vendor* `.so`;
+`RWAVE_PLUGIN_<EXT>` names the *rwave backend* `.so` — distinct layers.
 
 ## ABI v1
 
@@ -205,60 +195,32 @@ changing version does **not** force a rwave rebuild. The ABI version
 is the only compatibility gate; it stays at the same value across
 many rwave + plugin releases until a structural change forces a bump.
 
-## Distribution: wheels
+## Distribution
 
-The canonical distribution channel for plugins is a Python wheel — not
-because plugins are Python, but because wheels give us platform tags,
-version pinning, and a universally installed installer (`pip`) without
-requiring custom installers.
+Two channels, by backend kind:
 
-### Naming
-
-```
-rwave_<format>-<plugin_version>-py3-none-<platform>.whl
-```
-
-- `<format>` matches the vtable's `name` field, which in turn equals
-  the file extension this plugin claims (e.g. a plugin for `.foo`
-  files has `<format> = foo` everywhere — wheel filename, package
-  directory, cdylib filename, vtable `name`).
-- `<plugin_version>` is the plugin's own semver — independent of rwave's
-  version. The runtime compatibility check is the vtable's `abi_version`
-  field, not this string.
-- `<platform>` is the PEP 425 platform tag:
-  - Linux x86_64: `linux_x86_64`
-  - Windows x86_64: `win_amd64`
-
-### Layout
-
-```
-rwave_<format>/
-├── __init__.py                          # empty; required for site-packages discovery
-└── <lib>                                # librwave_<format>_backend.so  (Linux)
-                                         # rwave_<format>_backend.dll    (Windows — no lib prefix)
-```
-
-Supporting files (vendor libraries, license data) may live in
-subdirectories of `rwave_<format>/` and be discovered relative to the
-plugin's own `__file__`. rwave does not introspect those — they are
-internal to the plugin.
+- **Built-in (`wlf`, `fsdb`).** Nothing to distribute — they ship inside
+  `rwave-linux-amd64`. The user only supplies the *vendor* library at
+  runtime via `$RWAVE_WLF_LIB` / `$RWAVE_FSDB_LIB`.
+- **External plugin.** Ship a single backend cdylib
+  (`librwave_<format>_backend.so`) however you like — a tarball, a
+  release asset, an internal artifact store. The user points
+  `$RWAVE_PLUGIN_<FORMAT>` at its absolute path. The plugin may keep its
+  own vendor libraries / support files beside the `.so` and locate them
+  relative to itself (e.g. via `dladdr`); rwave does not introspect them.
+  No wheel, no `pip`, no required on-disk layout.
 
 ## Errors rwave emits
 
 | Scenario | Message |
 |---|---|
-| Plugin not installed | `Error: <format> support not installed. Install a rwave_<format> wheel for <platform>.` |
-| Plugin found but load failed | `Error: <verbatim from dlopen / init err_out>` |
-| ABI version mismatch | `Error: <format> backend ABI mismatch (plugin v<X>, rwave expects v<Y>). Reinstall a rwave_<format> wheel matching rwave's ABI version.` |
-| Platform without plugin support | `Error: <format> extension is not supported on this platform.` |
-
-The install hint is intentionally version-agnostic — rwave's version
-is not encoded in the wheel name, so quoting one specific filename
-would be misleading. The ABI-mismatch message is the only one that
-names a version, because the version IS the problem there.
+| No backend for the extension | `Error: no backend for .<ext> files. Set RWAVE_PLUGIN_<EXT> to a backend library path to handle this format (see docs/PLUGIN.md).` |
+| Built-in requested where it isn't compiled | `Error: <format> support is only available in the linux-x86_64 build.` |
+| Plugin / vendor lib found but load failed | `Error: <verbatim from dlopen, init err_out, or the backend's vendor-lib loader>` |
+| ABI version mismatch (external) | `Error: <format> backend ABI mismatch (plugin v<X>, rwave expects v<Y>). Rebuild the backend against rwave's current ABI.` |
 
 Plugin authors do not author these messages; rwave generates them. The
-contract is that the plugin loads cleanly when present and reports a
+contract is that the backend loads cleanly when present and reports a
 useful `err_out` when it doesn't.
 
 ## Writing a plugin
@@ -290,9 +252,11 @@ pub extern "C" fn rwave_backend(_err: *mut *mut c_char)
 }
 ```
 
-Compile as a `cdylib`, package into a wheel per the naming above, drop
-it into site-packages or point `RWAVE_PLUGIN_FOO` at it, and rwave will
-load it on the next matching open.
+Compile as a `cdylib`, then point `RWAVE_PLUGIN_FOO` at the resulting
+`.so`; rwave loads it on the next `.foo` open. (Built-in backends use
+this same vtable shape, but their source is compiled into rwave and the
+vtable comes from a direct call rather than `dlopen` — see
+`crates/rwave/src/plugin/builtin/`.)
 
 ## Versioning policy
 
@@ -304,12 +268,12 @@ overview. Concretely:
   call). Appending new fields at the end of the vtable does not bump
   it — older plugins continue to work; rwave consults only the fields
   they fill.
-- The wheel's version string in the filename is the plugin's own
-  semver. Plugin authors choose when to bump it (vendor dep refresh,
-  decoder fix, new vtable field they decided to fill, etc.); rwave
-  never reads it. The runtime compatibility check is `abi_version`.
-- Rwave's own version string is independent of both of the above and
-  never appears in any plugin-related filename or hint.
+- The plugin's version string (the vtable's `version` field) is the
+  plugin's own semver. Plugin authors choose when to bump it (vendor dep
+  refresh, decoder fix, new vtable field they decided to fill, etc.);
+  rwave never reads it for compatibility. The runtime gate is
+  `abi_version`.
+- Rwave's own version is independent of both of the above.
 
 ## Conformance checklist
 
@@ -328,11 +292,11 @@ A plugin is conformant if:
 - [ ] Single-threaded use of any one `RwaveSession*` is sufficient
       (rwave will not call concurrently into the same backend).
 
-## Known plugins
+## Known backends
 
-None publicly registered yet. To register a plugin, send a PR adding a
-row below.
+| Format | Kind | Vendor lib | Notes |
+|--------|------|-----------|-------|
+| `wlf`  | built-in | `libwlf.so` (`$RWAVE_WLF_LIB`) | Mentor/Questa; linux-amd64 |
+| `fsdb` | built-in | `libNPI.so` (`$RWAVE_FSDB_LIB`) | Synopsys Verdi NPI; needs a Verdi-Ultra license; linux-amd64 |
 
-| Format | Distribution | Maintainer | Status |
-|--------|--------------|------------|--------|
-| _yours here_ |        |            |        |
+To register an external plugin, send a PR adding a row.

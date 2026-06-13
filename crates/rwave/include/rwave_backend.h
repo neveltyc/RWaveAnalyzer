@@ -1,11 +1,11 @@
 /*
  * rwave backend ABI v1.
  *
- * External backends implement this ABI in a cdylib, ship it as a wheel,
- * and rwave dlopens it at runtime. See docs/PLUGIN.md for the protocol
- * description, discovery rules, memory ownership and threading
- * semantics, distribution (wheel) layout, and a writing-a-backend
- * tutorial.
+ * External backends implement this ABI in a cdylib; rwave dlopens it at
+ * runtime, located via $RWAVE_PLUGIN_<EXT>. The built-in wlf/fsdb
+ * backends implement the same ABI, compiled into rwave. See docs/PLUGIN.md
+ * for the protocol, discovery, memory-ownership and threading semantics,
+ * and a writing-a-backend tutorial.
  *
  * This header is the source of truth for the binary contract. Backend
  * authors #include it (or vendor a copy pinned to the rwave version they

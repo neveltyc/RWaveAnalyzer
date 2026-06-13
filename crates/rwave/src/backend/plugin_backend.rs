@@ -5,10 +5,10 @@
 //! plugin (`docs/PLUGIN.md`).
 //!
 //! This module knows nothing about any specific waveform format — it only
-//! knows how to call a vtable that conforms to [`crate::plugin::ffi`].
-//! Per-format implementations (the cdylib that opens the file, any vendor
-//! binary it bundles, the wheel that ships them) live outside this
-//! repository; rwave's public contract is the C header and this forwarder.
+//! knows how to call a vtable that conforms to [`crate::plugin::ffi`]. The
+//! vtable comes from a compiled-in built-in ([`crate::plugin::builtin`]) or
+//! an external plugin `.so` named by `$RWAVE_PLUGIN_<EXT>`; either way this
+//! forwarder is the single adapter. rwave's public contract is the C header.
 //!
 //! ## Lifetime management
 //!
@@ -32,21 +32,26 @@ use super::{
     WaveformBackend,
 };
 use crate::format::ValueKind;
+use crate::plugin::builtin::{self, BuiltinError};
 use crate::plugin::ffi::{
     file_format, RwaveBackend, RwaveBackendInit, RwaveSession as PluginHandle, RwaveValueKind,
     RwaveVarDecl, RWAVE_BACKEND_ABI_VERSION, RWAVE_BACKEND_SYMBOL,
 };
-use crate::plugin::loader::{locate_plugin, LoadError};
+use crate::plugin::loader::{external_plugin_path, LoadError};
 
 // ---------------------------------------------------------------------------
 // Process-wide plugin cache
 // ---------------------------------------------------------------------------
 
-/// A successfully loaded plugin. Held for the process lifetime; the
-/// `vtable` pointer is valid as long as `_library` is alive (which is
-/// forever, since cache entries are never removed).
+/// A resolved backend, external or built-in. Held for the process
+/// lifetime; the `vtable` pointer stays valid because cache entries are
+/// never removed — an external plugin additionally keeps `_library`
+/// mapped, while a built-in's vtable is `&'static` to begin with.
 struct LoadedPlugin {
-    _library: Library,
+    /// `Some` for an external (dlopened) plugin — keeps the shared library
+    /// mapped so the vtable behind it stays valid. `None` for a built-in,
+    /// whose vtable is compiled into the rwave binary.
+    _library: Option<Library>,
     vtable: *const RwaveBackend,
 }
 
@@ -61,8 +66,15 @@ unsafe impl Sync for LoadedPlugin {}
 static LOADED_PLUGINS: LazyLock<Mutex<HashMap<String, &'static LoadedPlugin>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Locate, dlopen, and validate the plugin for `format`. Caches the result
-/// for the rest of the process. Returns the cached entry on subsequent calls.
+/// Resolve, validate, and cache the backend for `format`, returning the
+/// cached entry on every later call. Resolution order:
+///
+/// 1. **external override** — `$RWAVE_PLUGIN_<EXT>` names a `.so` → dlopen it;
+/// 2. **built-in** — `wlf`/`fsdb` compiled into this build;
+/// 3. otherwise a clean "no backend" error.
+///
+/// An external override wins over a built-in of the same extension, so an
+/// external `.fsdb` backend can supersede the built-in NPI one.
 fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
     {
         let cache = LOADED_PLUGINS.lock().expect("plugin cache poisoned");
@@ -71,12 +83,37 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
         }
     }
 
-    let path = locate_plugin(format)?;
+    // 1. External override.
+    if let Some(path) = external_plugin_path(format) {
+        return load_external(format, &path);
+    }
 
+    // 2. Compiled-in built-in (runs the backend's one-time vendor-lib load).
+    match builtin::vtable(format) {
+        Ok(vtable) => return register(format, None, vtable as *const RwaveBackend),
+        Err(BuiltinError::InitFailed(msg)) => return Err(LoadError::LoadFailed { msg }),
+        Err(BuiltinError::Unavailable) => {
+            return Err(LoadError::BuiltinUnavailable {
+                format: format.to_string(),
+                platforms: builtin::supported_platforms(format),
+            });
+        }
+        Err(BuiltinError::NotBuiltin) => {}
+    }
+
+    // 3. Nothing handles this extension.
+    Err(LoadError::NoBackend {
+        format: format.to_string(),
+    })
+}
+
+/// dlopen an external backend `.so`, resolve and call its `rwave_backend`
+/// init, then hand the resulting vtable to [`register`].
+fn load_external(format: &str, path: &std::path::Path) -> Result<&'static LoadedPlugin, LoadError> {
     // SAFETY: `Library::new` calls dlopen on the given path. The plugin's
-    // init function will run as part of dlopen if the cdylib declares any
+    // init function runs as part of dlopen if the cdylib declares any
     // constructors; we tolerate that.
-    let library = unsafe { Library::new(&path) }.map_err(|e| LoadError::LoadFailed {
+    let library = unsafe { Library::new(path) }.map_err(|e| LoadError::LoadFailed {
         msg: format!("failed to load {}: {}", path.display(), e),
     })?;
 
@@ -89,7 +126,6 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
             })?
     };
 
-    // Call init.
     let mut err_out: *const c_char = std::ptr::null();
     // SAFETY: calling the plugin's exported init function as documented.
     let vtable_raw: *const RwaveBackend = unsafe { init(&mut err_out) };
@@ -97,8 +133,8 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
         let msg = if err_out.is_null() {
             "plugin init returned NULL with no diagnostic".to_string()
         } else {
-            // SAFETY: per the header, err_out (on NULL return) is a
-            // static string the plugin does not intend to free.
+            // SAFETY: per the header, err_out (on NULL return) is a static
+            // string the plugin does not intend to free.
             unsafe { CStr::from_ptr(err_out) }
                 .to_string_lossy()
                 .into_owned()
@@ -106,12 +142,25 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
         return Err(LoadError::LoadFailed { msg });
     }
 
-    // SAFETY: vtable_raw is non-NULL per the check above.
+    register(format, Some(library), vtable_raw)
+}
+
+/// Validate a vtable (ABI version, required slots, `name` match) and insert
+/// it into the process-wide cache. `library` is `Some` for an external
+/// plugin (kept mapped) and `None` for a built-in. Promotes to `&'static`
+/// via `Box::leak` — sound because cache entries are process-lifetime.
+fn register(
+    format: &str,
+    library: Option<Library>,
+    vtable_raw: *const RwaveBackend,
+) -> Result<&'static LoadedPlugin, LoadError> {
+    // SAFETY: vtable_raw is non-NULL — a built-in vtable is `&'static`, and
+    // the external path NULL-checks before calling here.
     let vtable: &RwaveBackend = unsafe { &*vtable_raw };
 
-    // Validate ABI version. Dedicated error variant so the message can
-    // be specific — the remediation is reinstalling a wheel built
-    // against rwave's expected ABI, not retrying or debugging dlopen.
+    // ABI version. Dedicated variant so the message names the remediation
+    // (rebuild the backend) rather than a dlopen retry. A built-in never
+    // mismatches — it is compiled against this same `ffi` module.
     if vtable.abi_version != RWAVE_BACKEND_ABI_VERSION {
         return Err(LoadError::AbiMismatch {
             format: format.to_string(),
@@ -120,9 +169,8 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
         });
     }
 
-    // Validate non-NULL required entry points. We don't enumerate all,
-    // but the common ones get a sanity check so a malformed plugin
-    // fails closed.
+    // Required entry points. A malformed vtable fails closed rather than
+    // risking UB on first call.
     if vtable.open.is_none()
         || vtable.close.is_none()
         || vtable.free_err.is_none()
@@ -131,30 +179,22 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
         || vtable.timescale.is_none()
     {
         return Err(LoadError::LoadFailed {
-            msg: format!(
-                "{}: plugin vtable has NULL required entry points",
-                path.display()
-            ),
+            msg: format!("{format}: backend vtable has NULL required entry points"),
         });
     }
 
-    // Validate `name` matches the format we asked for.
+    // `name` must match the format we asked for.
     if vtable.name.is_null() {
         return Err(LoadError::LoadFailed {
-            msg: format!("{}: plugin vtable name is NULL", path.display()),
+            msg: format!("{format}: backend vtable name is NULL"),
         });
     }
-    // SAFETY: vtable.name non-NULL per check; the plugin contract says
-    // it is a NUL-terminated string living for the process.
+    // SAFETY: vtable.name non-NULL per check; the contract says it is a
+    // NUL-terminated string living for the process.
     let name_str = unsafe { CStr::from_ptr(vtable.name) }.to_string_lossy();
     if name_str != format {
         return Err(LoadError::LoadFailed {
-            msg: format!(
-                "{}: plugin advertises format '{}' but rwave asked for '{}'",
-                path.display(),
-                name_str,
-                format,
-            ),
+            msg: format!("backend advertises format '{name_str}' but rwave asked for '{format}'"),
         });
     }
 
@@ -166,9 +206,9 @@ fn load_or_get(format: &str) -> Result<&'static LoadedPlugin, LoadError> {
     }));
 
     let mut cache = LOADED_PLUGINS.lock().expect("plugin cache poisoned");
-    // A racing thread may have inserted while we were initialising; if
-    // so, prefer its entry and let our `entry` simply leak (process-end
-    // cleans up). This keeps the vtable identity stable.
+    // A racing thread may have inserted while we resolved; prefer its entry
+    // and let ours leak (process-end cleans up) to keep vtable identity
+    // stable.
     if let Some(existing) = cache.get(format) {
         return Ok(*existing);
     }

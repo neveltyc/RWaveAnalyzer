@@ -8,6 +8,40 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 _No unreleased changes._
 
+## [0.1.0] — 2026-06-13
+
+Folds the WLF and FSDB waveform formats into the main binary and
+ships multi-platform binaries with the experimental backends gated per target.
+
+### Added
+- **Built-in WLF backend** (Mentor/Questa), experimental, linux-amd64: `.wlf`
+  read via `libwlf`, located at runtime through `$RWAVE_WLF_LIB`.
+- **Built-in FSDB backend** (Synopsys Verdi NPI), experimental, linux-amd64:
+  `.fsdb` read via `libNPI` (`$RWAVE_FSDB_LIB`); needs a Verdi install with a
+  **Verdi-Ultra** license at runtime. An external backend set via
+  `$RWAVE_PLUGIN_FSDB` overrides it.
+- Vendor backends bundle no proprietary binaries or EDA-vendor code and link
+  nothing at build time — they `dlopen` a user-supplied, user-licensed vendor
+  `.so` located via env var. See the README disclaimer.
+- `wlf` / `fsdb` Cargo features (default-on; target-gated to amd64 linux); a
+  `--no-default-features` build is pure VCD/FST/GHW with no proprietary
+  surface.
+
+### Changed
+- **External-plugin discovery is now env-var-only.** A non-native
+  extension `<ext>` is served by the cdylib named in `$RWAVE_PLUGIN_<EXT>`;
+  the wheel / site-packages scan is gone. Built-in and external backends
+  share one C-ABI vtable + adapter, and an external override wins over a
+  built-in of the same extension.
+- **Releases ship four binaries** (`linux-amd64`, `windows-amd64`,
+  `linux-arm64`, `macos-arm64`). The experimental WLF/FSDB backends are
+  linux-amd64 only, so the windows / arm64 / macOS binaries are pure
+  VCD/FST/GHW core.
+
+### Removed
+- The pip-wheel / site-packages plugin install path, and its
+  `<format> support not installed … wheel …` error.
+
 ## [0.0.4] — 2026-06-08
 
 ### Fixed

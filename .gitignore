@@ -31,3 +31,7 @@
 # Local scratch
 /scratch/
 /tmp/
+
+# Local session/agent notes (per-developer, not committed)
+/HANDOFF.md
+/AGENTS.md

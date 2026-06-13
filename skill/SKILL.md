@@ -1,20 +1,22 @@
 ---
 name: waveform-debug
-description: VCD/FST waveform analysis for RTL debug. Use when the user has a .vcd or .fst file and wants to inspect, search, compare, or summarize digital simulation waveforms. Triggers include any mention of VCD or FST files, waveform analysis, signal dump inspection, RTL debug, simulation results, value change dump, or specific signal queries like "what is the value of X at time Y", "when does valid go high", "compare state at T1 vs T2", "find all AXI handshakes". Also triggers when the user uploads a .vcd or .fst file or references one by path. Do NOT use for FSDB, SHM, WLF, or other vendor-proprietary formats — those need converting to VCD or FST first.
+description: VCD/FST waveform analysis for RTL debug. Use when the user has a .vcd or .fst file and wants to inspect, search, compare, or summarize digital simulation waveforms. Triggers include any mention of VCD or FST files, waveform analysis, signal dump inspection, RTL debug, simulation results, value change dump, or specific signal queries like "what is the value of X at time Y", "when does valid go high", "compare state at T1 vs T2", "find all AXI handshakes". Also triggers when the user uploads a .vcd or .fst file or references one by path. rwave also reads WLF and FSDB on a linux-amd64 host with the vendor simulator + license configured (experimental); otherwise convert vendor formats to VCD or FST first.
 ---
 
 # rwave — agent skill
 
-`rwave` is a single static binary that parses VCD and FST and exposes seven
-query commands. **Always pass `--json` from an agent.** Prefer FST —
+`rwave` is a single binary that parses VCD, FST, and GHW (and, on a suitably
+configured linux-amd64 host, WLF and FSDB) and exposes seven query commands. **Always pass `--json` from an agent.** Prefer FST —
 typically 10x smaller than VCD. Output keys, time units, filter syntax, and
 value formatting are documented in the repo README; this file covers only
 what is unique to driving the tool from an agent.
 
 ## Install
 
-Static binaries are attached to every tagged release. Pick the arch matching
-the runtime and `chmod +x`:
+Prebuilt binaries — `rwave-linux-amd64`, `rwave-windows-amd64.exe`,
+`rwave-linux-arm64`, `rwave-macos-arm64` — are attached to every tagged
+release (each with a `.sha256`). Pick the one matching the runtime and
+`chmod +x`; for linux-amd64:
 
 ```bash
 curl -fsSL -o ~/.local/bin/rwave \
@@ -22,9 +24,6 @@ curl -fsSL -o ~/.local/bin/rwave \
 chmod +x ~/.local/bin/rwave
 ~/.local/bin/rwave --version
 ```
-
-Other assets on the same release page: `rwave-linux-arm64`,
-`rwave-macos-arm64`, `rwave-windows-amd64.exe`. Each has a matching `.sha256`.
 
 ## Pick the right command
 

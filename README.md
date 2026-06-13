@@ -1,10 +1,11 @@
 # RWaveAnalyzer (`rwave`)
 
 An AI-agent-friendly, debug-oriented waveform analyzer for RTL simulation
-dumps. `rwave` reads **VCD** and **FST** files and exposes a small,
-scriptable command set — file overview, signal listing, value-change dumps,
-per-signal statistics, point/pair snapshots, and conditional search — with both
-human-readable text and compact JSON output.
+dumps. `rwave` reads **VCD**, **FST**, and **GHW** natively — plus **WLF**
+(Mentor/Questa) and **FSDB** (Synopsys/Verdi) on the linux-amd64 build — and
+exposes a small, scriptable command set: file overview, signal listing,
+value-change dumps, per-signal statistics, point/pair snapshots, and
+conditional search, with both human-readable text and compact JSON output.
 
 The command surface intentionally mirrors the reference Python tool
 [`VCD_ANALYZER`](https://github.com/neveltyc/VCD_ANALYZER) so the two are
@@ -24,20 +25,29 @@ built for large dumps.
 
 ## Install
 
-Prebuilt binaries for tagged releases are attached to the
-[GitHub Releases](https://github.com/neveltyc/RWaveAnalyzer/releases) page:
+Prebuilt binaries are attached to each tagged
+[GitHub Release](https://github.com/neveltyc/RWaveAnalyzer/releases):
 
-| Platform                 | Asset                          |
-|--------------------------|--------------------------------|
-| Linux x86-64 (glibc)     | `rwave-linux-amd64`            |
-| Linux aarch64 (static)   | `rwave-linux-arm64`            |
-| macOS Apple Silicon      | `rwave-macos-arm64`            |
-| Windows x86-64           | `rwave-windows-amd64.exe`      |
+| Binary | Core (VCD/FST/GHW) | WLF | FSDB |
+|---|:---:|:---:|:---:|
+| `rwave-linux-amd64`        | ✓ | ✓ | ✓ |
+| `rwave-windows-amd64.exe`  | ✓ | — | — |
+| `rwave-linux-arm64`        | ✓ | — | — |
+| `rwave-macos-arm64`        | ✓ | — | — |
 
-Download the right asset, mark it executable (`chmod +x rwave-linux-amd64`),
-and run. `linux-amd64` is glibc-dynamic (manylinux2014 baseline) so it
-can `dlopen` plugins; `linux-arm64` is fully static. Alpine and other
-musl-only x86-64 systems: build from source.
+Download the right one, mark it executable, and run:
+
+```sh
+chmod +x rwave-linux-amd64
+./rwave-linux-amd64 info design.fst
+```
+
+The VCD/FST/GHW core works on every binary. The experimental WLF/FSDB
+backends are **linux-amd64 only** and need the vendor's simulator + library
+configured (see
+[Vendor formats](#vendor-formats--plugins)). `rwave-linux-amd64` is
+glibc-dynamic (manylinux2014, glibc ≥ 2.17), so it runs on every mainstream
+Linux from 2014 on; Alpine/musl-only systems build the core from source.
 
 ## Build from source
 
@@ -48,6 +58,11 @@ cargo build --release
 # binary: target/release/rwave
 ```
 
+This builds for the host. The WLF/FSDB backends (default features `wlf`,
+`fsdb`) are target-gated to `x86_64` linux; on any other host they compile
+out, leaving the VCD/FST/GHW core. `--no-default-features` forces the pure
+core anywhere.
+
 The parser front-end (`wellen`) and its FST dependency (`fst-reader`) are
 **vendored** under `vendor/` — the build needs no network and pins the exact
 parser revision. `vendor/fst-reader` additionally carries a local fix for an
@@ -56,19 +71,18 @@ VCS output); see `CHANGELOG.md`.
 
 ### Release binaries
 
-`scripts/build-release.sh` cross-builds release binaries for the three
-supported deployment platforms via `cargo-zigbuild` (Zig as cross-linker), so
-the same recipe works from any host — macOS, Linux, etc.
+`scripts/build-release.sh` cross-builds the four release binaries via
+`cargo-zigbuild` (Zig as cross-linker), so the same recipe works from any
+host (a macOS host is needed only for the macOS target). Each target gets the
+right feature set automatically — WLF/FSDB are target-gated — and
+`linux-amd64` is glibc-dynamic with a pinned glibc 2.17 baseline.
 
-| target          | Rust triple                   | output                            |
-|-----------------|-------------------------------|-----------------------------------|
-| `linux-amd64`   | `x86_64-unknown-linux-gnu`    | `dist/rwave-linux-amd64`          |
-| `linux-arm64`   | `aarch64-unknown-linux-musl`  | `dist/rwave-linux-arm64`          |
-| `windows-amd64` | `x86_64-pc-windows-gnu`       | `dist/rwave-windows-amd64.exe`    |
-| `macos-arm64`   | `aarch64-apple-darwin`        | `dist/rwave-macos-arm64`          |
-
-`linux-amd64` is glibc-dynamic (plugins need `dlopen`); `linux-arm64`
-is fully static; Windows needs no extra DLLs.
+| target | triple | output |
+|---|---|---|
+| `linux-amd64`   | `x86_64-unknown-linux-gnu`   | `dist/rwave-linux-amd64`       |
+| `linux-arm64`   | `aarch64-unknown-linux-musl` | `dist/rwave-linux-arm64`       |
+| `windows-amd64` | `x86_64-pc-windows-gnu`      | `dist/rwave-windows-amd64.exe` |
+| `macos-arm64`   | `aarch64-apple-darwin`       | `dist/rwave-macos-arm64`       |
 
 ```sh
 # one-time setup (macOS):
@@ -76,19 +90,16 @@ brew install rustup zig
 export PATH="$(brew --prefix)/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 rustup default stable
 cargo install --locked cargo-zigbuild
-rustup target add x86_64-unknown-linux-gnu \
-                  aarch64-unknown-linux-musl \
-                  x86_64-pc-windows-gnu \
-                  aarch64-apple-darwin
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
+                  x86_64-pc-windows-gnu aarch64-apple-darwin
 
-./scripts/build-release.sh                          # all three
-./scripts/build-release.sh --target linux-amd64    # one target
-./scripts/build-release.sh --target linux-amd64,windows-amd64
+./scripts/build-release.sh                        # all four
+./scripts/build-release.sh --target linux-amd64   # one target
 ```
 
 The script checks its prerequisites and prints exact install commands for
-anything missing. See `docs/BUILD.md` for the full deployment guide;
-cross-linker configuration lives in `.cargo/config.toml`.
+anything missing. See `docs/BUILD.md`; cross-linker configuration lives in
+`.cargo/config.toml`.
 
 ## Usage
 
@@ -126,60 +137,65 @@ rwave compare design.fst --at 17.5us,17.7us --filter bus
 rwave search design.vcd --condition 'valid=1,ready=1' --show data --changed data
 ```
 
-## Plugin formats
+## Vendor formats & plugins
 
-The built-in backend handles VCD, FST, and GHW. Other waveform formats
-are loaded at runtime from plugin shared libraries that conform to the
-ABI in [`docs/PLUGIN.md`](docs/PLUGIN.md) and declared by
-[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h).
-rwave itself ships no plugin implementation; the C ABI is the public
-contract.
+rwave resolves a file by its extension:
 
-The convention — no registry. rwave does not maintain a list of which
-plugins exist. The contract is: file extension `<ext>` is served by the
-plugin packaged as `rwave_<ext>`, whose shared library is named
-`librwave_<ext>_backend.so` on Linux / `rwave_<ext>_backend.dll` on
-Windows (Windows cdylibs carry no `lib` prefix). Adding a new format is
-entirely plugin-side; rwave needs no change to route a previously-unknown
-extension to a freshly installed plugin.
+| extension          | backend                              | available in          |
+|--------------------|--------------------------------------|-----------------------|
+| `vcd` `fst` `ghw`  | native (`wellen`)                    | every build           |
+| `wlf`              | **built-in** — Mentor `libwlf`       | linux amd64           |
+| `fsdb`             | **built-in** — Synopsys Verdi NPI    | linux amd64           |
+| anything else      | external plugin                      | `$RWAVE_PLUGIN_<EXT>`   |
 
-Plugin support is amd64-only. On Linux x86_64 and Windows x86_64 rwave
-will look up a plugin when it sees a non-built-in extension; on other
-platforms (linux-arm64, macos) the same extension produces a clean
-`<format> extension is not supported on this platform.` error without
-attempting any filesystem or process work.
+These backends are compiled into the linux-amd64 binary. They `dlopen` the
+vendor library at runtime, located via an env var — nothing proprietary is
+bundled or linked:
 
-Plugin discovery (Linux/Windows amd64 only):
+| env var          | points at                                          |
+|------------------|----------------------------------------------------|
+| `RWAVE_WLF_LIB`  | `libwlf.so` (a Questa/ModelSim install)            |
+| `RWAVE_FSDB_LIB` | `libNPI.so` (a licensed Verdi install)             |
 
-1. `$RWAVE_PLUGIN_<FORMAT>` (uppercased extension), absolute path to
-   the plugin shared library. Power-user escape hatch.
-2. The standard site-packages locations a wheel install lands in:
-   - active venv (`$VIRTUAL_ENV`): `lib/python3.*/site-packages/` on
-     Linux, `Lib\site-packages\` on Windows.
-   - per-user: `~/.local/lib/python3.*/site-packages/` on Linux,
-     `%APPDATA%\Python\Python3XX\site-packages\` on Windows (where
-     `pip install --user` lands).
-
-If nothing is found, rwave prints a hint naming the package and
-platform tag — version-agnostic by design, because rwave's version
-and the plugin's wheel version are independent:
-
-```
-Error: <format> support not installed. Install a rwave_<format> wheel for <platform>.
+```sh
+export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
+rwave info sim.fsdb
 ```
 
-ABI version mismatch (plugin built against a different
-`RWAVE_BACKEND_ABI_VERSION` than this rwave expects) is reported
-separately so the remediation is clear:
+**Requirements (on the machine reading WLF/FSDB).** The corresponding vendor
+simulator must be installed with a **valid license**: Mentor/Siemens Questa
+(or ModelSim) for WLF, Synopsys Verdi for FSDB — FSDB additionally needs a
+**Verdi-Ultra** license feature. Licensing is the vendor's domain; follow
+their documentation (rwave neither configures nor manages it). You also
+supply the vendor `.so` and point rwave at it with the env vars above.
 
-```
-Error: <format> backend ABI mismatch (plugin v<X>, rwave expects v<Y>).
-       Reinstall a rwave_<format> wheel matching rwave's ABI version.
-```
+To use a different FSDB reader, set `$RWAVE_PLUGIN_FSDB` to an external
+backend `.so` — an external plugin **overrides** the built-in of the same
+extension.
 
-Plugin protocol, the three independent versions (rwave / plugin / ABI),
-the discovery rules, and the conformance checklist for authors live in
+> **Experimental — disclaimer.** WLF and FSDB support is experimental and
+> **linux-amd64 only**. rwave reads these formats *only* through each EDA
+> vendor's own public reader
+> interface. It bundles **no proprietary binaries and no vendor source code**,
+> links none of them at build time, and redistributes no vendor software — it
+> `dlopen`s, at runtime, the library *you* supply from *your* licensed install.
+> Using these formats therefore requires the vendor's software and license on
+> your machine; obtaining and configuring those, under the vendor's terms, is
+> your responsibility.
+
+**External plugins.** Any other extension `<ext>` is served by a backend
+cdylib whose absolute path you give in `$RWAVE_PLUGIN_<EXT>` (uppercased).
+rwave `dlopen`s it and drives the C ABI in
+[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h) —
+no search path, no registry: one env var, one `.so`. Memory ownership,
+threading, and a conformance checklist live in
 [`docs/PLUGIN.md`](docs/PLUGIN.md).
+
+Diagnostics: `.wlf`/`.fsdb` on a build without that backend prints
+`<fmt> support is only available in the linux-x86_64 build.`; an unhandled
+extension prints `no backend for .<ext> files. Set RWAVE_PLUGIN_<EXT> ...`; an
+external plugin built against a different `RWAVE_BACKEND_ABI_VERSION` is
+rejected with a version-mismatch message.
 
 ## Agent skill
 
@@ -225,7 +241,12 @@ crates/rwave/src/
   model.rs        Wave: signal table, heap-merge replay, bounded streaming
   backend/
     mod.rs        WaveformBackend trait + neutral types
-    wellen_backend.rs   wellen adapter (only wellen-aware module)
+    wellen_backend.rs   wellen adapter (VCD/FST/GHW)
+    plugin_backend.rs   drives a C-ABI vtable (built-in or external) as a backend
+  plugin/
+    ffi.rs        Rust mirror of the C ABI (include/rwave_backend.h)
+    loader.rs     $RWAVE_PLUGIN_<EXT> discovery + user-facing error strings
+    builtin/      compiled-in vtables — wlf/ (libwlf), fsdb/ (Verdi NPI)
   format.rs       fmt_val, time parse/format, Python-repr quoting
   filter.rs       glob-lite + substring signal matching
   condition.rs    search condition parsing/evaluation, big-uint compare
@@ -241,13 +262,13 @@ verify/
   run.sh          self-test harness (smoke + VCD/FST parity)
   differential.sh parity check vs the reference Python tool
 scripts/
-  build-release.sh   cross-build all three release targets
+  build-release.sh   cross-build the four release binaries
   gen-stimulus.sh    regenerate stimulus/ from stimulus_src/, sanitized
 skill/
   SKILL.md           agent-skill descriptor (decision tree + workflow patterns)
 .github/workflows/
   ci.yml          test + verify on push / PR
-  release.yml     build + publish three artifacts on v* tags
+  release.yml     build + publish the four binaries on v* tags
 ```
 
 ## Performance notes

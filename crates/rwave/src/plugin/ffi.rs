@@ -129,6 +129,13 @@ pub struct RwaveBackend {
     >,
 }
 
+// SAFETY: an `RwaveBackend` is an immutable vtable — function pointers,
+// pointers to 'static C strings, and POD. A built-in backend instantiates
+// it as a `static`, and rwave only ever reads it; sharing the value across
+// threads is sound. (External plugins return a `*const RwaveBackend`, which
+// needs no `Sync`, but the bound is harmless to them.)
+unsafe impl Sync for RwaveBackend {}
+
 /// Signature of the backend's sole exported symbol. `dlsym`-resolved by
 /// the loader as [`RWAVE_BACKEND_SYMBOL`].
 pub type RwaveBackendInit =

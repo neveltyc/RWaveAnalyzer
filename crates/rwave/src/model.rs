@@ -267,15 +267,13 @@ impl Wave {
 
     /// Open a file, dispatching by file extension:
     /// * `.vcd` / `.fst` / `.ghw` (or no extension) → built-in `wellen` backend.
-    /// * any other extension `<ext>` → plugin-loader path, which looks for
-    ///   `rwave_<ext>` in `site-packages` (see `docs/PLUGIN.md`).
+    /// * `.wlf` / `.fsdb` → compiled-in built-in backend (linux-x86_64 builds).
+    /// * any other extension `<ext>` → external backend named by
+    ///   `$RWAVE_PLUGIN_<EXT>` (see `docs/PLUGIN.md`).
     ///
-    /// rwave keeps no registry of which plugins exist; the convention
-    /// "extension `<ext>` is served by the plugin packaged as `rwave_<ext>`"
-    /// is the whole protocol. On platforms where the plugin path is
-    /// disabled (anything other than linux-x86_64 / windows-x86_64),
-    /// opening a non-built-in extension produces a clean
-    /// platform-not-supported error.
+    /// `$RWAVE_PLUGIN_<EXT>` also overrides a built-in of the same extension
+    /// (e.g. an external `.fsdb` backend superseding the built-in NPI one). When
+    /// nothing handles the extension, the error names the env var to set.
     pub fn open(path: &str) -> Result<Wave, ModelError> {
         use crate::backend::plugin_backend::PluginBackend;
         use crate::backend::wellen_backend::WellenBackend;

@@ -4,14 +4,15 @@
 #   target           Rust triple                    Output                            Linking
 #   --------------   ----------------------------   -------------------------------   ----------
 #   linux-amd64      x86_64-unknown-linux-gnu       dist/rwave-linux-amd64            glibc dynamic (manylinux2014 baseline)
-#   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static (no plugin path on aarch64)
+#   linux-arm64      aarch64-unknown-linux-musl     dist/rwave-linux-arm64            fully static; VCD/FST/GHW core only
 #   windows-amd64    x86_64-pc-windows-gnu          dist/rwave-windows-amd64.exe      MinGW (Rust stdlib only; no DLLs required)
 #   macos-arm64      aarch64-apple-darwin           dist/rwave-macos-arm64            native (Apple Silicon)
 #
-# linux-amd64 is glibc-dynamic so it can dlopen plugins (musl-static
-# can't). linux-arm64 stays static (plugin path is cfg-disabled on
-# aarch64). Linux/Windows targets cross-build via cargo-zigbuild from
-# any host. macOS targets require a macOS host (Apple SDK).
+# The built-in WLF/FSDB backends (experimental, amd64) dlopen their vendor
+# libs, so targets carrying them must be dynamically linked: linux-amd64
+# (glibc-dynamic) ships WLF + FSDB, windows-amd64 ships WLF. linux-arm64
+# (musl-static) and macos-arm64 are VCD/FST/GHW core only. Linux/Windows
+# cross-build via cargo-zigbuild from any host; macOS needs a macOS host.
 #
 #   one-time setup (macOS):
 #     brew install rustup zig
@@ -28,7 +29,7 @@
 # 2.32+. Cross targets always go through Zig.
 #
 # Usage:
-#   scripts/build-release.sh                              # all three targets
+#   scripts/build-release.sh                              # all four targets
 #   scripts/build-release.sh --target linux-amd64        # one target
 #   scripts/build-release.sh --target linux-amd64,windows-amd64
 #   scripts/build-release.sh --run                       # smoke-test runnable outputs
