@@ -1,22 +1,24 @@
 ---
 name: waveform-debug
-description: VCD/FST waveform analysis for RTL debug. Use when the user has a .vcd or .fst file and wants to inspect, search, compare, or summarize digital simulation waveforms. Triggers include any mention of VCD or FST files, waveform analysis, signal dump inspection, RTL debug, simulation results, value change dump, or specific signal queries like "what is the value of X at time Y", "when does valid go high", "compare state at T1 vs T2", "find all AXI handshakes". Also triggers when the user uploads a .vcd or .fst file or references one by path. rwave also reads WLF and FSDB on a linux-amd64 host with the vendor simulator + license configured (experimental); otherwise convert vendor formats to VCD or FST first.
+description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
 ---
 
 # rwave — agent skill
 
-`rwave` is a single binary that parses VCD, FST, and GHW (and, on a suitably
-configured linux-amd64 host, WLF and FSDB) and exposes seven query commands. **Always pass `--json` from an agent.** Prefer FST —
-typically 10x smaller than VCD. Output keys, time units, filter syntax, and
-value formatting are documented in the repo README; this file covers only
-what is unique to driving the tool from an agent.
+`rwave` is a single binary for querying RTL simulation waveforms from the
+terminal. It natively reads **VCD**, **FST**, and **GHW** (prefer FST — typically
+10× smaller than VCD). On linux-amd64 it also provides experimental support for
+**WLF** (Questa/ModelSim) and **FSDB** (Verdi) by calling into each vendor's own
+reader library interface. Seven query commands cover inspection, search,
+comparison, and summary. **Always pass `--json` from an agent.** This file covers
+what is unique to driving the tool from an agent — see the repo README for the
+full reference.
 
 ## Install
 
-Prebuilt binaries — `rwave-linux-amd64`, `rwave-windows-amd64.exe`,
-`rwave-linux-arm64`, `rwave-macos-arm64` — are attached to every tagged
-release (each with a `.sha256`). Pick the one matching the runtime and
-`chmod +x`; for linux-amd64:
+Prebuilt binaries are attached to every tagged release (each with a `.sha256`).
+All four read VCD/FST/GHW; only `rwave-linux-amd64` includes experimental
+WLF and FSDB support. Pick the one matching the runtime and `chmod +x`:
 
 ```bash
 curl -fsSL -o ~/.local/bin/rwave \
@@ -25,11 +27,12 @@ chmod +x ~/.local/bin/rwave
 ~/.local/bin/rwave --version
 ```
 
-## Vendor formats (WLF / FSDB)
+## Vendor formats — experimental (linux-amd64 only)
 
-On a **linux-amd64** host rwave also reads Questa `.wlf` and Verdi `.fsdb`
-directly — point it at the vendor reader library from the user's licensed
-install via an env var, then query as usual:
+On linux-amd64, rwave provides experimental support for Questa `.wlf` and
+Verdi `.fsdb` by calling into each vendor's own reader library interface.
+Point rwave at the library from the user's licensed installation via an
+env var, then query as usual:
 
 ```bash
 export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so          # for .wlf
