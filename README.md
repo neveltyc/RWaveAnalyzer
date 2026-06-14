@@ -141,6 +141,7 @@ full.
 
 ```
 rwave [--json] [--limit N] [--verbose] <command> <file> [options]
+rwave --batch [--json] <file> [global-opts] < commands.txt
 ```
 
 | Command | What it does |
@@ -178,6 +179,45 @@ width is in each signal's metadata, so it is not re-encoded as hex padding.
 rwave --json info sim.fst
 rwave --json search sim.fst --condition 'state=5' --show data
 ```
+
+## Batch mode
+
+Large FSDB and WLF databases are read through a vendor library, where each
+"open" spins up a C++ runtime and indexes the whole hierarchy — seconds to tens
+of seconds for a multi-gigabyte file. When several queries target the *same*
+file (a CI gate, a scripted extraction, an AI agent's multi-step plan), paying
+that cost once instead of once per query matters. `--batch` does exactly that:
+it loads the file **once**, then runs a list of commands read from stdin.
+
+```sh
+printf '%s\n' \
+  'info' \
+  'list --filter clk,state' \
+  'dump --begin 1us --end 2us --filter state' \
+  'search --condition valid=1,ready=1 --show data' \
+  | rwave --batch --json sim.fst
+```
+
+Each input line is an ordinary command with the leading `rwave` and the file
+omitted — both are already fixed by the `--batch` invocation. Blank lines and
+lines beginning with `#` are skipped; a trailing `#label` names that line's
+result. Any `[global-opts]` on the `--batch` command line (`--limit`,
+`--verbose`, …) become defaults that an individual line can override.
+
+Results come back in input order, one per command. With `--json` each is a
+single NDJSON object; without it, each is a `#label` header followed by that
+command's usual text output:
+
+```
+{"id":"1","ok":true,"result":{ …info… }}
+{"id":"2","ok":true,"result":{ …list… }}
+```
+
+A batch `result` is identical to what the equivalent single command would
+produce — batch only saves the repeated load, it never changes a command's
+output. A command that fails (an unknown signal, an illegal time) is reported
+with `"ok":false` and does **not** stop the batch; the run still exits `0`. Only
+a file that cannot be loaded, or a command stream that cannot be read, is fatal.
 
 ## Experimental support for WLF and FSDB
 

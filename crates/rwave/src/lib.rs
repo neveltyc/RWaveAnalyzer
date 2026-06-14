@@ -25,6 +25,7 @@
 //! that apply uniformly across every backend.
 
 pub mod backend;
+pub mod batch;
 pub mod cli;
 pub mod commands;
 pub mod condition;
