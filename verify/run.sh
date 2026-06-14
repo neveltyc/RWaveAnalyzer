@@ -71,6 +71,48 @@ for d in "${designs[@]}"; do
 done
 rm -f /tmp/_pv.$$ /tmp/_pf.$$
 
+echo "== batch mode =="
+BF="$STIM/handshake_proto.vcd"
+# Consistency (core): a batch `result` is byte-identical to the equivalent
+# single-command `--json` output. Compare the whole wrapped line so the
+# {id,ok,result} envelope is checked too.
+for c in "info" "list" "summary" "dump --limit 50" "snapshot --at 30ns" \
+         "compare --at 10ns,40ns"; do
+  single=$($RW --json $c "$BF" 2>/dev/null)
+  got=$(printf '%s\n' "$c" | $RW --batch --json "$BF" 2>/dev/null)
+  want="{\"id\":\"1\",\"ok\":true,\"result\":$single}"
+  if [[ "$got" == "$want" ]]; then ok; else bad "batch consistency :: $c"; fi
+done
+
+# Error isolation: a failing command in the middle does not stop the batch, and
+# the overall exit code is still 0.
+iso=$(printf '%s\n' "info" "snapshot --at not_a_time" "list" \
+      | $RW --batch --json "$BF" 2>/dev/null); isocode=$?
+nlines=$(printf '%s\n' "$iso" | grep -c '"ok"')
+if [[ "$isocode" -eq 0 && "$nlines" -eq 3 ]] \
+   && printf '%s\n' "$iso" | sed -n 2p | grep -q '"ok":false'; then
+  ok
+else
+  bad "batch error isolation (exit=$isocode, lines=$nlines)"
+fi
+
+# Empty filter match is ok:true (mirrors single-command exit 0), not a failure.
+ef=$(printf 'snapshot --at 30ns --filter does_not_exist\n' \
+     | $RW --batch --json "$BF" 2>/dev/null)
+if printf '%s\n' "$ef" | grep -q '"ok":true'; then ok; else bad "batch empty-filter ok:true"; fi
+
+# Fatal: --batch combined with a subcommand → usage error, exit 2.
+$RW --batch info "$BF" </dev/null >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "batch + subcommand exits 2"
+
+# Fatal: unloadable file → exit 1 with no half output.
+bfout=$($RW --batch --json /no/such/file.vcd </dev/null 2>/dev/null); bfcode=$?
+[[ "$bfcode" -eq 1 && -z "$bfout" ]] && ok || bad "batch bad-file exits 1, no output"
+
+# Text mode: a '#label' header precedes the command's normal text body.
+txt=$(printf 'info  #ov\n' | $RW --batch "$BF" 2>/dev/null)
+[[ "$txt" == "#ov"* ]] && ok || bad "batch text header"
+
 echo
 echo "== RESULT: PASS=$pass FAIL=$fail =="
 [[ "$fail" -eq 0 ]]

@@ -110,6 +110,36 @@ A signal hit once may surface dozens of alias rows — use `--verbose` to group 
 For one signal = one row, filter precisely and use `--verbose` — same `id` means same signal.
 
 
+## Batch mode (one load, many queries)
+
+For a pre-planned multi-step investigation of **one** file — especially a large
+`.fsdb`/`.wlf` that is slow to open — use `--batch` to load the file once and run
+a list of commands from stdin, instead of paying the open cost on every call:
+
+```sh
+printf '%s\n' \
+  'info' \
+  'list --filter clk,state' \
+  'search --condition valid=1,ready=1 --show data  #handshake' \
+  | rwave --batch --json sim.fsdb
+```
+
+- One command per line — exactly what you'd type after `rwave`, minus the file
+  (the file is given once on the `--batch` line). **Pass `--json`**: output is
+  one NDJSON object per line, `{"id","ok","result"}` or `{"id","ok","error"}`,
+  in input order.
+- `id` is the trailing `#label` if present, else a 1-based line number. Correlate
+  by **input order** (authoritative) or `id`. Blank and `#`-comment lines are
+  skipped; `[global-opts]` on the `--batch` line are per-command defaults.
+- Each `result` is byte-identical to the equivalent single-command `--json`
+  output — parse it exactly the same way.
+- A failing command is `"ok":false` and does **not** stop the batch; the process
+  still exits `0`. Check each line's `ok`. Only a bad file or an unreadable
+  stream is fatal (non-zero exit).
+- Plan the full list up front — batch does not let you see one result before
+  choosing the next. For adaptive, read-then-decide flows, use separate calls.
+
+
 ## Workflow patterns
 
 (all assume `--json`)

@@ -5,6 +5,7 @@
 
 use std::process::ExitCode;
 
+use rwave::batch;
 use rwave::cli::{self, ParseOutcome};
 use rwave::commands;
 use rwave::model::Wave;
@@ -41,6 +42,18 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        ParseOutcome::Batch(inv) => {
+            // Load the file once; a load failure is fatal (no command could
+            // run). Then stream commands from stdin against the loaded model.
+            let mut wave = match Wave::open(&inv.file) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            batch::run_batch(&mut wave, &inv)
         }
     }
 }

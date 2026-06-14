@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-06-15
+
+A batch-mode point release: load a waveform **once** and run many queries
+against it, collapsing N cold loads into one — most valuable for large FSDB/WLF
+databases, where each open re-initializes a vendor runtime and re-indexes the
+whole hierarchy.
+
+### Added
+- **`--batch` mode.** `rwave --batch [--json] <file> [global-opts]` loads the
+  waveform once, then reads one command per line from stdin and emits one result
+  per command, in input order. Each line is a normal command minus the leading
+  `rwave` (e.g. `list --filter clk,state`); a trailing `#label` sets that
+  result's id, blank and `#`-comment lines are skipped, and `[global-opts]`
+  become per-command defaults that a line may override. With `--json` each result
+  is one NDJSON object `{"id","ok","result"|"error"}`; without it, each result is
+  a `#label` header line followed by that command's normal text output. Intended
+  for pre-planned multi-step debugging — CI gates, scripted extraction, AI
+  agents — not adaptive interaction.
+
+### Behavior
+- A batch `result` is **byte-for-byte identical** to the equivalent
+  `rwave --json <cmd> <file> …` call: single-command and batch share the same
+  compute and serialization code. A command's success or failure in batch
+  matches single-command mode exactly — only genuinely failing commands (signal
+  not found, illegal time, missing required argument, bad condition, …) are
+  marked `ok:false`, and a failed command no longer aborts the run: the batch
+  continues and exits `0`. Failing to load the file or read the command stream is
+  fatal (exit `1`); a usage error such as `--batch` together with a subcommand is
+  exit `2`. Every single-command invocation behaves exactly as before.
+
 ## [0.1.1] — 2026-06-15
 
 A token-economy and independence point release: compact hex values, a

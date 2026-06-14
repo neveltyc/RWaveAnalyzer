@@ -35,16 +35,47 @@ fn should_stream(n: usize) -> bool {
     n > STREAMING_SIGNAL_THRESHOLD
 }
 
-/// Dispatch a parsed command.
+/// Dispatch a parsed command (single-command path). `--json` goes through the
+/// shared [`compute`] functions; text output uses the per-command `text_*`
+/// renderers. Batch mode reuses these very same functions, which is what keeps
+/// batch output byte-identical to the equivalent single-command call.
 pub fn run(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    if args.json {
+        let value = compute(wave, args)?;
+        print_json(&value);
+        return Ok(());
+    }
+    render_text(wave, args)
+}
+
+/// Render a command's text output to stdout, without the `--json` branch. Shared
+/// by the single-command text path ([`run`]) and the batch runner's text mode,
+/// so a batch text block is identical to the equivalent single command.
+pub fn render_text(wave: &mut Wave, args: &Args) -> Result<(), String> {
     match args.command {
-        Command::Info => cmd_info(wave, args),
-        Command::List => cmd_list(wave, args),
-        Command::Dump => cmd_dump(wave, args),
-        Command::Summary => cmd_summary(wave, args),
-        Command::Snapshot => cmd_snapshot(wave, args),
-        Command::Compare => cmd_compare(wave, args),
-        Command::Search => cmd_search(wave, args),
+        Command::Info => text_info(wave, args),
+        Command::List => text_list(wave, args),
+        Command::Dump => text_dump(wave, args),
+        Command::Summary => text_summary(wave, args),
+        Command::Snapshot => text_snapshot(wave, args),
+        Command::Compare => text_compare(wave, args),
+        Command::Search => text_search(wave, args),
+    }
+}
+
+/// Compute a command's `--json` result as a [`Json`] value, without printing it.
+/// This is the single source of truth for structured output: the single-command
+/// `--json` path ([`run`]) and the batch runner both call it, so a batch
+/// `result` is byte-for-byte identical to the equivalent `rwave --json …`.
+pub fn compute(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    match args.command {
+        Command::Info => compute_info(wave, args),
+        Command::List => compute_list(wave, args),
+        Command::Dump => compute_dump(wave, args),
+        Command::Summary => compute_summary(wave, args),
+        Command::Snapshot => compute_snapshot(wave, args),
+        Command::Compare => compute_compare(wave, args),
+        Command::Search => compute_search(wave, args),
     }
 }
 
@@ -185,7 +216,27 @@ fn rjust(s: &str, width: usize) -> String {
 // info
 // ---------------------------------------------------------------------------
 
-fn cmd_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// Gathered file metadata, shared by the JSON and text renderers of `info`.
+struct InfoData {
+    path: String,
+    size_bytes: i64,
+    timescale: String,
+    date: String,
+    version: String,
+    comments: Vec<String>,
+    signal_count: usize,
+    reference_count: usize,
+    type_pairs: Vec<(String, usize)>,
+    t_min: Option<i64>,
+    t_max: Option<i64>,
+    duration: Option<i64>,
+    time_min_h: Option<String>,
+    time_max_h: Option<String>,
+    duration_h: Option<String>,
+    scopes: Vec<String>,
+}
+
+fn info_data(wave: &mut Wave) -> InfoData {
     let ts = wave.ts_sec();
     let (t_min, t_max) = match wave.time_range() {
         Some((a, b)) => (Some(a), Some(b)),
@@ -218,61 +269,84 @@ fn cmd_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
     };
     let duration_h = duration.map(|d| fmt_time(d, ts));
 
-    if args.json {
-        let mut var_types = Vec::new();
-        for (k, v) in &type_pairs {
-            var_types.push((k.clone(), Json::Int(*v as i64)));
-        }
-        let obj = Obj::new()
-            .push("file", Json::str(path.clone()))
-            .push("size_bytes", Json::Int(size_bytes))
-            .push("timescale", Json::str(timescale.clone()))
-            .push("date", Json::str(date.clone()))
-            .push("version", Json::str(version.clone()))
-            .push(
-                "comments",
-                Json::Array(comments.iter().map(|c| Json::str(c.clone())).collect()),
-            )
-            .push("signal_count", Json::Int(signal_count as i64))
-            .push("reference_count", Json::Int(reference_count as i64))
-            .push("synthesized_buses", Json::Int(0))
-            .push("var_types", Json::Object(var_types))
-            .push("time_min", opt_time(time_min_h.as_deref()))
-            .push("time_min_ticks", Json::opt_int(t_min))
-            .push("time_min_h", opt_time(time_min_h.as_deref()))
-            .push("time_max", opt_time(time_max_h.as_deref()))
-            .push("time_max_ticks", Json::opt_int(t_max))
-            .push("time_max_h", opt_time(time_max_h.as_deref()))
-            .push("duration", opt_time(duration_h.as_deref()))
-            .push("duration_ticks", Json::opt_int(duration))
-            .push("duration_h", opt_time(duration_h.as_deref()))
-            .push(
-                "scopes",
-                Json::Array(scopes.iter().map(|s| Json::str(s.clone())).collect()),
-            )
-            .build();
-        print_json(&obj);
-        return Ok(());
+    InfoData {
+        path,
+        size_bytes,
+        timescale,
+        date,
+        version,
+        comments,
+        signal_count,
+        reference_count,
+        type_pairs,
+        t_min,
+        t_max,
+        duration,
+        time_min_h,
+        time_max_h,
+        duration_h,
+        scopes,
     }
+}
 
-    println!("File      : {}", path);
-    println!("Size      : {} bytes", thousands(size_bytes));
-    if !date.is_empty() {
-        println!("Date      : {}", date);
+fn compute_info(wave: &mut Wave, _args: &Args) -> Result<Json, String> {
+    let d = info_data(wave);
+    let mut var_types = Vec::new();
+    for (k, v) in &d.type_pairs {
+        var_types.push((k.clone(), Json::Int(*v as i64)));
     }
-    if !version.is_empty() {
-        println!("Tool      : {}", version);
+    let obj = Obj::new()
+        .push("file", Json::str(d.path.clone()))
+        .push("size_bytes", Json::Int(d.size_bytes))
+        .push("timescale", Json::str(d.timescale.clone()))
+        .push("date", Json::str(d.date.clone()))
+        .push("version", Json::str(d.version.clone()))
+        .push(
+            "comments",
+            Json::Array(d.comments.iter().map(|c| Json::str(c.clone())).collect()),
+        )
+        .push("signal_count", Json::Int(d.signal_count as i64))
+        .push("reference_count", Json::Int(d.reference_count as i64))
+        .push("synthesized_buses", Json::Int(0))
+        .push("var_types", Json::Object(var_types))
+        .push("time_min", opt_time(d.time_min_h.as_deref()))
+        .push("time_min_ticks", Json::opt_int(d.t_min))
+        .push("time_min_h", opt_time(d.time_min_h.as_deref()))
+        .push("time_max", opt_time(d.time_max_h.as_deref()))
+        .push("time_max_ticks", Json::opt_int(d.t_max))
+        .push("time_max_h", opt_time(d.time_max_h.as_deref()))
+        .push("duration", opt_time(d.duration_h.as_deref()))
+        .push("duration_ticks", Json::opt_int(d.duration))
+        .push("duration_h", opt_time(d.duration_h.as_deref()))
+        .push(
+            "scopes",
+            Json::Array(d.scopes.iter().map(|s| Json::str(s.clone())).collect()),
+        )
+        .build();
+    Ok(obj)
+}
+
+fn text_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let d = info_data(wave);
+    println!("File      : {}", d.path);
+    println!("Size      : {} bytes", thousands(d.size_bytes));
+    if !d.date.is_empty() {
+        println!("Date      : {}", d.date);
     }
-    println!("Timescale : {}", timescale);
-    if signal_count == reference_count {
-        println!("Signals   : {}", signal_count);
+    if !d.version.is_empty() {
+        println!("Tool      : {}", d.version);
+    }
+    println!("Timescale : {}", d.timescale);
+    if d.signal_count == d.reference_count {
+        println!("Signals   : {}", d.signal_count);
     } else {
         println!(
             "Signals   : {} unique ({} $var refs via aliases)",
-            signal_count, reference_count
+            d.signal_count, d.reference_count
         );
     }
-    let types_str = type_pairs
+    let types_str = d
+        .type_pairs
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
@@ -280,16 +354,16 @@ fn cmd_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
     println!("Types     : {types_str}");
     println!(
         "Time      : {} ~ {} ({})",
-        time_min_h.as_deref().unwrap_or("None"),
-        time_max_h.as_deref().unwrap_or("None"),
-        duration_h.as_deref().unwrap_or("None")
+        d.time_min_h.as_deref().unwrap_or("None"),
+        d.time_max_h.as_deref().unwrap_or("None"),
+        d.duration_h.as_deref().unwrap_or("None")
     );
-    for s in &scopes {
+    for s in &d.scopes {
         println!("  scope: {s}");
     }
-    if !comments.is_empty() && args.verbose {
+    if !d.comments.is_empty() && args.verbose {
         println!("Comments  :");
-        for c in &comments {
+        for c in &d.comments {
             println!("  - {c}");
         }
     }
@@ -327,18 +401,22 @@ fn thousands(n: i64) -> String {
 // list
 // ---------------------------------------------------------------------------
 
-fn cmd_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// One `list` row: an alias path with its signal's width/type and domain id.
+struct ListEntry {
+    path: String,
+    width: u32,
+    type_str: &'static str,
+    sid: Sid,
+}
+
+/// Build the sorted `list` entries and the clip decision, shared by both
+/// renderers. Returns `(entries, shown, truncated)`.
+fn list_entries(wave: &Wave, args: &Args) -> Result<(Vec<ListEntry>, usize, bool), String> {
     let limit = limit_of(args);
     let sel = match_filter(wave, &args.filter)?;
 
     // Build entries: one per alias path, then sort by path.
-    struct Entry {
-        path: String,
-        width: u32,
-        type_str: &'static str,
-        sid: Sid,
-    }
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut entries: Vec<ListEntry> = Vec::new();
     for (sid, info) in wave.signals().iter().enumerate() {
         if let Some(ref s) = sel {
             if !s.contains(&sid) {
@@ -346,7 +424,7 @@ fn cmd_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
             }
         }
         for path in &info.aliases {
-            entries.push(Entry {
+            entries.push(ListEntry {
                 path: path.clone(),
                 width: info.width,
                 type_str: info.type_str,
@@ -358,29 +436,35 @@ fn cmd_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
 
     let total = entries.len();
     let (shown_n, trunc) = clip_len(total, limit);
+    Ok((entries, shown_n, trunc))
+}
 
-    if args.json {
-        let mut sig_arr = Vec::new();
-        for e in entries.iter().take(shown_n) {
-            let mut o = Obj::new()
-                .push("path", Json::str(e.path.clone()))
-                .push("width", Json::Int(e.width as i64))
-                .push("type", Json::str(e.type_str));
-            if args.verbose {
-                o = o.push("id", Json::Int(e.sid as i64));
-            }
-            sig_arr.push(o.build());
+fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let (entries, shown_n, trunc) = list_entries(wave, args)?;
+    let total = entries.len();
+    let mut sig_arr = Vec::new();
+    for e in entries.iter().take(shown_n) {
+        let mut o = Obj::new()
+            .push("path", Json::str(e.path.clone()))
+            .push("width", Json::Int(e.width as i64))
+            .push("type", Json::str(e.type_str));
+        if args.verbose {
+            o = o.push("id", Json::Int(e.sid as i64));
         }
-        let obj = Obj::new()
-            .push("total", Json::Int(total as i64))
-            .push("shown", Json::Int(shown_n as i64))
-            .push("truncated", Json::Bool(trunc))
-            .push("signals", Json::Array(sig_arr))
-            .build();
-        print_json(&obj);
-        return Ok(());
+        sig_arr.push(o.build());
     }
+    let obj = Obj::new()
+        .push("total", Json::Int(total as i64))
+        .push("shown", Json::Int(shown_n as i64))
+        .push("truncated", Json::Bool(trunc))
+        .push("signals", Json::Array(sig_arr))
+        .build();
+    Ok(obj)
+}
 
+fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let (entries, shown_n, trunc) = list_entries(wave, args)?;
+    let total = entries.len();
     println!("Matched: {}/{}", total, wave.signal_count());
     if total == 0 {
         println!("no match; try a broader filter or run without --filter to browse");
@@ -421,209 +505,148 @@ fn parse_window(args: &Args, ts: f64) -> Result<(i64, Option<i64>), String> {
     Ok((t0, t1))
 }
 
-fn cmd_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// One collected `dump` event with its value already formatted. Shared by the
+/// JSON and text renderers.
+struct DumpRow {
+    tick: i64,
+    path: String,
+    value: String,
+    width: u32,
+    type_str: &'static str,
+}
+
+/// Collect the in-window events (already clipped to `--limit`, value strings
+/// formatted), choosing the memory-bounded collector for large/unfiltered
+/// selections and the eager heap-merge for small ones — both produce the same
+/// ordered rows. Returns `(rows, truncated)`.
+fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
     let sel = match_filter(wave, &args.filter)?;
     let limit = limit_of(args);
-    let verbose = args.verbose;
     let selected = selected_sids(wave, &sel);
     let sel_ref = sel.as_deref();
+
+    let mut rows: Vec<DumpRow> = Vec::new();
+    let truncated;
 
     // Large/unfiltered selections use the memory-bounded collector (decodes in
     // batches, retains only the earliest `limit` events); small selections load
     // eagerly and stream through the heap merge (cheaper, identical output).
     if should_stream(selected.len()) {
-        return dump_bounded(wave, sel_ref, t0, t1, limit, verbose, ts, args.json);
-    }
-
-    wave.ensure_loaded(&selected);
-
-    if args.json {
-        let mut events: Vec<Json> = Vec::new();
-        let mut truncated = false;
-        let mut last_t = i64::MIN;
-        let mut last_th = String::new();
+        let (events, _total, tr) =
+            wave.collect_events_bounded(t0, t1, sel_ref, limit, STREAMING_BATCH);
+        truncated = tr;
+        rows.reserve(events.len());
+        for e in &events {
+            let info = wave.signal(e.sid);
+            rows.push(DumpRow {
+                tick: e.tick,
+                path: info.path.clone(),
+                value: fmt_val(e.value.raw(), info.kind, info.width),
+                width: info.width,
+                type_str: info.type_str,
+            });
+        }
+    } else {
+        wave.ensure_loaded(&selected);
+        let mut trunc = false;
         wave.for_each_event(t0, t1, sel_ref, |t, sid, val| {
-            if truncated {
+            if trunc {
                 return;
             }
-            if limit != 0 && events.len() >= limit {
-                truncated = true;
+            if limit != 0 && rows.len() >= limit {
+                trunc = true;
                 return;
             }
             let info = wave.signal(sid);
-            if t != last_t {
-                last_t = t;
-                last_th = fmt_time(t, ts);
-            }
             let raw = val.raw();
-            let value = fmt_val(&raw, info.kind, info.width);
-            let mut o = Obj::new()
-                .push("time", Json::Int(t))
-                .push("time_ticks", Json::Int(t))
-                .push("time_h", Json::str(last_th.clone()))
-                .push("path", Json::str(info.path.clone()))
-                .push("value", Json::str(value));
-            if verbose {
-                o = o
-                    .push("width", Json::Int(info.width as i64))
-                    .push("type", Json::str(info.type_str));
-            }
-            events.push(o.build());
+            rows.push(DumpRow {
+                tick: t,
+                path: info.path.clone(),
+                value: fmt_val(&raw, info.kind, info.width),
+                width: info.width,
+                type_str: info.type_str,
+            });
         });
-        // Report a lower-bound total when truncated (shown + 1).
-        let (total_field, trunc_final) = if truncated {
-            (events.len() + 1, true)
-        } else {
-            (events.len(), false)
-        };
-        let obj = Obj::new()
-            .push("shown", Json::Int(events.len() as i64))
-            .push("truncated", Json::Bool(trunc_final))
-            .push("events", Json::Array(events))
-            .extend(total_json_fields(total_field, trunc_final))
-            .build();
-        print_json(&obj);
-        return Ok(());
+        truncated = trunc;
     }
-
-    // Text output.
-    let mut out = String::new();
-    let mut shown = 0usize;
-    let mut truncated = false;
-    let mut cur = i64::MIN;
-    let mut last_t = i64::MIN;
-    let mut last_th = String::new();
-    wave.for_each_event(t0, t1, sel_ref, |t, sid, val| {
-        if truncated {
-            return;
-        }
-        if limit != 0 && shown >= limit {
-            truncated = true;
-            return;
-        }
-        let info = wave.signal(sid);
-        if t != last_t {
-            last_t = t;
-            last_th = fmt_time(t, ts);
-        }
-        if t != cur {
-            cur = t;
-            out.push_str(&format!("T={}\n", last_th));
-        }
-        let raw = val.raw();
-        let value = fmt_val(&raw, info.kind, info.width);
-        if verbose {
-            out.push_str(&format!(
-                "  {} w={} {} = {}\n",
-                ljust(&info.path, 55),
-                info.width,
-                info.type_str,
-                value
-            ));
-        } else {
-            out.push_str(&format!("  {} = {}\n", ljust(&info.path, 55), value));
-        }
-        shown += 1;
-    });
-    if shown == 0 {
-        println!("(no changes in range)");
-        return Ok(());
-    }
-    print!("{out}");
-    if truncated {
-        println!("{}", trunc_line_lb(shown, shown + 1, "events"));
-    }
-    Ok(())
+    Ok((rows, truncated))
 }
 
-/// Memory-bounded `dump` for large/unfiltered selections. Uses the model's
-/// batched bounded-event collector so the whole file's histories never need to
-/// be resident at once. Output is byte-identical to the streaming path.
-#[allow(clippy::too_many_arguments)]
-fn dump_bounded(
-    wave: &mut Wave,
-    sel_ref: Option<&[Sid]>,
-    t0: i64,
-    t1: Option<i64>,
-    limit: usize,
-    verbose: bool,
-    ts: f64,
-    json: bool,
-) -> Result<(), String> {
-    let (events, _total, truncated) =
-        wave.collect_events_bounded(t0, t1, sel_ref, limit, STREAMING_BATCH);
-    let shown = events.len();
-
-    if json {
-        let mut arr: Vec<Json> = Vec::with_capacity(shown);
-        let mut last_t = i64::MIN;
-        let mut last_th = String::new();
-        for e in &events {
-            let info = wave.signal(e.sid);
-            if e.tick != last_t {
-                last_t = e.tick;
-                last_th = fmt_time(e.tick, ts);
-            }
-            let value = fmt_val(e.value.raw(), info.kind, info.width);
-            let mut o = Obj::new()
-                .push("time", Json::Int(e.tick))
-                .push("time_ticks", Json::Int(e.tick))
-                .push("time_h", Json::str(last_th.clone()))
-                .push("path", Json::str(info.path.clone()))
-                .push("value", Json::str(value));
-            if verbose {
-                o = o
-                    .push("width", Json::Int(info.width as i64))
-                    .push("type", Json::str(info.type_str));
-            }
-            arr.push(o.build());
+fn compute_dump(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let ts = wave.ts_sec();
+    let verbose = args.verbose;
+    let (rows, truncated) = dump_collect(wave, args)?;
+    let shown = rows.len();
+    let mut arr: Vec<Json> = Vec::with_capacity(shown);
+    let mut last_t = i64::MIN;
+    let mut last_th = String::new();
+    for r in &rows {
+        if r.tick != last_t {
+            last_t = r.tick;
+            last_th = fmt_time(r.tick, ts);
         }
-        let (total_field, trunc_final) = if truncated {
-            (shown + 1, true)
-        } else {
-            (shown, false)
-        };
-        let obj = Obj::new()
-            .push("shown", Json::Int(shown as i64))
-            .push("truncated", Json::Bool(trunc_final))
-            .push("events", Json::Array(arr))
-            .extend(total_json_fields(total_field, trunc_final))
-            .build();
-        print_json(&obj);
-        return Ok(());
+        let mut o = Obj::new()
+            .push("time", Json::Int(r.tick))
+            .push("time_ticks", Json::Int(r.tick))
+            .push("time_h", Json::str(last_th.clone()))
+            .push("path", Json::str(r.path.clone()))
+            .push("value", Json::str(r.value.clone()));
+        if verbose {
+            o = o
+                .push("width", Json::Int(r.width as i64))
+                .push("type", Json::str(r.type_str));
+        }
+        arr.push(o.build());
     }
+    // Report a lower-bound total when truncated (shown + 1).
+    let (total_field, trunc_final) = if truncated {
+        (shown + 1, true)
+    } else {
+        (shown, false)
+    };
+    let obj = Obj::new()
+        .push("shown", Json::Int(shown as i64))
+        .push("truncated", Json::Bool(trunc_final))
+        .push("events", Json::Array(arr))
+        .extend(total_json_fields(total_field, trunc_final))
+        .build();
+    Ok(obj)
+}
 
+fn text_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let ts = wave.ts_sec();
+    let verbose = args.verbose;
+    let (rows, truncated) = dump_collect(wave, args)?;
+    let shown = rows.len();
     if shown == 0 {
         println!("(no changes in range)");
         return Ok(());
     }
     let mut out = String::new();
     let mut cur = i64::MIN;
-    let mut last_th = String::new();
     let mut last_t = i64::MIN;
-    for e in &events {
-        let info = wave.signal(e.sid);
-        if e.tick != last_t {
-            last_t = e.tick;
-            last_th = fmt_time(e.tick, ts);
+    let mut last_th = String::new();
+    for r in &rows {
+        if r.tick != last_t {
+            last_t = r.tick;
+            last_th = fmt_time(r.tick, ts);
         }
-        if e.tick != cur {
-            cur = e.tick;
+        if r.tick != cur {
+            cur = r.tick;
             out.push_str(&format!("T={}\n", last_th));
         }
-        let value = fmt_val(e.value.raw(), info.kind, info.width);
         if verbose {
             out.push_str(&format!(
                 "  {} w={} {} = {}\n",
-                ljust(&info.path, 55),
-                info.width,
-                info.type_str,
-                value
+                ljust(&r.path, 55),
+                r.width,
+                r.type_str,
+                r.value
             ));
         } else {
-            out.push_str(&format!("  {} = {}\n", ljust(&info.path, 55), value));
+            out.push_str(&format!("  {} = {}\n", ljust(&r.path, 55), r.value));
         }
     }
     print!("{out}");
@@ -637,7 +660,26 @@ fn dump_bounded(
 // snapshot
 // ---------------------------------------------------------------------------
 
-fn cmd_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// One `snapshot` display row.
+struct SnapRow {
+    path: String,
+    value: Option<String>,
+    undefined: bool,
+    width: u32,
+    type_str: &'static str,
+}
+
+/// Computed `snapshot` state: display rows (known first; undef appended only in
+/// verbose) plus the selection/known/undef counts and the resolved tick.
+struct SnapData {
+    rows: Vec<SnapRow>,
+    selected_len: usize,
+    known_count: usize,
+    undef_len: usize,
+    t_at: i64,
+}
+
+fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let t_at = parse_time(at_raw, ts).map_err(|e: TimeParseError| e.0)?;
@@ -670,18 +712,11 @@ fn cmd_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
     };
 
     // Build display rows (known first; undef appended only in verbose).
-    struct Row {
-        path: String,
-        value: Option<String>,
-        undefined: bool,
-        width: u32,
-        type_str: &'static str,
-    }
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<SnapRow> = Vec::new();
     for sid in &known {
         let info = wave.signal(*sid);
         let v = fmt_owned(&state[sid], info.kind, info.width);
-        rows.push(Row {
+        rows.push(SnapRow {
             path: info.path.clone(),
             value: Some(v),
             undefined: false,
@@ -692,7 +727,7 @@ fn cmd_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
     if args.verbose {
         for sid in &undef {
             let info = wave.signal(*sid);
-            rows.push(Row {
+            rows.push(SnapRow {
                 path: info.path.clone(),
                 value: None,
                 undefined: true,
@@ -702,56 +737,71 @@ fn cmd_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
         }
     }
 
+    Ok(SnapData {
+        rows,
+        selected_len: selected.len(),
+        known_count,
+        undef_len: undef.len(),
+        t_at,
+    })
+}
+
+fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let ts = wave.ts_sec();
+    let d = snapshot_data(wave, args)?;
     let limit = limit_of(args);
-    let total = rows.len();
+    let total = d.rows.len();
     let (shown_n, trunc) = clip_len(total, limit);
 
-    if args.json {
-        let mut sig_arr = Vec::new();
-        for r in rows.iter().take(shown_n) {
-            let mut o = Obj::new().push("path", Json::str(r.path.clone()));
-            if r.undefined {
-                o = o.push("value", Json::Null).push("undefined", Json::Bool(true));
-            } else {
-                o = o.push("value", Json::str(r.value.clone().unwrap_or_default()));
-            }
-            if args.verbose {
-                o = o
-                    .push("width", Json::Int(r.width as i64))
-                    .push("type", Json::str(r.type_str));
-            }
-            sig_arr.push(o.build());
+    let mut sig_arr = Vec::new();
+    for r in d.rows.iter().take(shown_n) {
+        let mut o = Obj::new().push("path", Json::str(r.path.clone()));
+        if r.undefined {
+            o = o.push("value", Json::Null).push("undefined", Json::Bool(true));
+        } else {
+            o = o.push("value", Json::str(r.value.clone().unwrap_or_default()));
         }
-        let at_h = fmt_time(t_at, ts);
-        let obj = Obj::new()
-            .push("at", Json::str(at_h.clone()))
-            .push("at_ticks", Json::Int(t_at))
-            .push("at_h", Json::str(at_h))
-            .push("selected", Json::Int(selected.len() as i64))
-            .push("known", Json::Int(known_count as i64))
-            .push("undefined", Json::Int(undef.len() as i64))
-            .push("shown", Json::Int(shown_n as i64))
-            .push("truncated", Json::Bool(trunc))
-            .push("signals", Json::Array(sig_arr))
-            .build();
-        print_json(&obj);
-        return Ok(());
+        if args.verbose {
+            o = o
+                .push("width", Json::Int(r.width as i64))
+                .push("type", Json::str(r.type_str));
+        }
+        sig_arr.push(o.build());
     }
+    let at_h = fmt_time(d.t_at, ts);
+    let obj = Obj::new()
+        .push("at", Json::str(at_h.clone()))
+        .push("at_ticks", Json::Int(d.t_at))
+        .push("at_h", Json::str(at_h))
+        .push("selected", Json::Int(d.selected_len as i64))
+        .push("known", Json::Int(d.known_count as i64))
+        .push("undefined", Json::Int(d.undef_len as i64))
+        .push("shown", Json::Int(shown_n as i64))
+        .push("truncated", Json::Bool(trunc))
+        .push("signals", Json::Array(sig_arr))
+        .build();
+    Ok(obj)
+}
 
-    if state.is_empty() {
-        println!("No known values at {}.", fmt_time(t_at, ts));
+fn text_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let ts = wave.ts_sec();
+    let d = snapshot_data(wave, args)?;
+    let limit = limit_of(args);
+    let total = d.rows.len();
+    let (shown_n, trunc) = clip_len(total, limit);
+
+    if d.known_count == 0 {
+        println!("No known values at {}.", fmt_time(d.t_at, ts));
     } else {
-        println!("Known snapshot @ {}", fmt_time(t_at, ts));
+        println!("Known snapshot @ {}", fmt_time(d.t_at, ts));
     }
     if args.verbose {
         println!(
             "Selected: {}, Known: {}, Undefined: {}",
-            selected.len(),
-            known_count,
-            undef.len()
+            d.selected_len, d.known_count, d.undef_len
         );
     }
-    for r in rows.iter().take(shown_n) {
+    for r in d.rows.iter().take(shown_n) {
         if r.undefined {
             println!("  {} = (undef)", ljust(&r.path, 55));
         } else if args.verbose {
@@ -776,7 +826,25 @@ fn cmd_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> {
 // compare
 // ---------------------------------------------------------------------------
 
-fn cmd_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// One `compare` diff row (values already formatted).
+struct Diff {
+    path: String,
+    at_t1: String,
+    at_t2: String,
+    width: u32,
+    type_str: &'static str,
+}
+
+/// Computed `compare` state: the changed rows plus both resolved ticks and the
+/// size of the compared union (so `unchanged` can be derived).
+struct CompareData {
+    diffs: Vec<Diff>,
+    ta: i64,
+    tb: i64,
+    union_len: usize,
+}
+
+fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let parts: Vec<&str> = at_raw.split(',').collect();
@@ -807,14 +875,8 @@ fn cmd_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
         set.into_iter().collect()
     };
     union.sort_by(|a, b| wave.signal(*a).path.cmp(&wave.signal(*b).path));
+    let union_len = union.len();
 
-    struct Diff {
-        path: String,
-        at_t1: String,
-        at_t2: String,
-        width: u32,
-        type_str: &'static str,
-    }
     let mut diffs: Vec<Diff> = Vec::new();
     for sid in &union {
         let va = sa.get(sid);
@@ -839,47 +901,63 @@ fn cmd_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
         }
     }
 
+    Ok(CompareData {
+        diffs,
+        ta,
+        tb,
+        union_len,
+    })
+}
+
+fn compute_compare(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let ts = wave.ts_sec();
+    let d = compare_data(wave, args)?;
     let limit = limit_of(args);
-    let total = diffs.len();
+    let total = d.diffs.len();
     let (shown_n, trunc) = clip_len(total, limit);
-    let unchanged = union.len() - total;
 
-    if args.json {
-        let mut arr = Vec::new();
-        for d in diffs.iter().take(shown_n) {
-            let mut o = Obj::new()
-                .push("path", Json::str(d.path.clone()))
-                .push("at_t1", Json::str(d.at_t1.clone()))
-                .push("at_t2", Json::str(d.at_t2.clone()));
-            if args.verbose {
-                o = o
-                    .push("width", Json::Int(d.width as i64))
-                    .push("type", Json::str(d.type_str));
-            }
-            arr.push(o.build());
+    let mut arr = Vec::new();
+    for df in d.diffs.iter().take(shown_n) {
+        let mut o = Obj::new()
+            .push("path", Json::str(df.path.clone()))
+            .push("at_t1", Json::str(df.at_t1.clone()))
+            .push("at_t2", Json::str(df.at_t2.clone()));
+        if args.verbose {
+            o = o
+                .push("width", Json::Int(df.width as i64))
+                .push("type", Json::str(df.type_str));
         }
-        let t1h = fmt_time(ta, ts);
-        let t2h = fmt_time(tb, ts);
-        let obj = Obj::new()
-            .push("t1", Json::str(t1h.clone()))
-            .push("t1_ticks", Json::Int(ta))
-            .push("t1_h", Json::str(t1h))
-            .push("t2", Json::str(t2h.clone()))
-            .push("t2_ticks", Json::Int(tb))
-            .push("t2_h", Json::str(t2h))
-            .push("total", Json::Int(total as i64))
-            .push("shown", Json::Int(shown_n as i64))
-            .push("truncated", Json::Bool(trunc))
-            .push("diffs", Json::Array(arr))
-            .build();
-        print_json(&obj);
-        return Ok(());
+        arr.push(o.build());
     }
+    let t1h = fmt_time(d.ta, ts);
+    let t2h = fmt_time(d.tb, ts);
+    let obj = Obj::new()
+        .push("t1", Json::str(t1h.clone()))
+        .push("t1_ticks", Json::Int(d.ta))
+        .push("t1_h", Json::str(t1h))
+        .push("t2", Json::str(t2h.clone()))
+        .push("t2_ticks", Json::Int(d.tb))
+        .push("t2_h", Json::str(t2h))
+        .push("total", Json::Int(total as i64))
+        .push("shown", Json::Int(shown_n as i64))
+        .push("truncated", Json::Bool(trunc))
+        .push("diffs", Json::Array(arr))
+        .build();
+    Ok(obj)
+}
 
-    println!("Compare: {} vs {}", fmt_time(ta, ts), fmt_time(tb, ts));
+fn text_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let ts = wave.ts_sec();
+    let d = compare_data(wave, args)?;
+    let limit = limit_of(args);
+    let total = d.diffs.len();
+    let (shown_n, trunc) = clip_len(total, limit);
+    let unchanged = d.union_len - total;
+
+    println!("Compare: {} vs {}", fmt_time(d.ta, ts), fmt_time(d.tb, ts));
     println!("{} changed, {} unchanged", total, unchanged);
-    for d in diffs.iter().take(shown_n) {
-        println!("  {} {} -> {}", ljust(&d.path, 48), d.at_t1, d.at_t2);
+    for df in d.diffs.iter().take(shown_n) {
+        println!("  {} {} -> {}", ljust(&df.path, 48), df.at_t1, df.at_t2);
     }
     if trunc {
         println!("{}", trunc_line(shown_n, total, "diffs"));
@@ -1142,7 +1220,41 @@ fn uniq_key(v: &crate::backend::RawValue) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn cmd_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// Build the verbose-only "undefined" summary rows from their sids.
+fn build_undef_rows(wave: &Wave, undef_sids: &[Sid]) -> Vec<SummaryRow> {
+    undef_sids
+        .iter()
+        .map(|sid| {
+            let info = wave.signal(*sid);
+            SummaryRow {
+                kind: "undefined",
+                path: info.path.clone(),
+                value: None,
+                changes: 0,
+                rise_count: if info.width == 1 { Some(0) } else { None },
+                fall_count: if info.width == 1 { Some(0) } else { None },
+                init: "(undef)".to_string(),
+                last: "(undef)".to_string(),
+                first_at: None,
+                last_at: None,
+                unique: 0,
+                width: info.width,
+                type_str: info.type_str,
+            }
+        })
+        .collect()
+}
+
+/// Computed `summary` state: the display-ordered rows (active, then static, then
+/// undefined when verbose), the counts, and the resolved window.
+struct SummaryData {
+    ordered: Vec<SummaryRow>,
+    counts: SummaryCounts,
+    t0: i64,
+    t1: Option<i64>,
+}
+
+fn summary_data(wave: &mut Wave, args: &Args) -> Result<SummaryData, String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
     let sel = match_filter(wave, &args.filter)?;
@@ -1152,74 +1264,67 @@ fn cmd_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
     // per-signal independent), so we do not eagerly load everything here.
     let (rows, undef_sids, counts) = summary_rows(wave, t0, t1, &selected);
 
-    // active rows then static rows (then undefined in verbose).
-    let mut ordered: Vec<&SummaryRow> = Vec::new();
-    ordered.extend(rows.iter().filter(|r| r.kind == "active"));
-    ordered.extend(rows.iter().filter(|r| r.kind == "static"));
-
-    // Build undefined rows (verbose only) as owned to append.
-    let undef_rows: Vec<SummaryRow> = if args.verbose {
-        undef_sids
-            .iter()
-            .map(|sid| {
-                let info = wave.signal(*sid);
-                SummaryRow {
-                    kind: "undefined",
-                    path: info.path.clone(),
-                    value: None,
-                    changes: 0,
-                    rise_count: if info.width == 1 { Some(0) } else { None },
-                    fall_count: if info.width == 1 { Some(0) } else { None },
-                    init: "(undef)".to_string(),
-                    last: "(undef)".to_string(),
-                    first_at: None,
-                    last_at: None,
-                    unique: 0,
-                    width: info.width,
-                    type_str: info.type_str,
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for r in &undef_rows {
-        ordered.push(r);
+    // active rows then static rows (then undefined in verbose). Partition is
+    // order-preserving, so each group keeps its path-sorted order.
+    let (active, statics): (Vec<SummaryRow>, Vec<SummaryRow>) =
+        rows.into_iter().partition(|r| r.kind == "active");
+    let mut ordered = active;
+    ordered.extend(statics);
+    if args.verbose {
+        ordered.extend(build_undef_rows(wave, &undef_sids));
     }
 
+    Ok(SummaryData {
+        ordered,
+        counts,
+        t0,
+        t1,
+    })
+}
+
+fn compute_summary(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let ts = wave.ts_sec();
+    let d = summary_data(wave, args)?;
     let limit = limit_of(args);
-    let total = ordered.len();
+    let total = d.ordered.len();
     let (shown_n, trunc) = clip_len(total, limit);
-    let begin_h = fmt_time(t0, ts);
-    let end_h = t1.map(|t| fmt_time(t, ts));
+    let begin_h = fmt_time(d.t0, ts);
+    let end_h = d.t1.map(|t| fmt_time(t, ts));
 
-    if args.json {
-        let mut row_arr = Vec::new();
-        for r in ordered.iter().take(shown_n) {
-            row_arr.push(summary_row_json(r, args.verbose, ts));
-        }
-        let window = Obj::new()
-            .push("begin", Json::str(begin_h.clone()))
-            .push("end", opt_time(end_h.as_deref()))
-            .push("begin_ticks", Json::Int(t0))
-            .push("begin_h", Json::str(begin_h.clone()))
-            .push("end_ticks", Json::opt_int(t1))
-            .push("end_h", opt_time(end_h.as_deref()))
-            .build();
-        let obj = Obj::new()
-            .push("window", window)
-            .push("selected", Json::Int(counts.selected as i64))
-            .push("defined", Json::Int(counts.defined as i64))
-            .push("undefined", Json::Int(counts.undefined as i64))
-            .push("active", Json::Int(counts.active as i64))
-            .push("static", Json::Int(counts.static_ as i64))
-            .push("shown", Json::Int(shown_n as i64))
-            .push("truncated", Json::Bool(trunc))
-            .push("rows", Json::Array(row_arr))
-            .build();
-        print_json(&obj);
-        return Ok(());
+    let mut row_arr = Vec::new();
+    for r in d.ordered.iter().take(shown_n) {
+        row_arr.push(summary_row_json(r, args.verbose, ts));
     }
+    let window = Obj::new()
+        .push("begin", Json::str(begin_h.clone()))
+        .push("end", opt_time(end_h.as_deref()))
+        .push("begin_ticks", Json::Int(d.t0))
+        .push("begin_h", Json::str(begin_h.clone()))
+        .push("end_ticks", Json::opt_int(d.t1))
+        .push("end_h", opt_time(end_h.as_deref()))
+        .build();
+    let obj = Obj::new()
+        .push("window", window)
+        .push("selected", Json::Int(d.counts.selected as i64))
+        .push("defined", Json::Int(d.counts.defined as i64))
+        .push("undefined", Json::Int(d.counts.undefined as i64))
+        .push("active", Json::Int(d.counts.active as i64))
+        .push("static", Json::Int(d.counts.static_ as i64))
+        .push("shown", Json::Int(shown_n as i64))
+        .push("truncated", Json::Bool(trunc))
+        .push("rows", Json::Array(row_arr))
+        .build();
+    Ok(obj)
+}
+
+fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let ts = wave.ts_sec();
+    let d = summary_data(wave, args)?;
+    let limit = limit_of(args);
+    let total = d.ordered.len();
+    let (shown_n, trunc) = clip_len(total, limit);
+    let begin_h = fmt_time(d.t0, ts);
+    let end_h = d.t1.map(|t| fmt_time(t, ts));
 
     println!(
         "Window: {}..{}",
@@ -1228,11 +1333,11 @@ fn cmd_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
     );
     println!(
         "Selected: {}, Defined: {}, Undefined: {}",
-        counts.selected, counts.defined, counts.undefined
+        d.counts.selected, d.counts.defined, d.counts.undefined
     );
-    println!("Active: {}, Static: {}", counts.active, counts.static_);
+    println!("Active: {}, Static: {}", d.counts.active, d.counts.static_);
     let mut current = "";
-    for r in ordered.iter().take(shown_n) {
+    for r in d.ordered.iter().take(shown_n) {
         if r.kind != current {
             current = r.kind;
             println!("\n{}", current.to_uppercase());
@@ -1295,7 +1400,7 @@ fn cmd_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
             }
         }
     }
-    if rows.is_empty() && undef_sids.is_empty() {
+    if d.counts.defined == 0 && d.counts.undefined == 0 {
         println!("(no selected signals)");
     }
     if trunc {
@@ -1617,7 +1722,41 @@ fn search_end_time(wave: &Wave, t1: Option<i64>) -> Result<i64, String> {
     }
 }
 
-fn cmd_search(wave: &mut Wave, args: &Args) -> Result<(), String> {
+/// One fired `search` event (event mode).
+struct Ev {
+    time_ticks: i64,
+    time_h: String,
+    values: Vec<(String, String)>,
+    meta: Option<Json>,
+}
+
+/// One emitted interval/segment (interval & segment modes).
+#[derive(Clone)]
+struct IntervalRow {
+    begin_ticks: i64,
+    end_ticks: i64,
+    values: Option<Vec<(String, String)>>,
+    meta: Option<Json>,
+}
+
+/// Resolved inputs shared by the `search` collectors and renderers: the parsed
+/// conditions, the `--show`/`--changed` selections, the loaded signal set, the
+/// time window, and the display labels. Built once per invocation.
+struct SearchSetup {
+    conditions: Vec<ResolvedCond>,
+    show_sids: Vec<Sid>,
+    changed_sid: Option<Sid>,
+    sel_ref: Vec<Sid>,
+    t0: i64,
+    t1: i64,
+    limit: usize,
+    verbose: bool,
+    cond_label: String,
+    cond_text: String,
+    ts: f64,
+}
+
+fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let ts = wave.ts_sec();
     let t0 = match &args.begin {
         Some(b) => parse_time(b, ts).map_err(|e: TimeParseError| e.0)?,
@@ -1656,71 +1795,65 @@ fn cmd_search(wave: &mut Wave, args: &Args) -> Result<(), String> {
     }
     let sel_vec: Vec<Sid> = selected.iter().copied().collect();
     wave.ensure_loaded(&sel_vec);
-    let sel_ref: Vec<Sid> = sel_vec.clone();
 
-    let limit = limit_of(args);
-    let verbose = args.verbose;
     let cond_label = condition_label(&conditions);
     let cond_text = condition_result_text(&conditions);
 
-    if let Some(changed_sid) = changed_sid {
-        return search_event_mode(
-            wave,
-            &sel_ref,
-            &conditions,
-            &show_sids,
-            changed_sid,
-            t0,
-            t1,
-            limit,
-            verbose,
-            &cond_label,
-            &cond_text,
-            args.json,
-            ts,
-        );
-    }
-
-    search_interval_segment_mode(
-        wave,
-        &sel_ref,
-        &conditions,
-        &show_sids,
+    Ok(SearchSetup {
+        conditions,
+        show_sids,
+        changed_sid,
+        sel_ref: sel_vec,
         t0,
         t1,
-        limit,
-        verbose,
-        &cond_label,
-        &cond_text,
-        args.json,
+        limit: limit_of(args),
+        verbose: args.verbose,
+        cond_label,
+        cond_text,
         ts,
-    )
+    })
 }
 
-/// Event mode: fire when `changed_sid` truly transitions and all conditions
-/// hold. Groups events by timestamp; a t=0 initialization is not a change.
-#[allow(clippy::too_many_arguments)]
-fn search_event_mode(
-    wave: &Wave,
-    sel: &[Sid],
-    conditions: &[ResolvedCond],
-    show_sids: &[Sid],
-    changed_sid: Sid,
-    t0: i64,
-    t1: i64,
-    limit: usize,
-    verbose: bool,
-    cond_label: &str,
-    cond_text: &str,
-    json: bool,
-    ts: f64,
-) -> Result<(), String> {
-    struct Ev {
-        time_ticks: i64,
-        time_h: String,
-        values: Vec<(String, String)>,
-        meta: Option<Json>,
+fn compute_search(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    let s = search_setup(wave, args)?;
+    if let Some(changed_sid) = s.changed_sid {
+        let (events, total, truncated) = search_event_collect(wave, &s, changed_sid);
+        Ok(search_event_json(wave, &s, changed_sid, &events, total, truncated))
+    } else {
+        let (results, total, truncated, has_show) = search_interval_collect(wave, &s);
+        Ok(search_interval_json(wave, &s, &results, total, truncated, has_show))
     }
+}
+
+fn text_search(wave: &mut Wave, args: &Args) -> Result<(), String> {
+    let s = search_setup(wave, args)?;
+    if let Some(changed_sid) = s.changed_sid {
+        let (events, total, truncated) = search_event_collect(wave, &s, changed_sid);
+        search_event_text(wave, &s, changed_sid, &events, total, truncated);
+    } else {
+        let (results, total, truncated, has_show) = search_interval_collect(wave, &s);
+        search_interval_text(&s, &results, total, truncated, has_show);
+    }
+    Ok(())
+}
+
+/// Event mode collect: fire when `changed_sid` truly transitions and all
+/// conditions hold. Groups events by timestamp; a t=0 initialization is not a
+/// change. Returns `(events, total, truncated)`.
+fn search_event_collect(
+    wave: &Wave,
+    s: &SearchSetup,
+    changed_sid: Sid,
+) -> (Vec<Ev>, usize, bool) {
+    let sel: &[Sid] = &s.sel_ref;
+    let conditions: &[ResolvedCond] = &s.conditions;
+    let show_sids: &[Sid] = &s.show_sids;
+    let t0 = s.t0;
+    let t1 = s.t1;
+    let limit = s.limit;
+    let verbose = s.verbose;
+    let ts = s.ts;
+
     let mut state: BTreeMap<Sid, String> = BTreeMap::new();
     let mut events: Vec<Ev> = Vec::new();
     let mut total = 0usize;
@@ -1815,55 +1948,71 @@ fn search_event_mode(
         }
     }
 
-    let _ = verbose;
-    if json {
-        let evs: Vec<Json> = events
-            .iter()
-            .map(|e| {
-                let mut o = Obj::new()
-                    .push("time_ticks", Json::Int(e.time_ticks))
-                    .push("time_h", Json::str(e.time_h.clone()))
-                    .push("values", values_json(&e.values));
-                if let Some(ref m) = e.meta {
-                    o = o.push("meta", m.clone());
-                }
-                o.build()
-            })
-            .collect();
-        let show_paths: Vec<Json> = show_sids
-            .iter()
-            .map(|s| Json::str(wave.signal(*s).path.clone()))
-            .collect();
-        let (total_field, trunc_final) = if truncated {
-            (events.len() + 1, true)
-        } else {
-            (total, false)
-        };
-        let obj = Obj::new()
-            .push("mode", Json::str("event"))
-            .push("condition", Json::str(cond_label))
-            .push("condition_resolved", Json::str(cond_text))
-            .push("changed", Json::str(wave.signal(changed_sid).path.clone()))
-            .push("show", Json::Array(show_paths))
-            .push("begin_ticks", Json::Int(t0))
-            .push("begin_h", Json::str(fmt_time(t0, ts)))
-            .push("end_ticks", Json::Int(t1))
-            .push("end_h", Json::str(fmt_time(t1, ts)))
-            .push("shown", Json::Int(events.len() as i64))
-            .push("truncated", Json::Bool(trunc_final))
-            .push("events", Json::Array(evs))
-            .extend(total_json_fields(total_field, trunc_final))
-            .build();
-        print_json(&obj);
-        return Ok(());
-    }
+    (events, total, truncated)
+}
 
+fn search_event_json(
+    wave: &Wave,
+    s: &SearchSetup,
+    changed_sid: Sid,
+    events: &[Ev],
+    total: usize,
+    truncated: bool,
+) -> Json {
+    let evs: Vec<Json> = events
+        .iter()
+        .map(|e| {
+            let mut o = Obj::new()
+                .push("time_ticks", Json::Int(e.time_ticks))
+                .push("time_h", Json::str(e.time_h.clone()))
+                .push("values", values_json(&e.values));
+            if let Some(ref m) = e.meta {
+                o = o.push("meta", m.clone());
+            }
+            o.build()
+        })
+        .collect();
+    let show_paths: Vec<Json> = s
+        .show_sids
+        .iter()
+        .map(|sid| Json::str(wave.signal(*sid).path.clone()))
+        .collect();
+    let (total_field, trunc_final) = if truncated {
+        (events.len() + 1, true)
+    } else {
+        (total, false)
+    };
+    Obj::new()
+        .push("mode", Json::str("event"))
+        .push("condition", Json::str(s.cond_label.clone()))
+        .push("condition_resolved", Json::str(s.cond_text.clone()))
+        .push("changed", Json::str(wave.signal(changed_sid).path.clone()))
+        .push("show", Json::Array(show_paths))
+        .push("begin_ticks", Json::Int(s.t0))
+        .push("begin_h", Json::str(fmt_time(s.t0, s.ts)))
+        .push("end_ticks", Json::Int(s.t1))
+        .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
+        .push("shown", Json::Int(events.len() as i64))
+        .push("truncated", Json::Bool(trunc_final))
+        .push("events", Json::Array(evs))
+        .extend(total_json_fields(total_field, trunc_final))
+        .build()
+}
+
+fn search_event_text(
+    wave: &Wave,
+    s: &SearchSetup,
+    changed_sid: Sid,
+    events: &[Ev],
+    total: usize,
+    truncated: bool,
+) {
     if !events.is_empty() {
         println!(
             "Found: {} event(s)",
             count_label(if truncated { events.len() + 1 } else { total }, truncated)
         );
-        for e in &events {
+        for e in events {
             println!("  T={} {}", ljust(&e.time_h, 12), values_text(&e.values));
         }
         if truncated {
@@ -1872,45 +2021,30 @@ fn search_event_mode(
     } else {
         println!(
             "No event in {}..{} where {} changed and {}.",
-            fmt_time(t0, ts),
-            fmt_time(t1, ts),
+            fmt_time(s.t0, s.ts),
+            fmt_time(s.t1, s.ts),
             wave.signal(changed_sid).path,
-            cond_text
+            s.cond_text
         );
     }
-    Ok(())
 }
 
 /// Interval mode (no `--show`): emit `[a, b)` intervals where conditions hold.
 /// Segment mode (`--show` present): an interval further split whenever the
 /// displayed show-value tuple changes while the condition remains true.
-#[allow(clippy::too_many_arguments)]
-fn search_interval_segment_mode(
-    wave: &Wave,
-    sel: &[Sid],
-    conditions: &[ResolvedCond],
-    show_sids: &[Sid],
-    t0: i64,
-    t1: i64,
-    limit: usize,
-    verbose: bool,
-    cond_label: &str,
-    cond_text: &str,
-    json: bool,
-    ts: f64,
-) -> Result<(), String> {
+/// Returns `(results, total, truncated, has_show)`.
+fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, usize, bool, bool) {
+    let sel: &[Sid] = &s.sel_ref;
+    let conditions: &[ResolvedCond] = &s.conditions;
+    let show_sids: &[Sid] = &s.show_sids;
+    let t0 = s.t0;
+    let t1 = s.t1;
+    let limit = s.limit;
+    let verbose = s.verbose;
     let has_show = !show_sids.is_empty();
 
-    #[derive(Clone)]
-    struct Row {
-        begin_ticks: i64,
-        end_ticks: i64,
-        values: Option<Vec<(String, String)>>,
-        meta: Option<Json>,
-    }
-
     let mut state: BTreeMap<Sid, String> = BTreeMap::new();
-    let mut results: Vec<Row> = Vec::new();
+    let mut results: Vec<IntervalRow> = Vec::new();
     let mut total = 0usize;
     let mut truncated = false;
 
@@ -1974,7 +2108,7 @@ fn search_interval_segment_mode(
                     active = true;
                     seg_start = Some(ct);
                 } else if !cond_ok && active {
-                    let row = Row {
+                    let row = IntervalRow {
                         begin_ticks: seg_start.unwrap(),
                         end_ticks: ct,
                         values: None,
@@ -1988,7 +2122,7 @@ fn search_interval_segment_mode(
                 }
             } else if !cond_ok {
                 if active {
-                    let row = Row {
+                    let row = IntervalRow {
                         begin_ticks: seg_start.unwrap(),
                         end_ticks: ct,
                         values: seg_values.clone(),
@@ -2012,7 +2146,7 @@ fn search_interval_segment_mode(
                         seg_meta = Some(show_meta(wave, &state, show_sids));
                     }
                 } else if Some(&new_values) != seg_values.as_ref() {
-                    let row = Row {
+                    let row = IntervalRow {
                         begin_ticks: seg_start.unwrap(),
                         end_ticks: ct,
                         values: seg_values.clone(),
@@ -2072,7 +2206,7 @@ fn search_interval_segment_mode(
                 active = true;
                 seg_start = Some(ct);
             } else if !cond_ok && active {
-                let row = Row {
+                let row = IntervalRow {
                     begin_ticks: seg_start.unwrap(),
                     end_ticks: ct,
                     values: None,
@@ -2084,7 +2218,7 @@ fn search_interval_segment_mode(
             }
         } else if !cond_ok {
             if active {
-                let row = Row {
+                let row = IntervalRow {
                     begin_ticks: seg_start.unwrap(),
                     end_ticks: ct,
                     values: seg_values.clone(),
@@ -2106,7 +2240,7 @@ fn search_interval_segment_mode(
                     seg_meta = Some(show_meta(wave, &state, show_sids));
                 }
             } else if Some(&new_values) != seg_values.as_ref() {
-                let row = Row {
+                let row = IntervalRow {
                     begin_ticks: seg_start.unwrap(),
                     end_ticks: ct,
                     values: seg_values.clone(),
@@ -2124,7 +2258,7 @@ fn search_interval_segment_mode(
 
     // Emit final interval if still active.
     if active && !truncated {
-        let row = Row {
+        let row = IntervalRow {
             begin_ticks: seg_start.unwrap(),
             end_ticks: t1,
             values: if has_show { seg_values.clone() } else { None },
@@ -2133,54 +2267,69 @@ fn search_interval_segment_mode(
         let _ = append_result!(row);
     }
 
-    let _ = verbose;
-    if json {
-        let key = if has_show { "segments" } else { "intervals" };
-        let mode = if has_show { "segment" } else { "interval" };
-        let rows_json: Vec<Json> = results
-            .iter()
-            .map(|r| {
-                let mut o = Obj::new()
-                    .push("begin_ticks", Json::Int(r.begin_ticks))
-                    .push("begin_h", Json::str(fmt_time(r.begin_ticks, ts)))
-                    .push("end_ticks", Json::Int(r.end_ticks))
-                    .push("end_h", Json::str(fmt_time(r.end_ticks, ts)));
-                if let Some(ref vals) = r.values {
-                    o = o.push("values", values_json(vals));
-                }
-                if let Some(ref m) = r.meta {
-                    o = o.push("meta", m.clone());
-                }
-                o.build()
-            })
-            .collect();
-        let show_paths: Vec<Json> = show_sids
-            .iter()
-            .map(|s| Json::str(wave.signal(*s).path.clone()))
-            .collect();
-        let (total_field, trunc_final) = if truncated {
-            (results.len() + 1, true)
-        } else {
-            (total, false)
-        };
-        let obj = Obj::new()
-            .push("mode", Json::str(mode))
-            .push("condition", Json::str(cond_label))
-            .push("condition_resolved", Json::str(cond_text))
-            .push("show", Json::Array(show_paths))
-            .push("begin_ticks", Json::Int(t0))
-            .push("begin_h", Json::str(fmt_time(t0, ts)))
-            .push("end_ticks", Json::Int(t1))
-            .push("end_h", Json::str(fmt_time(t1, ts)))
-            .push("shown", Json::Int(results.len() as i64))
-            .push("truncated", Json::Bool(trunc_final))
-            .push(key, Json::Array(rows_json))
-            .extend(total_json_fields(total_field, trunc_final))
-            .build();
-        print_json(&obj);
-        return Ok(());
-    }
+    (results, total, truncated, has_show)
+}
 
+fn search_interval_json(
+    wave: &Wave,
+    s: &SearchSetup,
+    results: &[IntervalRow],
+    total: usize,
+    truncated: bool,
+    has_show: bool,
+) -> Json {
+    let key = if has_show { "segments" } else { "intervals" };
+    let mode = if has_show { "segment" } else { "interval" };
+    let rows_json: Vec<Json> = results
+        .iter()
+        .map(|r| {
+            let mut o = Obj::new()
+                .push("begin_ticks", Json::Int(r.begin_ticks))
+                .push("begin_h", Json::str(fmt_time(r.begin_ticks, s.ts)))
+                .push("end_ticks", Json::Int(r.end_ticks))
+                .push("end_h", Json::str(fmt_time(r.end_ticks, s.ts)));
+            if let Some(ref vals) = r.values {
+                o = o.push("values", values_json(vals));
+            }
+            if let Some(ref m) = r.meta {
+                o = o.push("meta", m.clone());
+            }
+            o.build()
+        })
+        .collect();
+    let show_paths: Vec<Json> = s
+        .show_sids
+        .iter()
+        .map(|sid| Json::str(wave.signal(*sid).path.clone()))
+        .collect();
+    let (total_field, trunc_final) = if truncated {
+        (results.len() + 1, true)
+    } else {
+        (total, false)
+    };
+    Obj::new()
+        .push("mode", Json::str(mode))
+        .push("condition", Json::str(s.cond_label.clone()))
+        .push("condition_resolved", Json::str(s.cond_text.clone()))
+        .push("show", Json::Array(show_paths))
+        .push("begin_ticks", Json::Int(s.t0))
+        .push("begin_h", Json::str(fmt_time(s.t0, s.ts)))
+        .push("end_ticks", Json::Int(s.t1))
+        .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
+        .push("shown", Json::Int(results.len() as i64))
+        .push("truncated", Json::Bool(trunc_final))
+        .push(key, Json::Array(rows_json))
+        .extend(total_json_fields(total_field, trunc_final))
+        .build()
+}
+
+fn search_interval_text(
+    s: &SearchSetup,
+    results: &[IntervalRow],
+    total: usize,
+    truncated: bool,
+    has_show: bool,
+) {
     let noun = if has_show { "segment" } else { "interval" };
     if !results.is_empty() {
         println!(
@@ -2188,9 +2337,9 @@ fn search_interval_segment_mode(
             count_label(if truncated { results.len() + 1 } else { total }, truncated),
             noun
         );
-        for r in &results {
-            let bh = fmt_time(r.begin_ticks, ts);
-            let eh = fmt_time(r.end_ticks, ts);
+        for r in results {
+            let bh = fmt_time(r.begin_ticks, s.ts);
+            let eh = fmt_time(r.end_ticks, s.ts);
             if has_show {
                 println!(
                     "  {}..{} {}",
@@ -2199,7 +2348,7 @@ fn search_interval_segment_mode(
                     values_text(r.values.as_deref().unwrap_or(&[]))
                 );
             } else {
-                println!("  {}..{} {}", ljust(&bh, 12), ljust(&eh, 12), cond_text);
+                println!("  {}..{} {}", ljust(&bh, 12), ljust(&eh, 12), s.cond_text);
             }
         }
         if truncated {
@@ -2209,10 +2358,9 @@ fn search_interval_segment_mode(
         println!(
             "No {} in {}..{} where {}.",
             noun,
-            fmt_time(t0, ts),
-            fmt_time(t1, ts),
-            cond_text
+            fmt_time(s.t0, s.ts),
+            fmt_time(s.t1, s.ts),
+            s.cond_text
         );
     }
-    Ok(())
 }
