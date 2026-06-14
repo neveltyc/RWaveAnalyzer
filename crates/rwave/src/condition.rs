@@ -1,7 +1,7 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! Search condition parsing and value matching, mirroring `vcd_analyzer.py`.
+//! Search condition parsing and value matching.
 //!
 //! A condition list is comma-separated AND terms. Each term is
 //! `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`. Values may be decimal (`5`), hex
@@ -142,8 +142,7 @@ impl BigUint {
     }
 }
 
-/// Parse a target value string into [`Target`], matching
-/// `vcd_analyzer.py::_parse_target_value`.
+/// Parse a target value string into [`Target`].
 pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
     let raw = text.trim().to_lowercase();
     if raw.is_empty() {

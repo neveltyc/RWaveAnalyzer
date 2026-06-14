@@ -193,6 +193,11 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
   identical to the reference; only intra-timestamp order can differ.
 - `comments` is always `[]` and `synthesized_buses` is always `0` 
 - A zero-width `search` window (`--begin T --end T`) yields no rows.
+- **Value format.** Multi-bit logic values print as `0x<hex>` (lower-case,
+  leading zeros stripped — `0x4`, not `0x00000004`); 1-bit as `0`/`1`/`x`/`z`;
+  a bus with any unknown bit as `b<bits>` (e.g. `b01x0`); real/string verbatim.
+  Width is in the signal metadata, not the value — convert hex→int yourself if
+  you need decimal.
 
 For everything else (time syntax, filter syntax, value formatting, format
 quirks, the FST `parameter`-value drop, performance notes) see the repo README.

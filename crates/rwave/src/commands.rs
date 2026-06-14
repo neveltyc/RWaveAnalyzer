@@ -3,11 +3,10 @@
 
 //! Command implementations for `rwave`.
 //!
-//! Each `cmd_*` function reproduces the corresponding `vcd_analyzer.py`
-//! command, including its JSON shape and text layout, while sourcing data from
-//! [`crate::model::Wave`] (backed by `wellen`). Value comparisons use the raw
-//! decoded value strings (bit strings for logic, the literal for real/string),
-//! matching the reference tool, which compares pre-format values.
+//! Each `cmd_*` function implements one command — its JSON shape and text
+//! layout — sourcing data from [`crate::model::Wave`] (backed by `wellen`).
+//! Value comparisons use the raw decoded value strings (bit strings for logic,
+//! the literal for real/string): they compare pre-format values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -151,8 +150,8 @@ fn fmt_owned(v: &OwnedValue, kind: ValueKind, width: u32) -> String {
     }
 }
 
-/// Pad/truncate-free left-justify helper used for text tables. Mirrors
-/// Python's `{:<width}` (pads with spaces; never truncates).
+/// Left-justify helper for text tables: pads with spaces on the right, never
+/// truncates.
 fn ljust(s: &str, width: usize) -> String {
     let len = s.chars().count();
     if len >= width {
@@ -167,7 +166,7 @@ fn ljust(s: &str, width: usize) -> String {
     }
 }
 
-/// Right-justify helper mirroring Python's `{:>width}`.
+/// Right-justify helper: pads with spaces on the left, never truncates.
 fn rjust(s: &str, width: usize) -> String {
     let len = s.chars().count();
     if len >= width {
@@ -473,7 +472,7 @@ fn cmd_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
             }
             events.push(o.build());
         });
-        // Match the reference's lower-bound total when truncated (shown + 1).
+        // Report a lower-bound total when truncated (shown + 1).
         let (total_field, trunc_final) = if truncated {
             (events.len() + 1, true)
         } else {
@@ -1732,7 +1731,7 @@ fn search_event_mode(
     // We need to process completed groups. Because for_each_event is a closure
     // callback, collect (t, sid, raw) into a buffer first for clarity. Files
     // this tool targets fit comfortably in memory; this keeps the state machine
-    // identical to the reference without fighting the borrow checker.
+    // straightforward without fighting the borrow checker.
     let mut stream: Vec<(i64, Sid, String)> = Vec::new();
     wave.for_each_event(0, Some(t1), Some(sel), |t, sid, val| {
         stream.push((t, sid, val.raw()));

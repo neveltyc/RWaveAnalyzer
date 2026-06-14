@@ -168,7 +168,11 @@ Run `rwave <command> --help` for the complete reference.
 Under `--json`, every command emits compact structured JSON. Each time is given
 both as a raw tick count (the `*_ticks` fields) and in human-readable form (the
 `*_h` fields), so the output is equally usable by a script, a CI gate, or an AI
-agent rather than only by a person reading the terminal:
+agent rather than only by a person reading the terminal. Signal values render
+compactly for the same reason: a 1-bit logic signal as `0`/`1`/`x`/`z`, a
+multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), a bus with
+unknown bits as `b<bits>` (e.g. `b01x0`), and real/string values verbatim. The
+width is in each signal's metadata, so it is not re-encoded as hex padding.
 
 ```sh
 rwave --json info sim.fst
@@ -177,55 +181,91 @@ rwave --json search sim.fst --condition 'state=5' --show data
 
 ## Experimental support for WLF and FSDB
 
-In addition to the open formats, RWaveAnalyzer has experimental support for two
-vendor waveform databases on linux-amd64: Mentor/Siemens **WLF**, written by
-Questa and ModelSim, and Synopsys **FSDB**, written by Verdi. It reads each one
-through the vendor's own reader library, so there is no separate `wlf2vcd` or
-`fsdb2vcd` conversion step and no intermediate file to keep around.
+On linux-amd64, RWaveAnalyzer provides experimental support for two vendor
+waveform databases — Mentor/Siemens **WLF** and Synopsys **FSDB** — by calling
+into each vendor's own reader library at runtime. There is no format conversion
+step and no intermediate file.
 
-Because rwave calls into the vendor library, that library has to be available on
-the machine. rwave does not ship it; instead, you point rwave at the copy that
-comes with your own licensed tool installation, using an environment variable:
+### WLF
 
-| Format | Vendor | Reader library | Environment variable |
-|:--|:--|:--|:--|
-| `.wlf`  | Mentor/Siemens Questa, ModelSim | `libwlf.so` | `RWAVE_WLF_LIB`  |
-| `.fsdb` | Synopsys Verdi                  | `libNPI.so` | `RWAVE_FSDB_LIB` |
-
-Set the variable to the absolute path of the library, and then run any command
-exactly as you would for a VCD or FST file:
+rwave reads Questa / ModelSim `.wlf` files through `libwlf.so`. Point
+`RWAVE_WLF_LIB` at the library from your Questa installation:
 
 ```sh
-# WLF — libwlf.so from your Questa / ModelSim installation
 export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so
 rwave info run.wlf
+```
 
-# FSDB — libNPI.so from your Verdi installation
+The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
+at runtime and does not ship it.
+
+### FSDB
+
+rwave supports two ways to read `.fsdb` files. Both are experimental and
+linux-amd64 only.
+
+**Built-in backend (NPI)** — ships with the `rwave-linux-amd64` binary; no
+extra build step. rwave calls Synopsys's NPI (Novas Programming Interface)
+through `libNPI.so` from your Verdi installation. This path requires a
+Verdi-Ultra license feature on the host:
+
+```sh
 export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
 rwave info sim.fsdb
 ```
 
-This support is experimental and limited to linux-amd64. The vendor's tool must
-be installed and licensed on the same machine — FSDB in particular needs a
-Verdi-Ultra license feature — and for FSDB you should source your Verdi
-environment first, so that `libNPI.so` can locate `$VERDI_HOME` and its own
-dependent libraries. Configuring and licensing the vendor software is outside
-rwave's control.
+Source your Verdi environment first so that `libNPI.so` can locate `$VERDI_HOME`
+and its dependent libraries.
 
-If you need a reader for some other format, or a different implementation of one
-of these, rwave will load any backend that implements its C ABI from
-`$RWAVE_PLUGIN_<EXT>`. That interface is documented in
+**Plugin backend
+([rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin))**
+— a source-only plugin that reads FSDB through Synopsys's FsdbReader interface.
+You compile it yourself on a machine that has a licensed Verdi installation,
+because the build links against vendor libraries that cannot be redistributed.
+This path does not require the Verdi-Ultra license feature that the NPI backend
+needs — if you need to read FSDB on any linux-amd64 environment, choose this
+approach:
+
+```sh
+# build on a machine with Verdi
+git clone https://github.com/neveltyc/rwave-open-fsdb-plugin
+cd rwave-open-fsdb-plugin
+./configure && make bundle
+
+# deploy — unpack the bundle, point rwave at the plugin
+mkdir -p ~/.rwave
+tar xzf dist/rwave_fsdb_backend-*-linux_x86_64.tar.gz -C ~/.rwave --strip-components=1
+export RWAVE_PLUGIN_FSDB="$HOME/.rwave/librwave_fsdb_backend.so"
+rwave info sim.fsdb
+```
+
+When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
+`.fsdb` files.
+
+### Environment variables
+
+| Variable | What it does |
+|:--|:--|
+| `RWAVE_WLF_LIB`    | Absolute path to `libwlf.so`. Enables built-in WLF reading. |
+| `RWAVE_FSDB_LIB`   | Absolute path to `libNPI.so`. Enables built-in FSDB reading (NPI, needs Verdi-Ultra license). |
+| `RWAVE_PLUGIN_FSDB` | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
+
+For other formats or a custom backend implementation, rwave loads any shared
+library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see
 [docs/PLUGIN.md](docs/PLUGIN.md).
 
 ## Disclaimer
 
-RWaveAnalyzer reads WLF and FSDB only through each vendor's own public reader
-interface. It contains no proprietary binaries and no vendor source code, links
-against none of them at build time, and redistributes no vendor software; at run
-time it loads the reader library that you supply from your own licensed
-installation. Reading these formats therefore requires the vendor's software and
-a valid license on your machine, and obtaining and configuring those under the
-vendor's terms is your responsibility.
+RWaveAnalyzer reads WLF and FSDB only through each vendor's own reader library
+interface. It contains no vendor binaries and no vendor source code, links
+against none of them at build time, and redistributes no vendor software; at
+runtime it loads the reader library that you supply from your own licensed
+installation. The
+[rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) is
+likewise source-only and ships no vendor binaries — you compile it against your
+own Verdi installation. Reading these formats requires the vendor's software and,
+where applicable, a valid license on your machine; obtaining and using those
+under the vendor's terms is your responsibility.
 
 ## For AI agents
 
@@ -268,7 +308,7 @@ At the top level the repository is organized as follows:
 ```
 crates/rwave/      the rwave crate (CLI, model, backends, plugin ABI)
 vendor/            vendored parser front-end: wellen + a patched fst-reader
-verify/            self-test and differential harnesses with committed stimulus
+verify/            self-test harness with committed stimulus
 scripts/           release build and stimulus-generation scripts
 skill/             the agent-skill descriptor
 docs/              extended documentation (BUILD, PLUGIN)
@@ -298,16 +338,12 @@ how many signals were selected.
 ```sh
 cargo test                  # unit tests: formatting, filters, conditions, CLI
 bash verify/run.sh          # smoke test plus VCD/FST parity on bundled stimulus
-bash verify/differential.sh # behavioral parity against the reference Python tool
 ```
 
 `verify/run.sh` needs only the built binary: it confirms that every command runs
 on both a VCD and an FST, and that the value-bearing commands produce identical
-results across the two formats for the same design. `verify/differential.sh`
-compares rwave against the reference `vcd_analyzer.py` across all seven commands
-on the fixtures and edge-case designs. It locates the reference through
-`$VCD_ANALYZER`, a sibling checkout, or `$PATH`, and skips cleanly when none is
-present, so it is safe to run in a fresh clone or in CI.
+results across the two formats for the same design — a self-contained regression
+net that needs no external reference.
 
 ## License
 

@@ -20,9 +20,9 @@
 //! serializer). Keeping these backend-agnostic is what lets the analyzer grow
 //! to new waveform formats without rippling changes through the command set.
 //!
-//! The CLI surface and output shapes are drop-in compatible with the reference
-//! `vcd_analyzer.py`, generalized so that VCD-specific wording becomes
-//! format-neutral where a feature applies to all backends.
+//! The CLI surface and output shapes are built for AI agents and scripts:
+//! stable JSON keys, format-neutral wording, and compact value/time encodings
+//! that apply uniformly across every backend.
 
 pub mod backend;
 pub mod cli;

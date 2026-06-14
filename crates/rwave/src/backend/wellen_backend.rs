@@ -100,7 +100,7 @@ impl WaveformBackend for WellenBackend {
                 }
             }
             // No timescale declared: ticks are unitless. Use 1ps as the
-            // conversion basis (matching the reference default) while leaving
+            // conversion basis (a sensible default for unitless dumps) while leaving
             // the display string empty.
             None => Timescale {
                 seconds_per_tick: 1e-12,

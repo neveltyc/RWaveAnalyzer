@@ -24,7 +24,6 @@ Linux or Windows binary — for those, see below.
 
 ```sh
 bash verify/run.sh           # smoke + VCD/FST parity on bundled stimulus (no extra deps)
-bash verify/differential.sh  # parity vs the reference Python tool (skips cleanly if absent)
 ```
 
 ## Producing the release binaries

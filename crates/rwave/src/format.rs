@@ -3,10 +3,9 @@
 
 //! Value and time formatting/parsing.
 //!
-//! These routines reproduce the observable behaviour of the reference
-//! `vcd_analyzer.py` (IEEE 1364-2005 §18.2.2 value formatting and the tool's
-//! time-string grammar) so that `rwave` output matches the Python tool field
-//! for field, while sourcing the underlying data from `wellen`.
+//! Value formatting follows IEEE 1364-2005 §18.2.2 (4-state logic, x/z
+//! propagation); the time-string grammar accepts `fs/ps/ns/us/ms/s` suffixes
+//! and bare integer ticks. The underlying data comes from `wellen`.
 
 /// Quote a string the way Python's `repr()` does for error messages: single
 /// quotes by default, switching to double quotes only when the value contains a
@@ -95,12 +94,12 @@ pub enum ValueKind {
     Event,
 }
 
-/// Format a recorded value the way `vcd_analyzer.py`'s `fmt_val` does.
+/// Format a recorded value for display.
 ///
 /// * `event`            -> `triggered`
 /// * `real`/`string`    -> the value verbatim
 /// * 1-bit logic        -> `0` / `1` / `x` / `z` (lower-cased)
-/// * multi-bit clean    -> `<decimal> (0x<hex>)`, hex zero-padded to width
+/// * multi-bit clean    -> `0x<hex>` (lower-case, leading zeros stripped)
 /// * multi-bit w/ x or z -> `b<bits>`
 ///
 /// `raw` for a logic vector is the MSB-first bit string from wellen
@@ -117,9 +116,9 @@ pub fn fmt_val(raw: &str, kind: ValueKind, width: u32) -> String {
 fn fmt_bits(raw: &str, width: u32) -> String {
     let width = width.max(1) as usize;
     // wellen normalises bit chars to lower-case h/u/w/l/x/z/0/1; we treat any
-    // non-0/1 bit as "unknown" for display, mirroring the Python 4-state model
-    // which only knows 0/1/x/z. Map the 9-state chars down to x/z so that the
-    // textual output stays in the documented {0,1,x,z} alphabet.
+    // non-0/1 bit as "unknown" for display, collapsing the 9-state alphabet to
+    // the 4-state {0,1,x,z} model. Map the 9-state chars down to x/z so the
+    // textual output stays in that {0,1,x,z} alphabet.
     let value = normalize_bits(raw);
 
     // Malformed inputs may carry more 4-state bits than the declared width.
@@ -157,10 +156,19 @@ fn fmt_bits(raw: &str, width: u32) -> String {
         return s;
     }
 
-    // Clean binary -> decimal (0xhex). Use big integer math via string parsing
-    // so wide buses don't overflow u64.
-    match bits_to_decimal_and_hex(&value, width) {
-        Some((dec, hex)) => format!("{dec} (0x{hex})"),
+    // Clean binary -> `0x<hex>`, lower-case with leading zeros stripped. Hex is
+    // the agent-facing lingua franca for hardware values (addresses, data,
+    // byte-enable masks) and stays compact for wide buses; the signal's width is
+    // already in the metadata, so we don't re-encode it as padding. Decimal is
+    // intentionally dropped — it is trivially derivable and a wide bus would
+    // overflow a JSON number.
+    match binary_to_hex_unpadded(&value) {
+        Some(hex) => {
+            let mut s = String::with_capacity(hex.len() + 2);
+            s.push_str("0x");
+            s.push_str(&hex);
+            s
+        }
         None => {
             let mut s = String::with_capacity(value.len() + 1);
             s.push('b');
@@ -192,77 +200,23 @@ fn is_4state(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| matches!(c, '0' | '1' | 'x' | 'z'))
 }
 
-/// Convert a clean binary string (only 0/1) to (decimal, lower-hex) strings.
-/// The hex is zero-padded to `ceil(width/4)` digits. Returns `None` if the
-/// string is not pure binary.
-fn bits_to_decimal_and_hex(bits: &str, width: usize) -> Option<(String, String)> {
+/// Convert a clean binary string (only 0/1) to lower-hex with leading zeros
+/// stripped (keeping a single `0` for zero). Returns `None` if the string is
+/// not pure binary. No width padding: the width is carried by the signal's
+/// metadata, so re-encoding it in every value would only cost tokens.
+fn binary_to_hex_unpadded(bits: &str) -> Option<String> {
     if bits.is_empty() || !bits.chars().all(|c| c == '0' || c == '1') {
         return None;
     }
-    // Decimal via repeated *2 + bit on a base-10 big number (Vec of digits,
-    // least-significant first). Adequate for arbitrary widths.
-    let dec = binary_to_decimal_string(bits);
-    let hex = binary_to_hex_string(bits, width);
-    Some((dec, hex))
-}
-
-/// Big-number binary->decimal. Returns the decimal string with no leading
-/// zeros (except "0").
-fn binary_to_decimal_string(bits: &str) -> String {
-    // digits: little-endian base-10
-    let mut digits: Vec<u8> = vec![0];
-    for b in bits.chars() {
-        // multiply by 2
-        let mut carry = 0u8;
-        for d in digits.iter_mut() {
-            let v = *d * 2 + carry;
-            *d = v % 10;
-            carry = v / 10;
-        }
-        while carry > 0 {
-            digits.push(carry % 10);
-            carry /= 10;
-        }
-        // add the bit
-        if b == '1' {
-            let mut carry = 1u8;
-            for d in digits.iter_mut() {
-                if carry == 0 {
-                    break;
-                }
-                let v = *d + carry;
-                *d = v % 10;
-                carry = v / 10;
-            }
-            while carry > 0 {
-                digits.push(carry % 10);
-                carry /= 10;
-            }
-        }
-    }
-    let mut s: String = digits.iter().rev().map(|d| (b'0' + d) as char).collect();
-    // strip leading zeros
-    let trimmed = s.trim_start_matches('0');
-    if trimmed.is_empty() {
-        s = "0".to_string();
-    } else {
-        s = trimmed.to_string();
-    }
-    s
-}
-
-/// Big-number binary->hex, zero-padded to ceil(width/4) digits.
-fn binary_to_hex_string(bits: &str, width: usize) -> String {
-    let hw = ((width + 3) / 4).max(1);
-    // Pad bits on the left to a multiple of 4 so we can chunk into nibbles.
+    // Left-pad to a multiple of 4 so we can chunk into nibbles.
     let pad = (4 - (bits.len() % 4)) % 4;
     let mut padded = String::with_capacity(bits.len() + pad);
     for _ in 0..pad {
         padded.push('0');
     }
     padded.push_str(bits);
-    let mut hex = String::with_capacity(padded.len() / 4);
     let chars: Vec<char> = padded.chars().collect();
+    let mut hex = String::with_capacity(chars.len() / 4);
     for chunk in chars.chunks(4) {
         let mut nib = 0u8;
         for &c in chunk {
@@ -270,24 +224,17 @@ fn binary_to_hex_string(bits: &str, width: usize) -> String {
         }
         hex.push(std::char::from_digit(nib as u32, 16).unwrap());
     }
-    // strip leading zeros, then left-pad to hw
     let trimmed = hex.trim_start_matches('0');
-    let core = if trimmed.is_empty() { "0" } else { trimmed };
-    if core.len() >= hw {
-        core.to_string()
+    Some(if trimmed.is_empty() {
+        "0".to_string()
     } else {
-        let mut s = String::with_capacity(hw);
-        for _ in 0..(hw - core.len()) {
-            s.push('0');
-        }
-        s.push_str(core);
-        s
-    }
+        trimmed.to_string()
+    })
 }
 
 /// Parse a time string to internal ticks, given the timescale in seconds.
 ///
-/// Grammar (matching `vcd_analyzer.py`):
+/// Grammar:
 ///   * bare non-negative integer -> raw ticks
 ///   * value with `fs|ps|ns|us|ms|s` suffix -> scaled by timescale, rounded
 ///   * bare fractional (e.g. `10.5`) is rejected; use a unit suffix
@@ -340,8 +287,8 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
                 }
                 let rounded = round_half_even(scaled);
                 // A scaled time beyond i64 range would saturate on `as i64`,
-                // silently fabricating a value; reject it as "too large" to
-                // match the reference's range check.
+                // silently fabricating a value; reject it as "too large"
+                // instead.
                 //
                 // `i64::MAX as f64` rounds *up* to 2^63 (i64::MAX itself isn't
                 // exactly representable as f64), so `>=` is required: a `rounded`
@@ -369,15 +316,14 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
     }
 }
 
-/// Parse a bare integer-ticks string into `i64`, distinguishing the cases the
-/// reference tool treats differently: a value made only of digits but exceeding
-/// the int64 range is reported as "too large" (not "invalid"), a negative value
-/// as "non-negative", and anything else as "invalid". This mirrors
-/// `vcd_analyzer.py`, where ticks come from Python's `int()` (arbitrary
-/// precision, and accepting `_` digit-group separators between digits).
+/// Parse a bare integer-ticks string into `i64`, distinguishing three error
+/// cases: a value made only of digits but exceeding the int64 range is reported
+/// as "too large" (not "invalid"), a negative value as "non-negative", and
+/// anything else as "invalid". Ticks are conceptually arbitrary-precision, and
+/// `_` digit-group separators between digits are accepted.
 fn parse_ticks_decimal(num: &str, original: &str) -> Result<i64, TimeParseError> {
-    // Accept Python-style underscores (only *between* digits), matching the
-    // reference's int() parsing; reject leading/trailing/doubled underscores.
+    // Accept underscores only *between* digits (like Python's int()); reject
+    // leading/trailing/doubled underscores.
     let cleaned = match strip_int_underscores(num) {
         Some(c) => c,
         None => {
@@ -458,10 +404,10 @@ fn strip_int_underscores(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Round to nearest integer, ties to even — matching Python 3's built-in
-/// `round()` (banker's rounding), which `vcd_analyzer.py` uses when scaling a
-/// unit-suffixed time to ticks. Rust's `f64::round` rounds half away from zero,
-/// which would disagree on exact `.5` cases (e.g. 0.5 -> 0 here, not 1).
+/// Round to nearest integer, ties to even (banker's rounding) — used when
+/// scaling a unit-suffixed time to ticks. Rust's `f64::round` rounds half away
+/// from zero, which would disagree on exact `.5` cases (e.g. 0.5 -> 0 here,
+/// not 1), so we implement ties-to-even explicitly.
 pub fn round_half_even(x: f64) -> f64 {
     let r = x.round(); // half away from zero
     if (x - x.trunc()).abs() == 0.5 {
@@ -563,10 +509,9 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
     format!("{}s", fmt_g(sec))
 }
 
-/// Render a float the way Python's `%g` (default precision 6) does, which is
-/// how `vcd_analyzer.py` prints scaled times. This means up to 6 significant
-/// digits, trailing zeros stripped, and exponent form for very large/small
-/// magnitudes.
+/// Render a float the way Python's `%g` (default precision 6) does: up to 6
+/// significant digits, trailing zeros stripped, and exponent form for very
+/// large/small magnitudes. Used to print scaled (human-readable) times.
 pub fn fmt_g(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string();
@@ -625,7 +570,7 @@ mod tests {
             assert!(parse_time(bad, 1e-9).is_err(), "should reject {bad}");
         }
         // Underscores are NOT accepted with a unit suffix or in hex (the
-        // reference's numeric+unit form has no underscores).
+        // numeric+unit form has no underscores).
         assert!(parse_time("1_000ns", 1e-9).is_err());
         assert!(parse_time("10_00ns", 1e-9).is_err());
         assert!(parse_time("0x1_0", 1e-9).is_err());
@@ -633,8 +578,8 @@ mod tests {
 
     #[test]
     fn time_overflow_reports_too_large() {
-        // Bare integer beyond i64 range -> "too large" (not "invalid"), matching
-        // the reference whose ticks are arbitrary-precision.
+        // Bare integer beyond i64 range -> "too large" (not "invalid"); ticks
+        // are conceptually arbitrary-precision.
         let e = parse_time("99999999999999999999", 1e-9).unwrap_err();
         assert!(e.0.contains("too large"), "got: {}", e.0);
         assert!(e.0.contains("9223372036854775807"), "got: {}", e.0);
@@ -668,7 +613,7 @@ mod tests {
     #[test]
     fn pyrepr_matches_python_for_quoting_and_escapes() {
         // Single-quote default, double-quote when string has a single-quote
-        // and no double-quote, mirroring Python's repr().
+        // and no double-quote — the repr-style quoting rule.
         assert_eq!(pyrepr("hello"), "'hello'");
         assert_eq!(pyrepr("it's"), "\"it's\"");
         assert_eq!(pyrepr("\""), "'\"'");
@@ -700,20 +645,20 @@ mod tests {
 
     #[test]
     fn multibit_clean() {
-        // 8-bit 0x11 = 17
-        assert_eq!(fmt_val("00010001", ValueKind::Bits, 8), "17 (0x11)");
+        // 8-bit 0x11
+        assert_eq!(fmt_val("00010001", ValueKind::Bits, 8), "0x11");
         // 3-bit value 2
-        assert_eq!(fmt_val("010", ValueKind::Bits, 3), "2 (0x2)");
-        // 8-bit 0x22 = 34
-        assert_eq!(fmt_val("00100010", ValueKind::Bits, 8), "34 (0x22)");
+        assert_eq!(fmt_val("010", ValueKind::Bits, 3), "0x2");
+        // 8-bit 0x22
+        assert_eq!(fmt_val("00100010", ValueKind::Bits, 8), "0x22");
     }
 
     #[test]
     fn multibit_short_is_left_extended() {
-        // "1" in a 3-bit signal -> 001 -> 1 (0x1)
-        assert_eq!(fmt_val("1", ValueKind::Bits, 3), "1 (0x1)");
-        // "10" in 8-bit -> 2, hex zero-padded to ceil(8/4)=2 digits -> 0x02
-        assert_eq!(fmt_val("10", ValueKind::Bits, 8), "2 (0x02)");
+        // "1" in a 3-bit signal -> 001 -> 0x1
+        assert_eq!(fmt_val("1", ValueKind::Bits, 3), "0x1");
+        // "10" in 8-bit -> value 2. Width no longer pads the hex: `0x2`, not `0x02`.
+        assert_eq!(fmt_val("10", ValueKind::Bits, 8), "0x2");
     }
 
     #[test]
@@ -725,17 +670,16 @@ mod tests {
 
     #[test]
     fn wide_bus_no_overflow() {
-        // 64 ones = 0xffffffffffffffff = 18446744073709551615
+        // 64 ones = 0xffffffffffffffff (no JSON-number overflow: it's a string)
         let bits = "1".repeat(64);
-        assert_eq!(
-            fmt_val(&bits, ValueKind::Bits, 64),
-            "18446744073709551615 (0xffffffffffffffff)"
-        );
-        // 128-bit: 1 followed by 127 zeros
+        assert_eq!(fmt_val(&bits, ValueKind::Bits, 64), "0xffffffffffffffff");
+        // 128-bit: 1 followed by 127 zeros = 0x8 then 31 hex zeros.
         let mut b = String::from("1");
         b.push_str(&"0".repeat(127));
-        let out = fmt_val(&b, ValueKind::Bits, 128);
-        assert!(out.starts_with("170141183460469231731687303715884105728 (0x8"));
+        assert_eq!(
+            fmt_val(&b, ValueKind::Bits, 128),
+            format!("0x8{}", "0".repeat(31))
+        );
     }
 
     #[test]
@@ -748,7 +692,7 @@ mod tests {
     #[test]
     fn nine_state_maps_to_four() {
         // h -> 1, l -> 0
-        assert_eq!(fmt_val("hl", ValueKind::Bits, 2), "2 (0x2)");
+        assert_eq!(fmt_val("hl", ValueKind::Bits, 2), "0x2");
         // u -> x
         assert_eq!(fmt_val("u", ValueKind::Bits, 1), "x");
     }

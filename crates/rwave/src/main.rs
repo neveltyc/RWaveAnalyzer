@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         }
         ParseOutcome::Error(msg) => {
             eprintln!("rwave: error: {msg}");
-            // argparse exits 2 on usage errors; mirror that.
+            // Exit 2 on usage errors (the conventional CLI usage-error code).
             ExitCode::from(2)
         }
         ParseOutcome::Run(args) => {

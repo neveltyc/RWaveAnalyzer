@@ -4,9 +4,39 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.1] — 2026-06-15
 
-_No unreleased changes._
+A token-economy and independence point release: compact hex values, a
+self-contained test suite, and a documented license-free FSDB path.
+
+### Added
+- **Documented the source-only [`rwave-open-fsdb-plugin`](https://github.com/neveltyc/rwave-open-fsdb-plugin)**
+  FSDB backend (Synopsys FsdbReader via `$RWAVE_PLUGIN_FSDB`): a second `.fsdb`
+  path that, unlike the built-in NPI backend, needs no Verdi-Ultra license at
+  runtime, and overrides the built-in when set. The README now organizes WLF /
+  FSDB / environment-variable docs into clear subsections. (The external-plugin
+  mechanism itself shipped in 0.1.0; this release documents the public, cleaned
+  plugin.)
+
+### Changed
+- **Multi-bit logic values now print as `0x<hex>`** (lower-case, leading zeros
+  stripped) instead of `<decimal> (0x<hex>)`. 1-bit (`0`/`1`/`x`/`z`),
+  unknown-bit buses (`b<bits>`), and real/string values are unchanged. Hex is
+  the compact, agent-facing representation for hardware values and avoids
+  re-encoding the (already-known) signal width as padding; decimal is trivially
+  derivable and would overflow a JSON number on wide buses. Affects every
+  value-bearing command (`dump`, `snapshot`, `compare`, `summary`, `search
+  --show`) in both text and `--json` output. `verify/run.sh` (VCD↔FST parity)
+  is unaffected.
+
+### Removed
+- **The differential harness against the Python reference tool is gone**
+  (`verify/differential.sh`), and the source comments framing rwave as a
+  field-for-field reimplementation of `vcd_analyzer.py` are dropped. The port is
+  validated; rwave is now developed on its own terms, with `cargo test` plus
+  `verify/run.sh` (both reference-free) as the regression net. This frees the
+  output to diverge from the reference where a better agent-facing shape exists
+  — the hex value format above is the first such change.
 
 ## [0.1.0] — 2026-06-13
 

@@ -3,9 +3,8 @@
 
 //! A tiny, dependency-free JSON value model and serializer.
 //!
-//! Output is byte-compatible with Python's
-//! `json.dumps(obj, ensure_ascii=False, separators=(',', ':'))`, which is what
-//! the reference `vcd_analyzer.py` uses for its `--json` mode:
+//! Output is compact, deterministic JSON, equivalent to Python's
+//! `json.dumps(obj, ensure_ascii=False, separators=(',', ':'))`:
 //!   * no spaces after `:` or `,`
 //!   * non-ASCII characters emitted literally (UTF-8), not `\uXXXX`-escaped
 //!   * object key order is insertion order (we use a `Vec` of pairs)

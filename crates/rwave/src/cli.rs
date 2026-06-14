@@ -3,12 +3,11 @@
 
 //! Command-line interface: argument model and a small hand-rolled parser.
 //!
-//! The flag surface mirrors `vcd_analyzer.py` exactly (global `--json`,
-//! `--limit`, `--verbose`, `--version`; per-command `--begin`, `--end`,
-//! `--filter`, `--at`, `--condition`, `--show`, `--changed`). `--json`,
-//! `--limit`, and `--verbose` may appear either before or after the
-//! subcommand. We avoid a third-party arg parser to keep the static binary
-//! small and the error text under our control.
+//! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
+//! per-command flags are `--begin`, `--end`, `--filter`, `--at`, `--condition`,
+//! `--show`, `--changed`. `--json`, `--limit`, and `--verbose` may appear
+//! either before or after the subcommand. We avoid a third-party arg parser to
+//! keep the static binary small and the error text under our control.
 
 /// Default result limit when neither `--limit` nor `--verbose` is given.
 pub const DEFAULT_LIMIT: usize = 200;

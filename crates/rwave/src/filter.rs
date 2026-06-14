@@ -1,7 +1,7 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! Filter pattern matching, mirroring `vcd_analyzer.py`.
+//! Filter pattern matching.
 //!
 //! Patterns are comma-separated. A pattern with no `*`/`?` is a
 //! case-insensitive **substring** match. A pattern containing `*` or `?` is a
