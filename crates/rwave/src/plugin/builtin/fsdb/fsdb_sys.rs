@@ -23,7 +23,9 @@ use std::sync::OnceLock;
 
 use libloading::Library;
 
-use super::diag::bridge_err;
+use super::ERR_PREFIX;
+use crate::plugin::builtin::diag::bridge_err;
+use crate::plugin::builtin::self_path::self_dir;
 
 /// All NPI FSDB handles (file/scope/sig/sigdb/vct/iter) are opaque `void*`.
 pub type NpiHandle = *mut c_void;
@@ -153,13 +155,13 @@ fn load_npi_once() -> Result<LibNpi, String> {
     let _silence = StdioSilence::new();
 
     let lib = unsafe { Library::new(&path) }.map_err(|e| {
-        bridge_err(format!("failed to load libNPI.so from {}: {}", path.display(), e))
+        bridge_err(ERR_PREFIX, format!("failed to load libNPI.so from {}: {}", path.display(), e))
     })?;
 
     macro_rules! sym {
         ($lib:expr, $mangled:expr, $sig:ty) => {{
             let s: libloading::Symbol<$sig> = unsafe { $lib.get($mangled) }.map_err(|e| {
-                bridge_err(format!(
+                bridge_err(ERR_PREFIX, format!(
                     "missing NPI symbol {}: {}",
                     String::from_utf8_lossy($mangled),
                     e
@@ -264,7 +266,7 @@ fn locate_npi() -> Result<PathBuf, String> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(bridge_err(format!(
+        return Err(bridge_err(ERR_PREFIX, format!(
             "RWAVE_FSDB_LIB={} does not exist",
             path.display()
         )));
@@ -279,48 +281,6 @@ fn locate_npi() -> Result<PathBuf, String> {
 }
 
 const NPI_FILENAME: &str = "libNPI.so";
-
-/// Address marker for dladdr to resolve back to this cdylib.
-fn self_marker() {}
-
-fn self_dir() -> Option<PathBuf> {
-    self_path()?.parent().map(|d| d.to_path_buf())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn self_path() -> Option<PathBuf> {
-    #[repr(C)]
-    struct DlInfo {
-        dli_fname: *const c_char,
-        dli_fbase: *mut c_void,
-        dli_sname: *const c_char,
-        dli_saddr: *mut c_void,
-    }
-    unsafe extern "C" {
-        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
-    }
-
-    let marker: *const c_void = self_marker as *const () as *const c_void;
-    let mut info = DlInfo {
-        dli_fname: ptr::null(),
-        dli_fbase: ptr::null_mut(),
-        dli_sname: ptr::null(),
-        dli_saddr: ptr::null_mut(),
-    };
-    let rc = unsafe { dladdr(marker, &mut info) };
-    if rc == 0 || info.dli_fname.is_null() {
-        return None;
-    }
-    let s = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }
-        .to_str()
-        .ok()?;
-    Some(PathBuf::from(s))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn self_path() -> Option<PathBuf> {
-    None
-}
 
 /// RAII guard that redirects fd 1 & 2 to `/dev/null` for its lifetime, then
 /// restores them on drop. Used to swallow NPI's `npi_init` banner / license

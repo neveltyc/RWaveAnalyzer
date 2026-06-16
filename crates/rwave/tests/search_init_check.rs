@@ -1,5 +1,5 @@
 // Regression tests for the search interval/segment-mode init-check at
-// end-of-stream (commands.rs).
+// end-of-stream (commands/search.rs).
 //
 // Two cases:
 //   1. Condition holds throughout `[--begin, --end]` and there are no events

@@ -24,6 +24,18 @@
 
 use crate::plugin::ffi::RwaveBackend;
 
+// Helpers shared by the built-in backends, compiled whenever either backend is.
+#[cfg(any(
+    all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),
+))]
+pub mod diag;
+#[cfg(any(
+    all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),
+))]
+pub mod self_path;
+
 #[cfg(all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
 pub mod wlf;
 #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]

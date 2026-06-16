@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+No user-facing changes — internal maintainability cleanup only; CLI surface and
+output are unchanged (the byte-for-byte batch/single-command tests still pass).
+
+### Internal
+- Split the ~2,300-line `commands.rs` into a `commands/` module: one file per
+  subcommand (`info`, `list`, `dump`, `snapshot`, `compare`, `summary`,
+  `search`), a shared `common` helpers module, and the dispatch in `mod`. Pure
+  code movement — command bodies are byte-for-byte unchanged.
+- Deduplicated the built-in WLF/FSDB backends: the identical error-string
+  helpers were merged into `plugin/builtin/diag.rs` (the `bridge_err` prefix is
+  now a parameter), and the identical self-locating `dladdr` /
+  `GetModuleHandleEx` logic into `plugin/builtin/self_path.rs`. Removed an
+  unused `parent_dir` helper.
+
+### Fixed
+- De-flaked the `batch_fatal_exit_codes` integration test: it now tolerates the
+  expected `BrokenPipe` from writing stdin to an rwave that has already exited on
+  a fatal or usage error. This surfaced as an intermittent CI failure under the
+  `--release` test build, where the child exits fast enough to win the race.
+
 ## [0.1.2] — 2026-06-15
 
 A batch-mode point release: load a waveform **once** and run many queries

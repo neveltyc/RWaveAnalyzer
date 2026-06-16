@@ -1,4 +1,4 @@
-// Integration tests for `--batch` mode (commands.rs / cli.rs / batch.rs).
+// Integration tests for `--batch` mode (commands/ / cli.rs / batch.rs).
 //
 // These spawn the built binary and drive commands on stdin, mirroring how a
 // script or agent would use batch mode. The central guarantee under test is
@@ -59,12 +59,18 @@ fn run(args: &[&str], stdin_data: &str) -> (String, i32) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rwave");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin_data.as_bytes())
-        .expect("write stdin");
+    // A fatal or usage error makes rwave exit before it drains stdin (e.g.
+    // `--batch info` bails immediately as a usage error, an unloadable file is
+    // fatal). The BrokenPipe our write then sees is expected — we only need the
+    // child's output and exit code — so don't treat it as a test failure. In
+    // release builds the child exits fast enough that this race is reliable.
+    let mut stdin = child.stdin.take().unwrap();
+    match stdin.write_all(stdin_data.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("write stdin: {e:?}"),
+    }
+    drop(stdin);
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),

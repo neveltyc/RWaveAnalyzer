@@ -2,7 +2,8 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
-use super::diag::{bridge_err, to_cstring};
+use super::ERR_PREFIX;
+use crate::plugin::builtin::diag::{bridge_err, to_cstring};
 use super::fsdb_sys::{
     file_prop, npi, sig_prop, val_fmt, LibNpi, NpiFsdbValue, NpiHandle,
 };
@@ -43,7 +44,7 @@ impl FsdbBackend {
 
         let session = unsafe { (n.fsdb_open)(path_c.as_ptr()) };
         if session.is_null() {
-            return Err(bridge_err(format!(
+            return Err(bridge_err(ERR_PREFIX, format!(
                 "npi_fsdb_open returned NULL for {path} \
                  (check the Verdi-Ultra license, RWAVE_FSDB_LIB, and that \
                  the Verdi environment is sourced)"
