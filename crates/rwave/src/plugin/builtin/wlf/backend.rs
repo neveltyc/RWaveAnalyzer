@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::ffi::{c_int, c_uint, c_void, CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::diag::{bridge_err, mentor_diag, to_cstring};
+use super::ERR_PREFIX;
+use crate::plugin::builtin::diag::{bridge_err, mentor_diag, to_cstring};
 use super::wlf_sys::{
     callback_request, callback_response, libwlf, prop, radix, sel, type_prop, WlfFileInfo,
 };
@@ -73,7 +74,7 @@ impl WlfBackend {
         // returns NULL on failure (no UB on missing licence etc).
         let file_id = unsafe { (lib.wlf_file_open)(path_c.as_ptr(), logical_c.as_ptr()) };
         if file_id.is_null() {
-            return Err(bridge_err(format!("wlfFileOpen returned NULL for {path}")));
+            return Err(bridge_err(ERR_PREFIX, format!("wlfFileOpen returned NULL for {path}")));
         }
 
         // File-level metadata.
@@ -86,7 +87,7 @@ impl WlfBackend {
             let msg = mentor_diag(diag_p, "wlfFileInfo failed");
             // SAFETY: close the file we just opened to avoid the leak.
             unsafe { (lib.wlf_file_close)(file_id) };
-            return Err(bridge_err(format!("wlfFileInfo rc={rc}: {msg}")));
+            return Err(bridge_err(ERR_PREFIX, format!("wlfFileInfo rc={rc}: {msg}")));
         }
 
         let mut resolution: c_int = 0;
@@ -258,7 +259,7 @@ impl WlfBackend {
         // SAFETY: wlfPackCreate has no preconditions; NULL on failure.
         let pack = unsafe { (lib.wlf_pack_create)() };
         if pack.is_null() {
-            return Err(bridge_err("wlfPackCreate returned NULL"));
+            return Err(bridge_err(ERR_PREFIX, "wlfPackCreate returned NULL"));
         }
 
         // Shared scan state. Heap-allocated so its address is stable
@@ -287,7 +288,7 @@ impl WlfBackend {
                 // still owned by libwlf (file not closed yet).
                 let val_id = unsafe { (lib.wlf_value_create)(sym) };
                 if val_id.is_null() {
-                    return Err(bridge_err(format!(
+                    return Err(bridge_err(ERR_PREFIX, format!(
                         "wlfValueCreate returned NULL for sid {sid}"
                     )));
                 }
@@ -321,7 +322,7 @@ impl WlfBackend {
                 if rc != 0 {
                     // SAFETY: val_id was created by wlfValueCreate.
                     unsafe { (lib.wlf_value_destroy)(val_id) };
-                    return Err(bridge_err(format!(
+                    return Err(bridge_err(ERR_PREFIX, format!(
                         "wlfAppendSignalEventCB rc={rc} for sid {sid}"
                     )));
                 }
@@ -363,7 +364,7 @@ impl WlfBackend {
                 // SAFETY: file_id valid; diag returns a libwlf-owned string.
                 let diag_p = unsafe { (lib.wlf_file_diag)(self.file_id) };
                 let msg = mentor_diag(diag_p, "wlfReadDataOverRange failed");
-                return Err(bridge_err(format!(
+                return Err(bridge_err(ERR_PREFIX, format!(
                     "wlfReadDataOverRange rc={rc}: {msg}"
                 )));
             }

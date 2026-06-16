@@ -1,25 +1,28 @@
-//! Error-string helpers shared by [`crate::wlf_sys`] and
-//! [`crate::backend`].
+// Copyright (c) 2026 neveltyc
+// released under the MIT License (see LICENSE)
+
+//! Error-string helpers shared by the built-in WLF and FSDB backends.
 //!
-//! Every error path eventually surfaces a `String` that the ABI layer
-//! converts to a heap `CString` and hands to rwave via the vtable's
-//! `err_out` mechanism. We keep the strings short, prefixed
-//! `rwave-wlf:` so they're identifiable in mixed logs, and reach into
-//! Mentor's own `wlfFileDiag` when relevant.
+//! Every error path eventually surfaces a `String` that the ABI layer converts
+//! to a heap `CString` and hands to rwave via the vtable's `err_out` mechanism.
+//! We keep the strings short and prefixed (`rwave-wlf:` / `rwave-fsdb:`, each
+//! backend supplies its own prefix via `ERR_PREFIX`) so they're identifiable in
+//! mixed logs, and reach into the vendor library's own diagnostic when relevant.
 
 use std::ffi::{c_char, CStr, CString};
 
-/// Wrap a fallback message with `rwave-wlf:` prefix.
-pub fn bridge_err(msg: impl AsRef<str>) -> String {
-    format!("rwave-wlf: {}", msg.as_ref())
+/// Wrap a fallback message with a backend-specific `prefix` (e.g. `rwave-wlf`).
+pub fn bridge_err(prefix: &str, msg: impl AsRef<str>) -> String {
+    format!("{}: {}", prefix, msg.as_ref())
 }
 
-/// Read a Mentor diagnostic pointer into a String, or fall back if NULL.
+/// Read a vendor diagnostic pointer into a String, or fall back if NULL.
 pub fn mentor_diag(p: *const c_char, fallback: &str) -> String {
     if p.is_null() {
         return fallback.to_string();
     }
-    // SAFETY: caller asserts pointer is a NUL-terminated string owned by libwlf.
+    // SAFETY: caller asserts pointer is a NUL-terminated string owned by the
+    // vendor library.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy();
     if s.is_empty() {
         fallback.to_string()
@@ -28,8 +31,8 @@ pub fn mentor_diag(p: *const c_char, fallback: &str) -> String {
     }
 }
 
-/// Convert a Rust string to an owned `CString`, replacing interior NULs
-/// with `?` so the conversion never fails.
+/// Convert a Rust string to an owned `CString`, replacing interior NULs with
+/// `?` so the conversion never fails.
 pub fn to_cstring(s: impl AsRef<str>) -> CString {
     let bytes: Vec<u8> = s
         .as_ref()
@@ -46,10 +49,10 @@ mod tests {
 
     #[test]
     fn bridge_err_adds_prefix() {
-        assert_eq!(bridge_err("oops"), "rwave-wlf: oops");
+        assert_eq!(bridge_err("rwave-wlf", "oops"), "rwave-wlf: oops");
         assert_eq!(
-            bridge_err(format!("rc={}", 7)),
-            "rwave-wlf: rc=7"
+            bridge_err("rwave-fsdb", format!("rc={}", 7)),
+            "rwave-fsdb: rc=7"
         );
     }
 

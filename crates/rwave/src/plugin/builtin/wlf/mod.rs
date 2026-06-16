@@ -18,7 +18,6 @@
 #![allow(clippy::missing_safety_doc)] // SAFETY notes are inline at each call
 
 mod backend;
-mod diag;
 mod wlf_sys;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -28,6 +27,10 @@ use backend::WlfBackend;
 use crate::plugin::ffi::{
     file_format, RwaveBackend, RwaveEmit, RwaveSession, RwaveVarDecl, RWAVE_BACKEND_ABI_VERSION,
 };
+
+/// Prefix for this backend's `bridge_err` diagnostics (see
+/// [`crate::plugin::builtin::diag`]); read by `backend` and `wlf_sys`.
+const ERR_PREFIX: &str = "rwave-wlf";
 
 // `name` equals the file extension this backend claims; `version` tracks
 // rwave's own version, since the backend now ships inside the binary.

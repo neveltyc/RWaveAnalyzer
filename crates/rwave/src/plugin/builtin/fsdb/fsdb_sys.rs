@@ -23,7 +23,8 @@ use std::sync::OnceLock;
 
 use libloading::Library;
 
-use super::diag::bridge_err;
+use super::ERR_PREFIX;
+use crate::plugin::builtin::diag::bridge_err;
 
 /// All NPI FSDB handles (file/scope/sig/sigdb/vct/iter) are opaque `void*`.
 pub type NpiHandle = *mut c_void;
@@ -153,13 +154,13 @@ fn load_npi_once() -> Result<LibNpi, String> {
     let _silence = StdioSilence::new();
 
     let lib = unsafe { Library::new(&path) }.map_err(|e| {
-        bridge_err(format!("failed to load libNPI.so from {}: {}", path.display(), e))
+        bridge_err(ERR_PREFIX, format!("failed to load libNPI.so from {}: {}", path.display(), e))
     })?;
 
     macro_rules! sym {
         ($lib:expr, $mangled:expr, $sig:ty) => {{
             let s: libloading::Symbol<$sig> = unsafe { $lib.get($mangled) }.map_err(|e| {
-                bridge_err(format!(
+                bridge_err(ERR_PREFIX, format!(
                     "missing NPI symbol {}: {}",
                     String::from_utf8_lossy($mangled),
                     e
@@ -264,7 +265,7 @@ fn locate_npi() -> Result<PathBuf, String> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(bridge_err(format!(
+        return Err(bridge_err(ERR_PREFIX, format!(
             "RWAVE_FSDB_LIB={} does not exist",
             path.display()
         )));

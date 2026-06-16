@@ -15,7 +15,8 @@ use std::sync::OnceLock;
 
 use libloading::Library;
 
-use super::diag::bridge_err;
+use super::ERR_PREFIX;
+use crate::plugin::builtin::diag::bridge_err;
 
 /// Mirror of `WlfFileInfo` from `wlf_api.h`. Field order, types, and
 /// natural alignment must match the SysV x86_64 / MSVC x64 layout the
@@ -238,13 +239,13 @@ fn load_libwlf_once() -> Result<LibWlf, String> {
     // SAFETY: dlopen is intrinsically unsafe (runs the library's ctor);
     // we trust Mentor's binary not to misbehave at load.
     let lib = unsafe { Library::new(&path) }.map_err(|e| {
-        bridge_err(format!("failed to load libwlf from {}: {}", path.display(), e))
+        bridge_err(ERR_PREFIX, format!("failed to load libwlf from {}: {}", path.display(), e))
     })?;
 
     macro_rules! sym {
         ($lib:expr, $name:expr, $sig:ty) => {{
             let s: libloading::Symbol<$sig> = unsafe { $lib.get($name) }
-                .map_err(|e| bridge_err(format!("missing symbol {}: {}", String::from_utf8_lossy($name), e)))?;
+                .map_err(|e| bridge_err(ERR_PREFIX, format!("missing symbol {}: {}", String::from_utf8_lossy($name), e)))?;
             *s
         }};
     }
@@ -382,7 +383,7 @@ fn load_libwlf_once() -> Result<LibWlf, String> {
     // per process before any wlfFileOpen.
     let rc = unsafe { wlf_init() };
     if rc != 0 {
-        return Err(bridge_err(format!("wlfInit returned {rc}")));
+        return Err(bridge_err(ERR_PREFIX, format!("wlfInit returned {rc}")));
     }
 
     Ok(LibWlf {
@@ -420,7 +421,7 @@ fn locate_libwlf() -> Result<PathBuf, String> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(bridge_err(format!(
+        return Err(bridge_err(ERR_PREFIX, format!(
             "RWAVE_WLF_LIB={} does not exist or is not a file",
             path.display()
         )));
