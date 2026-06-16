@@ -10,13 +10,14 @@
 //! 3. platform loader default (`LD_LIBRARY_PATH` / `PATH`)
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use libloading::Library;
 
 use super::ERR_PREFIX;
 use crate::plugin::builtin::diag::bridge_err;
+use crate::plugin::builtin::self_path::self_dir;
 
 /// Mirror of `WlfFileInfo` from `wlf_api.h`. Field order, types, and
 /// natural alignment must match the SysV x86_64 / MSVC x64 layout the
@@ -447,92 +448,6 @@ fn locate_libwlf() -> Result<PathBuf, String> {
     Ok(PathBuf::from(default_libname()))
 }
 
-// ---------------------------------------------------------------------------
-// "Where am I?" — locate our own module's on-disk path so we can find
-// libwlf as a sibling (next to the rwave binary, or the plugin cdylib).
-// ---------------------------------------------------------------------------
-
-/// Marker function whose address dladdr / GetModuleHandleEx resolves
-/// back to this cdylib's file path. Has to be defined inside this
-/// crate; the body is intentionally trivial.
-fn self_marker() {}
-
-fn self_dir() -> Option<PathBuf> {
-    self_path()?.parent().map(|d| d.to_path_buf())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn self_path() -> Option<PathBuf> {
-    #[repr(C)]
-    struct DlInfo {
-        dli_fname: *const c_char,
-        dli_fbase: *mut c_void,
-        dli_sname: *const c_char,
-        dli_saddr: *mut c_void,
-    }
-    unsafe extern "C" {
-        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
-    }
-
-    let marker: *const c_void = self_marker as *const () as *const c_void;
-    let mut info = DlInfo {
-        dli_fname: std::ptr::null(),
-        dli_fbase: std::ptr::null_mut(),
-        dli_sname: std::ptr::null(),
-        dli_saddr: std::ptr::null_mut(),
-    };
-    // SAFETY: dladdr is a standard libdl entry point; marker is a valid
-    // function pointer; info is a valid writable struct.
-    let rc = unsafe { dladdr(marker, &mut info) };
-    if rc == 0 || info.dli_fname.is_null() {
-        return None;
-    }
-    let s = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }
-        .to_str()
-        .ok()?;
-    Some(PathBuf::from(s))
-}
-
-#[cfg(target_os = "windows")]
-fn self_path() -> Option<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-
-    type HModule = *mut c_void;
-    unsafe extern "system" {
-        fn GetModuleHandleExW(flags: u32, addr: *const u16, h_out: *mut HModule) -> i32;
-        fn GetModuleFileNameW(h: HModule, buf: *mut u16, size: u32) -> u32;
-    }
-    const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x4;
-
-    let marker: *const c_void = self_marker as *const () as *const c_void;
-    let mut h: HModule = std::ptr::null_mut();
-    // SAFETY: addr is a valid function pointer; h is a writable handle slot.
-    let ok = unsafe {
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-            marker as *const u16,
-            &mut h,
-        )
-    };
-    if ok == 0 || h.is_null() {
-        return None;
-    }
-    let mut buf = vec![0u16; 32768];
-    // SAFETY: h obtained above; buf is a writable WCHAR array.
-    let n = unsafe { GetModuleFileNameW(h, buf.as_mut_ptr(), buf.len() as u32) };
-    if n == 0 {
-        return None;
-    }
-    let os_str = OsString::from_wide(&buf[..n as usize]);
-    Some(PathBuf::from(os_str))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn self_path() -> Option<PathBuf> {
-    None
-}
-
 #[cfg(target_os = "windows")]
 fn default_libname() -> &'static str {
     "libwlf.dll"
@@ -541,13 +456,6 @@ fn default_libname() -> &'static str {
 #[cfg(not(target_os = "windows"))]
 fn default_libname() -> &'static str {
     "libwlf.so"
-}
-
-/// Convenience: dirname of an arbitrary path. Used by the README's
-/// example setup; not yet wired into discovery.
-#[allow(dead_code)]
-pub fn parent_dir(p: &Path) -> Option<&Path> {
-    p.parent()
 }
 
 #[cfg(test)]
