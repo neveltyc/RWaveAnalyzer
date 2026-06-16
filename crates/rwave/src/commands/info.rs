@@ -4,6 +4,10 @@
 //! `info` command: file metadata — size, timescale, date/tool, signal and
 //! reference counts, per-type counts, time range, scopes, and comments.
 
+use crate::cli::Args;
+use crate::format::fmt_time;
+use crate::json::{Json, Obj};
+use crate::model::Wave;
 use super::common::*;
 
 /// Gathered file metadata, shared by the JSON and text renderers of `info`.

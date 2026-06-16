@@ -3,6 +3,11 @@
 
 //! `compare` command: signals whose value differs between two instants.
 
+use std::collections::BTreeSet;
+use crate::cli::Args;
+use crate::format::{fmt_time, parse_time, TimeParseError};
+use crate::json::{Json, Obj};
+use crate::model::{Sid, Wave};
 use super::common::*;
 
 /// One `compare` diff row (values already formatted).

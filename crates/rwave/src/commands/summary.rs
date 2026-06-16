@@ -4,6 +4,10 @@
 //! `summary` command: per-signal activity stats (changes, edges, first/last,
 //! unique values) over a window, grouped active/static/undefined.
 
+use crate::cli::Args;
+use crate::format::{fmt_time, fmt_val};
+use crate::json::{Json, Obj};
+use crate::model::{Sid, Wave};
 use super::common::*;
 
 struct SummaryRow {

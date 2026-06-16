@@ -3,6 +3,9 @@
 
 //! `list` command: signal alias paths with width/type, filtered and sorted.
 
+use crate::cli::Args;
+use crate::json::{Json, Obj};
+use crate::model::{Sid, Wave};
 use super::common::*;
 
 /// One `list` row: an alias path with its signal's width/type and domain id.

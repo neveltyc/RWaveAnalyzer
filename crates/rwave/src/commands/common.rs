@@ -4,16 +4,15 @@
 //! Helpers shared across the per-command modules: limit/clip math, the JSON
 //! count fields, signal selection, value/justify formatting, the streaming
 //! threshold, and the `opt_time`/`parse_window` helpers used by more than one
-//! command. Also re-exports the domain imports each command module needs, so a
-//! module can pull them all in with a single `use super::common::*;`.
+//! command. Command modules pull these in with `use super::common::*;` and
+//! import the domain types they need (`Json`, `Wave`, …) directly from the
+//! crate.
 
-pub(super) use std::collections::{BTreeMap, BTreeSet};
-pub(super) use crate::cli::{Args, DEFAULT_LIMIT};
-pub(super) use crate::condition::{self, Op, ParsedCondition};
-pub(super) use crate::filter::Filters;
-pub(super) use crate::format::{fmt_time, fmt_val, parse_time, TimeParseError, ValueKind};
-pub(super) use crate::json::{Json, Obj};
-pub(super) use crate::model::{OwnedValue, Sid, Wave};
+use crate::cli::{Args, DEFAULT_LIMIT};
+use crate::filter::Filters;
+use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
+use crate::json::Json;
+use crate::model::{OwnedValue, Sid, Wave};
 
 /// Above this many selected signals, per-signal-independent commands
 /// (snapshot, compare, summary) decode in memory-bounded batches rather than

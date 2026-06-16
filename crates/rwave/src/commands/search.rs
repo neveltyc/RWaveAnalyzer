@@ -5,6 +5,13 @@
 //! changes while conditions hold), interval mode (spans where conditions
 //! hold), and segment mode (intervals split by `--show` value changes).
 
+use std::collections::{BTreeMap, BTreeSet};
+use crate::cli::Args;
+use crate::condition::{self, Op, ParsedCondition};
+use crate::filter::Filters;
+use crate::format::{fmt_time, fmt_val, parse_time, TimeParseError, ValueKind};
+use crate::json::{Json, Obj};
+use crate::model::{Sid, Wave};
 use super::common::*;
 
 /// A resolved condition: a parsed term bound to a specific signal id.

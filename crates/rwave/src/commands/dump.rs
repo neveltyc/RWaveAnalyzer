@@ -3,6 +3,10 @@
 
 //! `dump` command: value-change events within a time window.
 
+use crate::cli::Args;
+use crate::format::{fmt_time, fmt_val};
+use crate::json::{Json, Obj};
+use crate::model::Wave;
 use super::common::*;
 
 /// One collected `dump` event with its value already formatted. Shared by the
