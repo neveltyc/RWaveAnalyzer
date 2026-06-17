@@ -8,11 +8,12 @@
 //! import the domain types they need (`Json`, `Wave`, …) directly from the
 //! crate.
 
+use crate::backend::RawValue;
 use crate::cli::{Args, DEFAULT_LIMIT};
 use crate::filter::Filters;
 use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::Json;
-use crate::model::{OwnedValue, Sid, Wave};
+use crate::model::{Sid, Wave};
 
 /// Above this many selected signals, per-signal-independent commands
 /// (snapshot, compare, summary) decode in memory-bounded batches rather than
@@ -120,13 +121,15 @@ pub(super) fn print_json(j: &Json) {
     println!("{}", j.to_compact_string());
 }
 
-/// Format an `OwnedValue` for display using the signal's kind/width.
-pub(super) fn fmt_owned(v: &OwnedValue, kind: ValueKind, width: u32) -> String {
+/// Format a decoded [`RawValue`] for display using the signal's kind/width.
+/// Events render as `triggered`; reals/strings print verbatim; logic vectors
+/// go through `fmt_val` with the signal's `kind`.
+pub(super) fn fmt_value(v: &RawValue, kind: ValueKind, width: u32) -> String {
     match v {
-        OwnedValue::Event => "triggered".to_string(),
-        OwnedValue::Real(s) => fmt_val(s, ValueKind::Real, width),
-        OwnedValue::Str(s) => fmt_val(s, ValueKind::Str, width),
-        OwnedValue::Bits(s) => fmt_val(s, kind, width),
+        RawValue::Event => "triggered".to_string(),
+        RawValue::Real(_) => fmt_val(v.raw_str().as_ref(), ValueKind::Real, width),
+        RawValue::Str(_) => fmt_val(v.raw_str().as_ref(), ValueKind::Str, width),
+        RawValue::Bits(_) => fmt_val(v.raw_str().as_ref(), kind, width),
     }
 }
 

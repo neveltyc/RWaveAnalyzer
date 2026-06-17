@@ -65,14 +65,22 @@ fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
     for sid in &union {
         let va = sa.get(sid);
         let vb = sb.get(sid);
-        if va != vb {
+        // Compare by canonical raw string (a signal keeps one kind across both
+        // instants), matching the analyzer's pre-format value equality: present
+        // vs absent differs; two values that render identically are unchanged.
+        let differs = match (va, vb) {
+            (Some(a), Some(b)) => a.raw_str() != b.raw_str(),
+            (None, None) => false,
+            _ => true,
+        };
+        if differs {
             let info = wave.signal(*sid);
             let at_t1 = match va {
-                Some(v) => fmt_owned(v, info.kind, info.width),
+                Some(v) => fmt_value(v, info.kind, info.width),
                 None => "(undef)".to_string(),
             };
             let at_t2 = match vb {
-                Some(v) => fmt_owned(v, info.kind, info.width),
+                Some(v) => fmt_value(v, info.kind, info.width),
                 None => "(undef)".to_string(),
             };
             diffs.push(Diff {
