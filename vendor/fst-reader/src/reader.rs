@@ -238,9 +238,11 @@ impl<R: BufRead + Seek> FstReader<R> {
         // those top handles (panic: index == len). Size the mask to cover the
         // largest index that can actually be set/queried: the max over the
         // signal count, the declared max var-id, and the highest handle present
-        // in the include filter. The reading side additionally guards its
-        // lookups (see `is_set` call below). (Local patch over fst-reader
-        // 0.16.6, which crashes on these files.)
+        // in the include filter. NOTE: `BitMask::is_set` indexes its backing
+        // store *without* bounds-checking, so this sizing IS the safety
+        // mechanism — there is no separate guard at the lookup site. Every
+        // handle index later passed to `is_set` must stay within `mask_size`.
+        // (Local patch over fst-reader 0.16.6, which crashes on these files.)
         let mut mask_size = signal_count.max(self.meta.header.max_var_id_code as usize);
         if let Some(signals) = &filter.include {
             for sig in signals {

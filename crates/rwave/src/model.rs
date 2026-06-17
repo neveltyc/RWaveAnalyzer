@@ -63,77 +63,6 @@ pub struct SignalInfo {
     backend_sid: BackendSid,
 }
 
-/// A decoded value as seen by the command layer. Owns its payload, so replay
-/// never holds a backend borrow. This mirrors [`RawValue`] but lives in the
-/// domain layer; the two are converted at the model boundary.
-#[derive(Debug, Clone)]
-pub enum ValueRef {
-    Bits(String),
-    Real(f64),
-    Str(String),
-    Event,
-}
-
-impl ValueRef {
-    /// The raw string used by [`crate::format::fmt_val`] and for comparisons.
-    pub fn raw(&self) -> String {
-        match self {
-            ValueRef::Bits(s) => s.clone(),
-            ValueRef::Real(r) => fmt_real(*r),
-            ValueRef::Str(s) => s.clone(),
-            ValueRef::Event => String::new(),
-        }
-    }
-
-    fn from_raw(v: &RawValue) -> ValueRef {
-        match v {
-            RawValue::Bits(s) => ValueRef::Bits(s.as_str().to_string()),
-            RawValue::Real(r) => ValueRef::Real(*r),
-            RawValue::Str(s) => ValueRef::Str(s.clone()),
-            RawValue::Event => ValueRef::Event,
-        }
-    }
-}
-
-/// An owned value used in snapshots and cross-time comparisons. Two values are
-/// equal iff their canonical raw strings are equal, matching the analyzer's
-/// pre-format comparison semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnedValue {
-    Bits(String),
-    Real(String),
-    Str(String),
-    Event,
-}
-
-impl OwnedValue {
-    pub fn raw(&self) -> &str {
-        match self {
-            OwnedValue::Bits(s) => s,
-            OwnedValue::Real(s) => s,
-            OwnedValue::Str(s) => s,
-            OwnedValue::Event => "",
-        }
-    }
-}
-
-impl From<&ValueRef> for OwnedValue {
-    fn from(v: &ValueRef) -> Self {
-        match v {
-            ValueRef::Bits(s) => OwnedValue::Bits(s.clone()),
-            ValueRef::Real(r) => OwnedValue::Real(fmt_real(*r)),
-            ValueRef::Str(s) => OwnedValue::Str(s.clone()),
-            ValueRef::Event => OwnedValue::Event,
-        }
-    }
-}
-
-/// Render a real value compactly and round-trippably (Rust's default float
-/// formatting), matching how reals are carried as their literal payload.
-fn fmt_real(r: f64) -> String {
-    format!("{r}")
-}
-
 /// The loaded waveform: a backend plus the derived signal table and a cache of
 /// decoded traces keyed by domain [`Sid`].
 pub struct Wave {
@@ -485,7 +414,7 @@ impl Wave {
     /// without a cached trace is skipped.
     ///
     /// Implemented as a binary-min-heap k-way merge: `O(n log k)`.
-    pub fn for_each_event<F: FnMut(i64, Sid, ValueRef)>(
+    pub fn for_each_event<F: FnMut(i64, Sid, &RawValue)>(
         &self,
         t0: i64,
         t1: Option<i64>,
@@ -536,7 +465,7 @@ impl Wave {
 
             // Emit if within the lower bound.
             if tick >= t0 {
-                f(tick, sid, ValueRef::from_raw(&tr.values[entry.pos]));
+                f(tick, sid, &tr.values[entry.pos]);
             }
 
             // Advance this signal's cursor and re-heap.
@@ -600,7 +529,7 @@ impl Wave {
                     tick: tr.times[i],
                     sid,
                     decl_order: dord,
-                    value: owned_from_raw(&tr.values[i]),
+                    value: tr.values[i].clone(),
                 };
                 if limit == 0 {
                     all.push(ev);
@@ -633,15 +562,15 @@ impl Wave {
 
     /// Last-known values at or before `t_at` for the given signals (or all).
     /// Returns only signals that have a known value by `t_at`.
-    pub fn snapshot(&self, t_at: i64, sids: Option<&[Sid]>) -> HashMap<Sid, OwnedValue> {
+    pub fn snapshot(&self, t_at: i64, sids: Option<&[Sid]>) -> HashMap<Sid, RawValue> {
         // A snapshot needs only the last change at-or-before t_at per signal,
         // which is a per-signal binary search — no global merge required. This
         // is both simpler and faster than replaying every event.
-        let mut state: HashMap<Sid, OwnedValue> = HashMap::new();
+        let mut state: HashMap<Sid, RawValue> = HashMap::new();
         self.for_selected(sids, |sid| {
             if let Some(tr) = self.trace(sid) {
                 if let Some(pos) = last_at_or_before(&tr.times, t_at) {
-                    state.insert(sid, owned_from_raw(&tr.values[pos]));
+                    state.insert(sid, tr.values[pos].clone());
                 }
             }
         });
@@ -654,16 +583,16 @@ impl Wave {
         ta: i64,
         tb: i64,
         sids: Option<&[Sid]>,
-    ) -> (HashMap<Sid, OwnedValue>, HashMap<Sid, OwnedValue>) {
-        let mut a: HashMap<Sid, OwnedValue> = HashMap::new();
-        let mut b: HashMap<Sid, OwnedValue> = HashMap::new();
+    ) -> (HashMap<Sid, RawValue>, HashMap<Sid, RawValue>) {
+        let mut a: HashMap<Sid, RawValue> = HashMap::new();
+        let mut b: HashMap<Sid, RawValue> = HashMap::new();
         self.for_selected(sids, |sid| {
             if let Some(tr) = self.trace(sid) {
                 if let Some(pos) = last_at_or_before(&tr.times, ta) {
-                    a.insert(sid, owned_from_raw(&tr.values[pos]));
+                    a.insert(sid, tr.values[pos].clone());
                 }
                 if let Some(pos) = last_at_or_before(&tr.times, tb) {
-                    b.insert(sid, owned_from_raw(&tr.values[pos]));
+                    b.insert(sid, tr.values[pos].clone());
                 }
             }
         });
@@ -679,11 +608,11 @@ impl Wave {
         t_at: i64,
         sids: Option<&[Sid]>,
         batch: usize,
-    ) -> HashMap<Sid, OwnedValue> {
-        let mut state: HashMap<Sid, OwnedValue> = HashMap::new();
+    ) -> HashMap<Sid, RawValue> {
+        let mut state: HashMap<Sid, RawValue> = HashMap::new();
         self.for_each_signal_batched(sids, batch, |sid, tr| {
             if let Some(pos) = last_at_or_before(&tr.times, t_at) {
-                state.insert(sid, owned_from_raw(&tr.values[pos]));
+                state.insert(sid, tr.values[pos].clone());
             }
         });
         state
@@ -696,15 +625,15 @@ impl Wave {
         tb: i64,
         sids: Option<&[Sid]>,
         batch: usize,
-    ) -> (HashMap<Sid, OwnedValue>, HashMap<Sid, OwnedValue>) {
-        let mut a: HashMap<Sid, OwnedValue> = HashMap::new();
-        let mut b: HashMap<Sid, OwnedValue> = HashMap::new();
+    ) -> (HashMap<Sid, RawValue>, HashMap<Sid, RawValue>) {
+        let mut a: HashMap<Sid, RawValue> = HashMap::new();
+        let mut b: HashMap<Sid, RawValue> = HashMap::new();
         self.for_each_signal_batched(sids, batch, |sid, tr| {
             if let Some(pos) = last_at_or_before(&tr.times, ta) {
-                a.insert(sid, owned_from_raw(&tr.values[pos]));
+                a.insert(sid, tr.values[pos].clone());
             }
             if let Some(pos) = last_at_or_before(&tr.times, tb) {
-                b.insert(sid, owned_from_raw(&tr.values[pos]));
+                b.insert(sid, tr.values[pos].clone());
             }
         });
         (a, b)
@@ -725,16 +654,6 @@ impl Wave {
                 }
             }
         }
-    }
-}
-
-/// Convert a borrowed [`RawValue`] to an [`OwnedValue`] (canonical strings).
-fn owned_from_raw(v: &RawValue) -> OwnedValue {
-    match v {
-        RawValue::Bits(s) => OwnedValue::Bits(s.as_str().to_string()),
-        RawValue::Real(r) => OwnedValue::Real(fmt_real(*r)),
-        RawValue::Str(s) => OwnedValue::Str(s.clone()),
-        RawValue::Event => OwnedValue::Event,
     }
 }
 
@@ -781,7 +700,7 @@ pub struct DumpEvent {
     pub tick: i64,
     pub sid: Sid,
     pub decl_order: usize,
-    pub value: OwnedValue,
+    pub value: RawValue,
 }
 
 /// Ascending order on (tick, declaration order). `true` if `a` precedes `b`.

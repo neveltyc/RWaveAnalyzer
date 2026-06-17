@@ -24,6 +24,8 @@
 //! binary search. The trait surface is therefore small and coarse-grained,
 //! which is exactly what keeps dynamic dispatch off the inner loop.
 
+use std::borrow::Cow;
+
 use crate::format::ValueKind;
 
 pub mod bitstr;
@@ -147,6 +149,26 @@ pub enum RawValue {
     Real(f64),
     Str(String),
     Event,
+}
+
+impl RawValue {
+    /// The canonical raw string used for value comparison and display.
+    ///
+    /// Borrows for `Bits`/`Str`/`Event` — no allocation, preserving
+    /// [`BitStr`]'s inline storage on the hot replay path — so the common case
+    /// of formatting a logic value costs nothing extra. Only `Real` allocates,
+    /// rendering the `f64` with Rust's shortest round-trip formatting (the form
+    /// reals are carried as throughout the tool). Two values compare equal iff
+    /// their `raw_str()`s are equal, which is the analyzer's pre-format value
+    /// equality (e.g. used by `compare`).
+    pub fn raw_str(&self) -> Cow<'_, str> {
+        match self {
+            RawValue::Bits(b) => Cow::Borrowed(b.as_str()),
+            RawValue::Real(r) => Cow::Owned(format!("{r}")),
+            RawValue::Str(s) => Cow::Borrowed(s.as_str()),
+            RawValue::Event => Cow::Borrowed(""),
+        }
+    }
 }
 
 /// The contract a parser front-end implements. Construction (opening a file) is

@@ -6,8 +6,29 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
-No user-facing changes — internal maintainability cleanup only; CLI surface and
-output are unchanged (the byte-for-byte batch/single-command tests still pass).
+## [0.1.3] — 2026-06-17
+
+### Fixed
+- `search --condition` on a real- or string-valued signal no longer matches by
+  sniffing the rendered value characters. A real valued `100.0` renders as
+  `"100"`, which the old heuristic read as the binary vector `100` (= 4) — so
+  `dac=4` spuriously matched and `dac=100` missed. Condition values are now
+  classified by the signal's declared kind; non-logic signals (real/string/
+  event) never satisfy a numeric or bit-pattern target.
+- De-flaked the `batch_fatal_exit_codes` integration test: it now tolerates the
+  expected `BrokenPipe` from writing stdin to an rwave that has already exited on
+  a fatal or usage error. This surfaced as an intermittent CI failure under the
+  `--release` test build, where the child exits fast enough to win the race.
+
+### Performance
+- Collapsed the three near-identical value enums (`RawValue`, `ValueRef`,
+  `OwnedValue`) into a single `RawValue`. Value-change replay
+  (`Wave::for_each_event`) now hands back a borrowed `&RawValue` instead of
+  allocating a fresh `String` per change, removing 1–2 heap allocations per
+  emitted change on the `dump`/`search` hot path (logic values keep `BitStr`'s
+  inline, no-alloc storage). `compare` keeps identical value-equality semantics
+  by comparing canonical raw strings; all output is byte-for-byte unchanged —
+  the verify-suite parity and byte-identical batch tests still pass.
 
 ### Internal
 - Split the ~2,300-line `commands.rs` into a `commands/` module: one file per
@@ -19,12 +40,11 @@ output are unchanged (the byte-for-byte batch/single-command tests still pass).
   now a parameter), and the identical self-locating `dladdr` /
   `GetModuleHandleEx` logic into `plugin/builtin/self_path.rs`. Removed an
   unused `parent_dir` helper.
-
-### Fixed
-- De-flaked the `batch_fatal_exit_codes` integration test: it now tolerates the
-  expected `BrokenPipe` from writing stdin to an rwave that has already exited on
-  a fatal or usage error. This surfaced as an intermittent CI failure under the
-  `--release` test build, where the child exits fast enough to win the race.
+- Documented two long-standing design intents to forestall future regressions:
+  the deliberate `< t0` (edge) vs `<= t0` (level) `--begin` boundary split
+  between `search` event and interval modes, and that the vendored `fst-reader`
+  include-mask sizing — not a guard in `is_set`, which indexes unchecked — is
+  what keeps sparse VCS-handle lookups in bounds.
 
 ## [0.1.2] — 2026-06-15
 

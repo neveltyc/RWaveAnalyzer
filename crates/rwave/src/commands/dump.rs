@@ -4,7 +4,7 @@
 //! `dump` command: value-change events within a time window.
 
 use crate::cli::Args;
-use crate::format::{fmt_time, fmt_val};
+use crate::format::fmt_time;
 use crate::json::{Json, Obj};
 use crate::model::Wave;
 use super::common::*;
@@ -47,7 +47,7 @@ fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), St
             rows.push(DumpRow {
                 tick: e.tick,
                 path: info.path.clone(),
-                value: fmt_val(e.value.raw(), info.kind, info.width),
+                value: fmt_value(&e.value, info.kind, info.width),
                 width: info.width,
                 type_str: info.type_str,
             });
@@ -64,11 +64,10 @@ fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), St
                 return;
             }
             let info = wave.signal(sid);
-            let raw = val.raw();
             rows.push(DumpRow {
                 tick: t,
                 path: info.path.clone(),
-                value: fmt_val(&raw, info.kind, info.width),
+                value: fmt_value(val, info.kind, info.width),
                 width: info.width,
                 type_str: info.type_str,
             });

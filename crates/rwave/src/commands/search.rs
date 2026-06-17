@@ -20,6 +20,9 @@ struct ResolvedCond {
     op: Op,
     target: condition::Target,
     width: u32,
+    /// Formatting class of the bound signal; decides whether the recorded value
+    /// is treated as a logic-bit string during matching (see `conditions_hold`).
+    kind: ValueKind,
     original: String,
     path: String,
     value_text: String,
@@ -156,6 +159,7 @@ fn resolve_conditions(wave: &Wave, text: &str) -> Result<Vec<ResolvedCond>, Stri
             op: c.op,
             target: c.target,
             width: info.width,
+            kind: info.kind,
             original: c.original,
             path: info.path.clone(),
             value_text: c.value_text,
@@ -169,26 +173,21 @@ fn resolve_conditions(wave: &Wave, text: &str) -> Result<Vec<ResolvedCond>, Stri
 fn conditions_hold(state: &BTreeMap<Sid, String>, conds: &[ResolvedCond]) -> bool {
     for c in conds {
         let raw = state.get(&c.sid).map(|s| s.as_str());
-        let bits = bits_of(raw);
+        // Classify the recorded value as a logic-bit string by the signal's
+        // declared `kind`, never by sniffing its characters. A real signal
+        // renders as decimal text (e.g. 100.0 -> "100"); treating that as a bit
+        // string made `dac=4` spuriously match (binary 100 == 4) and `dac=100`
+        // miss. Non-logic signals (real/string/event) carry `None` here and so
+        // never satisfy a numeric/bit target — only the literal-compare path.
+        let bits = match c.kind {
+            ValueKind::Bits => raw,
+            _ => None,
+        };
         if !condition::condition_match(bits, raw, c.op, &c.target, c.width) {
             return false;
         }
     }
     true
-}
-
-/// Treat a raw value as a logic-bit string only if it looks like one (digits or
-/// 9-state chars). Real/string raws return None (never bit-matched).
-fn bits_of(raw: Option<&str>) -> Option<&str> {
-    let r = raw?;
-    if !r.is_empty()
-        && r.chars()
-            .all(|c| matches!(c.to_ascii_lowercase(), '0' | '1' | 'x' | 'z' | 'h' | 'l' | 'u' | 'w' | '-'))
-    {
-        Some(r)
-    } else {
-        None
-    }
 }
 
 fn condition_label(conds: &[ResolvedCond]) -> String {
@@ -420,7 +419,7 @@ fn search_event_collect(
     // straightforward without fighting the borrow checker.
     let mut stream: Vec<(i64, Sid, String)> = Vec::new();
     wave.for_each_event(0, Some(t1), Some(sel), |t, sid, val| {
-        stream.push((t, sid, val.raw()));
+        stream.push((t, sid, val.raw_str().into_owned()));
     });
 
     let process_group =
@@ -448,6 +447,11 @@ fn search_event_collect(
         };
 
     'outer: for (t, sid, raw) in stream {
+        // Edge semantics: event mode reports value *changes* within [t0, t1], so
+        // a change landing exactly at t0 is inside the window and must be
+        // processed (it can fire an event). Only strictly-earlier changes form
+        // the baseline. This `< t0` deliberately differs from interval mode's
+        // `<= t0` (level semantics) below — see the note there; do not unify.
         if t < t0 {
             state.insert(sid, raw);
             continue;
@@ -604,7 +608,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
     // Buffer the stream (see note in event mode).
     let mut stream: Vec<(i64, Sid, String)> = Vec::new();
     wave.for_each_event(0, Some(t1), Some(sel), |t, sid, val| {
-        stream.push((t, sid, val.raw()));
+        stream.push((t, sid, val.raw_str().into_owned()));
     });
 
     let mut cur_t: Option<i64> = None;
@@ -631,6 +635,13 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
     }
 
     for (t, sid, raw) in stream {
+        // Level semantics: interval mode reports spans where the condition
+        // *holds*. The state at t0 includes any change landing exactly at t0 (a
+        // change takes effect at its own tick), so everything `<= t0` folds into
+        // the baseline and the interval is anchored at t0 by the init-check
+        // below. This `<= t0` deliberately differs from event mode's `< t0`
+        // (edge semantics): do NOT unify them — using `< t0` here would judge
+        // the t0 level from the pre-t0 state and miss a change exactly at t0.
         if t <= t0 {
             state.insert(sid, raw);
             continue;

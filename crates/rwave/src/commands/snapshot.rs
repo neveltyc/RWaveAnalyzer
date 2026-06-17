@@ -65,7 +65,7 @@ fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let mut rows: Vec<SnapRow> = Vec::new();
     for sid in &known {
         let info = wave.signal(*sid);
-        let v = fmt_owned(&state[sid], info.kind, info.width);
+        let v = fmt_value(&state[sid], info.kind, info.width);
         rows.push(SnapRow {
             path: info.path.clone(),
             value: Some(v),
