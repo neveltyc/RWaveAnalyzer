@@ -295,3 +295,39 @@ fn batch_global_defaults_apply_and_override() {
 
     let _ = std::fs::remove_file(&vcd);
 }
+
+#[test]
+fn batch_condition_default_inherited_and_overridden() {
+    // PRD §10: --condition is a repeatable default. A line with *any* of its own
+    // --condition replaces the whole default clause group; a line with none
+    // inherits the default group wholesale. Each result must stay byte-for-byte
+    // identical to the equivalent single `--json` command.
+    let vcd = std::env::temp_dir().join("rwave_batch_or_condition.vcd");
+    write_vcd(&vcd);
+    let file = vcd.to_str().unwrap();
+
+    // Default clause group on the --batch line is `valid=1`. Lines: (1) inherits
+    // it; (2) overrides with its own single clause; (3) overrides with its own
+    // repeated (OR) clauses.
+    let input = "search --show data\n\
+                 search --condition ready=1 --show data\n\
+                 search --condition valid=1 --condition ready=1 --show data\n";
+    let (out, code) = run(&["--batch", "--json", file, "--condition", "valid=1"], input);
+    assert_eq!(code, 0, "batch exit");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "three results:\n{out}");
+
+    let equiv: [&[&str]; 3] = [
+        &["search", "--condition", "valid=1", "--show", "data"], // inherited default
+        &["search", "--condition", "ready=1", "--show", "data"], // overridden (single)
+        &["search", "--condition", "valid=1", "--condition", "ready=1", "--show", "data"], // overridden (OR)
+    ];
+    for (i, cmd) in equiv.iter().enumerate() {
+        let single = single_json(file, cmd);
+        let expected =
+            format!("{{\"id\":\"{}\",\"ok\":true,\"result\":{}}}", i + 1, single.trim_end());
+        assert_eq!(lines[i], expected, "line {} ({cmd:?})", i + 1);
+    }
+
+    let _ = std::fs::remove_file(&vcd);
+}

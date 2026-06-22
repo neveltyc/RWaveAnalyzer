@@ -59,6 +59,17 @@ pub struct Target {
     pub int: Option<BigUint>,
 }
 
+impl Target {
+    /// De-duplication key for a target: its value *as written* plus whether it
+    /// is numeric vs a 4-state bit pattern. Deliberately keyed on the spelling,
+    /// so different bases for one value (`5` vs `0x5`) are distinct — there is
+    /// no cross-base normalization. Shared by the within-clause term de-dup and
+    /// the cross-clause de-dup so the two can never drift apart.
+    pub fn dedup_key(&self) -> String {
+        format!("{}:{:?}", self.raw, self.int.is_some())
+    }
+}
+
 /// A parsed condition term prior to resolving the signal pattern.
 #[derive(Debug, Clone)]
 pub struct ParsedCondition {

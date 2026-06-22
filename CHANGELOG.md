@@ -6,6 +6,29 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-22
+
+`search --condition` can now express OR. Repeating the flag adds clauses, and
+the search holds wherever **any** clause holds (OR-of-ANDs). The canonical use
+is multi-channel protocols — one clause per channel to find when *any* channel
+handshakes — with no in-string boolean syntax.
+
+### Added
+- **Repeatable `--condition` (OR-of-ANDs).** Each `--condition` is one
+  comma-separated AND clause; repeating it ORs the clauses. The interval,
+  segment, and event modes are unchanged — OR only widens *when* the condition
+  holds (the union of each clause's true times); cost scales with the distinct
+  signals referenced, not the clause count. Clauses that are identical, only
+  term-reordered, or alias-equivalent fold silently (first occurrence kept); the
+  same value in different bases (`5` vs `0x5`) does not fold. The echoed
+  condition (`condition` / `condition_resolved`, in both text and JSON) renders
+  multiple clauses as `(…) OR (…)`; a single clause is unchanged. In `--batch`,
+  `--condition` is a repeatable default that a line overrides as a whole group.
+
+### Compatibility
+- Every single-`--condition` invocation is byte-for-byte unchanged in text and
+  JSON output; no existing JSON key changed name, type, or meaning.
+
 ## [0.1.3] — 2026-06-17
 
 ### Fixed

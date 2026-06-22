@@ -53,6 +53,9 @@ rwave dump sim.fst --begin 100ns --end 200ns --filter state
 # When were valid and ready both high?
 rwave search sim.fst --condition 'valid=1,ready=1' --show data
 
+# When does ANY of several channels handshake? (repeat --condition to OR)
+rwave search sim.fst --condition 'ch0_valid=1,ch0_ready=1' --condition 'ch1_valid=1,ch1_ready=1'
+
 # What are all known values at exactly 17.55 us?
 rwave snapshot sim.fst --at 17.55us --filter state,init_done
 
@@ -162,6 +165,9 @@ for structured output, `--limit N` to cap the number of rows (the default is
 200, and `0` means unlimited), and `--verbose` for extra fields. A search
 condition is a comma-separated AND-list of `SIG=VAL` or `SIG!=VAL` terms, with
 values written in decimal, hexadecimal (`0xff`), binary (`b1010`), or 4-state.
+Repeating `--condition` ORs the clauses (OR-of-ANDs): the search holds wherever
+*any* clause holds — e.g. one clause per channel to find when any handshakes.
+There is no in-string OR (`|`/parentheses); OR is only the repeated flag.
 Run `rwave <command> --help` for the complete reference.
 
 ## JSON output

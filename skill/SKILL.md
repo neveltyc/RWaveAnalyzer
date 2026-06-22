@@ -82,7 +82,10 @@ Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`.
   4-state (`b1x0z`), or bare `x`/`z`.
 - `!=` does **not** match `x`/`z` ("unknown is not evidence of
   difference"). To find unknowns, ask explicitly with `sig=x`.
-- No OR. Run two searches and merge.
+- OR: repeat `--condition`. Each `--condition` is one AND clause; the search
+  holds wherever **any** clause holds (OR-of-ANDs) — e.g. one clause per
+  channel for "any channel handshakes". Identical / term-reordered / alias-
+  equivalent clauses fold silently. No in-string OR (`|` / parentheses).
 
 ## Command quick reference
 
