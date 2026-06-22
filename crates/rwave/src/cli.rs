@@ -52,7 +52,10 @@ pub struct Args {
     pub end: Option<String>,
     pub filter: Option<String>,
     pub at: Option<String>,
-    pub condition: Option<String>,
+    /// Search conditions. Each element is one `--condition` clause (a
+    /// comma-separated AND list); repeating `--condition` ORs the clauses
+    /// (OR-of-ANDs). Empty = no `--condition` given.
+    pub condition: Vec<String>,
     pub show: Option<String>,
     pub changed: Option<String>,
 }
@@ -69,7 +72,9 @@ pub struct Defaults {
     pub end: Option<String>,
     pub filter: Option<String>,
     pub at: Option<String>,
-    pub condition: Option<String>,
+    /// Default `--condition` clause group; a batch line with any `--condition`
+    /// of its own replaces this whole group (see [`parse_batch_line`]).
+    pub condition: Vec<String>,
     pub show: Option<String>,
     pub changed: Option<String>,
 }
@@ -112,8 +117,8 @@ Commands:\n\
                                                 Per-signal stats: change count, edges, static detection\n\
   snapshot  <file> --at T [--filter K1,K2]      Known signal values at a given time point\n\
   compare   <file> --at T1,T2 [--filter K1,K2]  Diff signal values between two time points\n\
-  search    <file> --condition C [--show K1,K2] [--changed K] [--begin T] [--end T]\n\
-                                                Conditional search and associated signal observation\n\
+  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--changed K] [--begin T] [--end T]\n\
+                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses\n\
 \n\
 Global options:\n\
   --json        Output compact structured JSON instead of text\n\
@@ -194,7 +199,7 @@ struct Acc {
     end: Option<String>,
     filter: Option<String>,
     at: Option<String>,
-    condition: Option<String>,
+    condition: Vec<String>,
     show: Option<String>,
     changed: Option<String>,
     command: Option<Command>,
@@ -243,7 +248,8 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
             }
             "--condition" => {
                 i += 1;
-                acc.condition = Some(require_value(argv, i, "--condition")?);
+                // Repeatable: each occurrence is one OR clause (see `Args::condition`).
+                acc.condition.push(require_value(argv, i, "--condition")?);
             }
             "--show" => {
                 i += 1;
@@ -289,7 +295,7 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
 fn check_required(
     command: &Command,
     at: &Option<String>,
-    condition: &Option<String>,
+    condition: &[String],
 ) -> Result<(), String> {
     match command {
         Command::Snapshot if at.is_none() => {
@@ -298,7 +304,7 @@ fn check_required(
         Command::Compare if at.is_none() => {
             Err("the following arguments are required: --at".into())
         }
-        Command::Search if condition.is_none() => {
+        Command::Search if condition.is_empty() => {
             Err("the following arguments are required: --condition".into())
         }
         _ => Ok(()),
@@ -432,7 +438,13 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     let end = acc.end.or_else(|| defaults.end.clone());
     let filter = acc.filter.or_else(|| defaults.filter.clone());
     let at = acc.at.or_else(|| defaults.at.clone());
-    let condition = acc.condition.or_else(|| defaults.condition.clone());
+    // A line carrying any `--condition` of its own replaces the entire default
+    // clause group; with none, the default group is inherited wholesale.
+    let condition = if acc.condition.is_empty() {
+        defaults.condition.clone()
+    } else {
+        acc.condition
+    };
     let show = acc.show.or_else(|| defaults.show.clone());
     let changed = acc.changed.or_else(|| defaults.changed.clone());
     check_required(&command, &at, &condition)?;

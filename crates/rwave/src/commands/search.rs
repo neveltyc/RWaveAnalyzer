@@ -148,7 +148,7 @@ fn resolve_conditions(wave: &Wave, text: &str) -> Result<Vec<ResolvedCond>, Stri
     for c in parsed {
         let sid = resolve_one_signal(wave, &c.pattern, "condition signal")?;
         let op_s = c.op.as_str();
-        let key = (sid, op_s, format!("{}:{:?}", c.target.raw, c.target.int.is_some()));
+        let key = (sid, op_s, c.target.dedup_key());
         if seen.contains(&key) {
             continue;
         }
@@ -190,16 +190,56 @@ fn conditions_hold(state: &BTreeMap<Sid, String>, conds: &[ResolvedCond]) -> boo
     true
 }
 
+/// OR across clauses: the search holds at a time when *any* clause's AND-terms
+/// all hold. With a single clause this is exactly `conditions_hold`, so single
+/// `--condition` behavior is unchanged.
+fn any_clause_holds(state: &BTreeMap<Sid, String>, clauses: &[Vec<ResolvedCond>]) -> bool {
+    clauses.iter().any(|c| conditions_hold(state, c))
+}
+
+/// Order-independent canonical key for clause de-duplication (PRD §7). Reuses
+/// the per-term key shape from `resolve_conditions` so it stays consistent:
+/// resolved `sid` (folds alias paths to one signal), operator, and the value
+/// *as written* (`5` and `0x5` differ → not folded; no cross-base normalizing).
+fn clause_key(clause: &[ResolvedCond]) -> Vec<(Sid, &'static str, String)> {
+    let mut key: Vec<(Sid, &'static str, String)> = clause
+        .iter()
+        .map(|c| (c.sid, c.op.as_str(), c.target.dedup_key()))
+        .collect();
+    key.sort();
+    key
+}
+
+/// Render one clause's raw label: its original `SIG op VAL` terms joined by `,`.
 fn condition_label(conds: &[ResolvedCond]) -> String {
     conds.iter().map(|c| c.original.clone()).collect::<Vec<_>>().join(",")
 }
 
+/// Render one clause's resolved label: `path op value` terms joined by `,`.
 fn condition_result_text(conds: &[ResolvedCond]) -> String {
     conds
         .iter()
         .map(|c| format!("{}{}{}", c.path, c.op.as_str(), c.value_text))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Join per-clause labels for echo (PRD §4): a lone clause renders as-is (no
+/// parens, preserving single-`--condition` output byte-for-byte); multiple
+/// clauses are each parenthesized and joined with ` OR `.
+fn join_clauses(
+    clauses: &[Vec<ResolvedCond>],
+    render: impl Fn(&[ResolvedCond]) -> String,
+) -> String {
+    if clauses.len() == 1 {
+        render(&clauses[0])
+    } else {
+        clauses
+            .iter()
+            .map(|c| format!("({})", render(c)))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }
 }
 
 /// Build the ordered (path-sorted, by show_sids order) show-value map for the
@@ -292,10 +332,12 @@ struct IntervalRow {
 }
 
 /// Resolved inputs shared by the `search` collectors and renderers: the parsed
-/// conditions, the `--show`/`--changed` selections, the loaded signal set, the
-/// time window, and the display labels. Built once per invocation.
+/// condition clauses, the `--show`/`--changed` selections, the loaded signal
+/// set, the time window, and the display labels. Built once per invocation.
 struct SearchSetup {
-    conditions: Vec<ResolvedCond>,
+    /// OR clauses: each inner vec is one `--condition` (a comma-separated AND
+    /// list); a time satisfies the search when *any* clause holds.
+    clauses: Vec<Vec<ResolvedCond>>,
     show_sids: Vec<Sid>,
     changed_sid: Option<Sid>,
     sel_ref: Vec<Sid>,
@@ -323,11 +365,23 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
         return Err("end time must be >= begin time".to_string());
     }
 
-    let cond_text_arg = args
-        .condition
-        .as_ref()
-        .ok_or("the following arguments are required: --condition")?;
-    let conditions = resolve_conditions(wave, cond_text_arg)?;
+    if args.condition.is_empty() {
+        return Err("the following arguments are required: --condition".into());
+    }
+    // Each `--condition` is one OR clause (a comma-separated AND list). Resolve
+    // every clause, then drop duplicate clauses (PRD §7): identical, term-order-
+    // permuted, or alias-equivalent clauses fold to one; different value
+    // spellings (`5` vs `0x5`) stay distinct. First occurrence wins, order kept;
+    // de-dup is silent. Per-clause parse/resolution errors surface verbatim.
+    let mut clauses: Vec<Vec<ResolvedCond>> = Vec::new();
+    let mut seen: BTreeSet<Vec<(Sid, &'static str, String)>> = BTreeSet::new();
+    for text in &args.condition {
+        let clause = resolve_conditions(wave, text)?;
+        if seen.insert(clause_key(&clause)) {
+            clauses.push(clause);
+        }
+    }
+
     let mut show_sids = resolve_show_sids(wave, &args.show)?;
     let changed_sid = match &args.changed {
         Some(c) => Some(resolve_one_signal(wave, c, "changed signal")?),
@@ -339,8 +393,10 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
         }
     }
 
-    // The set of signals we must load: condition signals + show + changed.
-    let mut selected: BTreeSet<Sid> = conditions.iter().map(|c| c.sid).collect();
+    // The set of signals we must load: the union of every clause's signals +
+    // show + changed. Cost scales with the distinct signals referenced, not the
+    // clause count (PRD §9).
+    let mut selected: BTreeSet<Sid> = clauses.iter().flatten().map(|c| c.sid).collect();
     selected.extend(show_sids.iter().copied());
     if let Some(cs) = changed_sid {
         selected.insert(cs);
@@ -348,11 +404,11 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let sel_vec: Vec<Sid> = selected.iter().copied().collect();
     wave.ensure_loaded(&sel_vec);
 
-    let cond_label = condition_label(&conditions);
-    let cond_text = condition_result_text(&conditions);
+    let cond_label = join_clauses(&clauses, condition_label);
+    let cond_text = join_clauses(&clauses, condition_result_text);
 
     Ok(SearchSetup {
-        conditions,
+        clauses,
         show_sids,
         changed_sid,
         sel_ref: sel_vec,
@@ -398,7 +454,7 @@ fn search_event_collect(
     changed_sid: Sid,
 ) -> (Vec<Ev>, usize, bool) {
     let sel: &[Sid] = &s.sel_ref;
-    let conditions: &[ResolvedCond] = &s.conditions;
+    let clauses: &[Vec<ResolvedCond>] = &s.clauses;
     let show_sids: &[Sid] = &s.show_sids;
     let t0 = s.t0;
     let t1 = s.t1;
@@ -443,7 +499,7 @@ fn search_event_collect(
             for (gsid, gval) in group {
                 state.insert(*gsid, gval.clone());
             }
-            changed.contains(&changed_sid) && conditions_hold(state, conditions)
+            changed.contains(&changed_sid) && any_clause_holds(state, clauses)
         };
 
     'outer: for (t, sid, raw) in stream {
@@ -592,7 +648,7 @@ fn search_event_text(
 /// Returns `(results, total, truncated, has_show)`.
 fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, usize, bool, bool) {
     let sel: &[Sid] = &s.sel_ref;
-    let conditions: &[ResolvedCond] = &s.conditions;
+    let clauses: &[Vec<ResolvedCond>] = &s.clauses;
     let show_sids: &[Sid] = &s.show_sids;
     let t0 = s.t0;
     let t1 = s.t1;
@@ -647,7 +703,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
             continue;
         }
         if !init_checks_done {
-            active = conditions_hold(&state, conditions);
+            active = any_clause_holds(&state, clauses);
             seg_start = if active { Some(t0) } else { None };
             if active && has_show {
                 seg_values = Some(show_values(wave, &state, show_sids));
@@ -666,7 +722,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
             for (gsid, gval) in &group {
                 state.insert(*gsid, gval.clone());
             }
-            let cond_ok = conditions_hold(&state, conditions);
+            let cond_ok = any_clause_holds(&state, clauses);
             if !has_show {
                 if cond_ok && !active {
                     active = true;
@@ -746,7 +802,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
     // final-emit path would otherwise materialize a `[T, T)` row, which the
     // reference correctly suppresses.
     if !init_checks_done && !truncated && t0 < t1 {
-        active = conditions_hold(&state, conditions);
+        active = any_clause_holds(&state, clauses);
         seg_start = if active { Some(t0) } else { None };
         if active && has_show {
             seg_values = Some(show_values(wave, &state, show_sids));
@@ -764,7 +820,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
         for (gsid, gval) in &group {
             state.insert(*gsid, gval.clone());
         }
-        let cond_ok = conditions_hold(&state, conditions);
+        let cond_ok = any_clause_holds(&state, clauses);
         if !has_show {
             if cond_ok && !active {
                 active = true;
