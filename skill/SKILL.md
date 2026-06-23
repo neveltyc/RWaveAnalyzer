@@ -37,7 +37,6 @@ env var, then query as usual:
 ```bash
 export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so          # for .wlf
 export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"  # for .fsdb (needs a Verdi-Ultra license)
-# Also set LD_LIBRARY_PATH with the Verdi NPI, FsdbReader, and Qt5 lib dirs.
 rwave --json info dump.fsdb
 ```
 

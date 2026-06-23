@@ -260,9 +260,8 @@ export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
 rwave info sim.fsdb
 ```
 
-Source your Verdi environment first (or set `VERDI_HOME`) so that `libNPI.so` can
-locate its dependent libraries. You must also set `LD_LIBRARY_PATH` to include the
-NPI, FsdbReader, and Qt5 library directories from the Verdi installation.
+Source your Verdi environment first so that `libNPI.so` can locate `$VERDI_HOME`
+and its dependent libraries.
 
 **Plugin backend
 ([rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin))**
