@@ -257,11 +257,12 @@ Verdi-Ultra license feature on the host:
 
 ```sh
 export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
+export LD_LIBRARY_PATH="$VERDI_HOME/share/NPI/lib/linux64:$VERDI_HOME/share/FsdbReader/linux64:$VERDI_HOME/platform/linux64/lib/Qt5/lib:$VERDI_HOME/platform/linux64/lib:$VERDI_HOME/platform/linux64/lib/Qt5/lib/depends/ssl:$LD_LIBRARY_PATH"
 rwave info sim.fsdb
 ```
 
-Source your Verdi environment first so that `libNPI.so` can locate `$VERDI_HOME`
-and its dependent libraries.
+Source your Verdi environment first so that `libNPI.so` can locate its dependent
+libraries. You must also set `LD_LIBRARY_PATH`.
 
 **Plugin backend
 ([rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin))**
