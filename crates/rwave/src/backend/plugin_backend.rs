@@ -34,8 +34,8 @@ use super::{
 use crate::format::ValueKind;
 use crate::plugin::builtin::{self, BuiltinError};
 use crate::plugin::ffi::{
-    file_format, RwaveBackend, RwaveBackendInit, RwaveSession as PluginHandle, RwaveValueKind,
-    RwaveVarDecl, RWAVE_BACKEND_ABI_VERSION, RWAVE_BACKEND_SYMBOL,
+    file_format, RwaveBackend, RwaveBackendInit, RwaveEmit, RwaveSession as PluginHandle,
+    RwaveValueKind, RwaveVarDecl, RWAVE_BACKEND_ABI_VERSION, RWAVE_BACKEND_SYMBOL,
 };
 use crate::plugin::loader::{external_plugin_path, LoadError};
 
@@ -334,6 +334,55 @@ impl PluginBackend {
             })
             .collect()
     }
+
+    /// Shared driver for full and windowed trace decode. Sets up the per-sid
+    /// output vector, the sid→index map, the kind cache, and the emit context,
+    /// then hands `(sids_ptr, n, emit, ctx)` to `invoke` — which calls whichever
+    /// vtable entry (`load_traces` or `load_traces_windowed`) applies. Returns
+    /// one [`SignalTrace`] per input sid, in order.
+    fn run_trace_decode<I>(&self, sids: &[BackendSid], invoke: I) -> Vec<SignalTrace>
+    where
+        I: FnOnce(*const u64, usize, RwaveEmit, *mut c_void),
+    {
+        let n = sids.len();
+        let mut output: Vec<SignalTrace> = (0..n)
+            .map(|_| SignalTrace {
+                times: Vec::new(),
+                values: Vec::new(),
+            })
+            .collect();
+
+        if n == 0 {
+            return output;
+        }
+
+        // sid → output index
+        let mut idx_map: HashMap<u64, usize> = HashMap::with_capacity(n);
+        for (i, sid) in sids.iter().enumerate() {
+            idx_map.insert(sid.0 as u64, i);
+        }
+
+        // Borrow the kind cache for the duration of the call. We need it to
+        // decode value_buf inside the emit trampoline.
+        let kind_cache = self.ensure_kind_cache();
+
+        let raw_sids: Vec<u64> = sids.iter().map(|s| s.0 as u64).collect();
+
+        let mut ctx = EmitCtx {
+            output: &mut output,
+            idx_map: &idx_map,
+            kinds: &kind_cache,
+        };
+
+        invoke(
+            raw_sids.as_ptr(),
+            raw_sids.len(),
+            emit_trampoline,
+            &mut ctx as *mut _ as *mut c_void,
+        );
+
+        output
+    }
 }
 
 impl Drop for PluginBackend {
@@ -472,51 +521,41 @@ impl WaveformBackend for PluginBackend {
 
     fn load_traces(&mut self, sids: &[BackendSid]) -> Vec<SignalTrace> {
         let vtable = self.vtable();
-        let n = sids.len();
+        let handle = self.handle;
+        self.run_trace_decode(sids, |ptr, len, emit, ctx| {
+            // SAFETY: load_traces validated non-NULL on load; we hand it owned
+            // pointers and a ctx whose layout we control.
+            let _rc = unsafe { (vtable.load_traces.unwrap())(handle, ptr, len, emit, ctx) };
+        })
+    }
 
-        // Pre-allocate per-output trace.
-        let mut output: Vec<SignalTrace> = (0..n)
-            .map(|_| SignalTrace {
-                times: Vec::new(),
-                values: Vec::new(),
-            })
-            .collect();
+    fn supports_windowed(&self) -> bool {
+        // Specialized iff the plugin filled the (optional, appended) vtable
+        // slot. Built-in NPI does; WLF and older/external plugins leave it NULL.
+        self.vtable().load_traces_windowed.is_some()
+    }
 
-        if n == 0 {
-            return output;
-        }
-
-        // sid → output index
-        let mut idx_map: HashMap<u64, usize> = HashMap::with_capacity(n);
-        for (i, sid) in sids.iter().enumerate() {
-            idx_map.insert(sid.0 as u64, i);
-        }
-
-        // Borrow the kind cache for the duration of the call. We need
-        // it to decode value_buf inside the emit trampoline.
-        let kind_cache = self.ensure_kind_cache();
-
-        let raw_sids: Vec<u64> = sids.iter().map(|s| s.0 as u64).collect();
-
-        let mut ctx = EmitCtx {
-            output: &mut output,
-            idx_map: &idx_map,
-            kinds: &kind_cache,
+    fn load_traces_windowed(
+        &mut self,
+        sids: &[BackendSid],
+        from: i64,
+        to: Option<i64>,
+    ) -> Vec<SignalTrace> {
+        let vtable = self.vtable();
+        let handle = self.handle;
+        let Some(windowed) = vtable.load_traces_windowed else {
+            // No windowed entry: a full decode is a correct (unoptimized)
+            // answer. Callers gate on `supports_windowed`, so this is only a
+            // safety net.
+            return self.load_traces(sids);
         };
-
-        // SAFETY: load_traces validated non-NULL; we hand it owned
-        // pointers and a ctx whose layout we control.
-        let _rc = unsafe {
-            (vtable.load_traces.unwrap())(
-                self.handle,
-                raw_sids.as_ptr(),
-                raw_sids.len(),
-                emit_trampoline,
-                &mut ctx as *mut _ as *mut c_void,
-            )
-        };
-
-        output
+        // `None` upper edge maps to the ABI's INT64_MAX "to the end" sentinel.
+        let to_tick = to.unwrap_or(i64::MAX);
+        self.run_trace_decode(sids, |ptr, len, emit, ctx| {
+            // SAFETY: `windowed` is non-NULL (matched `Some`); same pointer and
+            // ctx contract as load_traces, plus the two tick bounds.
+            let _rc = unsafe { windowed(handle, ptr, len, from, to_tick, emit, ctx) };
+        })
     }
 }
 

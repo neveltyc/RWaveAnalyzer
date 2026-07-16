@@ -6,6 +6,37 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+### Performance
+- **FSDB point queries seek instead of scanning.** `snapshot` and `compare` on
+  FSDB no longer decode every selected signal's full change history to answer a
+  query confined to one instant. The built-in NPI backend now seeks with
+  `npi_fsdb_goto_time`, reading each signal's value entering the window plus the
+  changes inside it — so `snapshot --at T` touches the blocks around `T` rather
+  than streaming the whole run. Measured on a licensed Verdi host against a
+  5.5 GB / 2 ms FSDB: `snapshot --at T` over a few signals 1.23 s → 0.10 s
+  (~12×), over all 1113 signals 16 min → 12.5 s (~77×); `compare` behaves the
+  same (~73× over all signals). The win scales with how narrow the query is
+  relative to the file; whole-file (unbounded) reads are unchanged.
+- `dump` takes the windowed decode only when a query selects more than
+  `STREAMING_SIGNAL_THRESHOLD` (8192) signals and so routes through the
+  memory-bounded collector (~3.6× on a 9422-signal FSDB). Narrower selections,
+  and `summary` and `search` at any width, still decode full histories and do
+  not benefit yet.
+- The backend contract gained an optional, appended `load_traces_windowed`
+  vtable entry (C ABI in `include/rwave_backend.h`; `abi_version` unchanged, per
+  the header's append rule). Backends that leave it NULL — the `wellen`
+  VCD/FST/GHW backend and the WLF backend, neither of which can seek by time —
+  transparently fall back to the existing full decode, so their behavior is
+  untouched.
+
+### Compatibility
+- Output is byte-for-byte unchanged for every backend and command: the windowed
+  path is a decode-time optimization gated on the backend advertising by-time
+  seek, and it returns exactly the values the full path did (covered by
+  windowed-vs-full equivalence tests for snapshot, compare, and dump, and
+  verified against the full-scan build on a licensed Verdi/NPI host across
+  10 MB and 5.5 GB FSDBs).
+
 ## [0.1.4] — 2026-06-22
 
 `search --condition` can now express OR. Repeating the flag adds clauses, and

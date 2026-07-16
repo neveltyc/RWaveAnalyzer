@@ -127,6 +127,22 @@ pub struct RwaveBackend {
             *mut c_void,
         ) -> c_int,
     >,
+
+    // windowed trace decode (optional — NULL when the backend cannot seek
+    // by time; rwave then falls back to a full `load_traces`). `to_tick`
+    // is `i64::MAX` for an unbounded upper edge. Appended after `load_traces`
+    // without an `abi_version` bump (see the header's versioning note).
+    pub load_traces_windowed: Option<
+        unsafe extern "C" fn(
+            *mut RwaveSession,
+            *const u64,
+            usize,
+            i64,
+            i64,
+            RwaveEmit,
+            *mut c_void,
+        ) -> c_int,
+    >,
 }
 
 // SAFETY: an `RwaveBackend` is an immutable vtable — function pointers,

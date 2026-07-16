@@ -139,6 +139,27 @@ typedef struct {
                         RwaveEmit       emit,
                         void           *ctx
                     );
+
+    /* Windowed trace decode (optional; may be NULL). Streams only the
+     * changes needed to answer queries in [from_tick, to_tick]: for each
+     * signal, its last change at-or-before from_tick (the value in effect
+     * entering the window), followed by every change in
+     * (from_tick, to_tick], all via emit(ctx, ...) in time order. Pass
+     * to_tick = INT64_MAX for "to the end". Returns 0 on success, nonzero
+     * on failure.
+     *
+     * A backend leaves this NULL when it cannot seek by time; rwave then
+     * falls back to a full load_traces() and windows the result itself.
+     * The emitted values use the identical encoding as load_traces(). */
+    int             (*load_traces_windowed)(
+                        RwaveSession *,
+                        const uint64_t *sids,
+                        size_t          n_sids,
+                        int64_t         from_tick,
+                        int64_t         to_tick,
+                        RwaveEmit       emit,
+                        void           *ctx
+                    );
 } RwaveBackend;
 
 /*
