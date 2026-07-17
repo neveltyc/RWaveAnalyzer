@@ -213,4 +213,33 @@ pub trait WaveformBackend {
     /// callers invoke this once per signal set and reuse the result. Unknown
     /// handles yield an empty trace.
     fn load_traces(&mut self, sids: &[BackendSid]) -> Vec<SignalTrace>;
+
+    /// Whether [`load_traces_windowed`](Self::load_traces_windowed) decodes a
+    /// time window meaningfully faster than a full [`load_traces`](Self::load_traces)
+    /// (i.e. the backend can seek by time). Defaults to `false`; callers must
+    /// treat the windowed path as an optimization to be taken only when this
+    /// returns `true`, and stay on the full path otherwise.
+    fn supports_windowed(&self) -> bool {
+        false
+    }
+
+    /// Decode only the changes needed to answer queries in `[from, to]`: for
+    /// each signal, its last change at-or-before `from` (the value in effect
+    /// entering the window), followed by every change in `(from, to]`, in time
+    /// order. `to = None` means "to the end".
+    ///
+    /// The returned traces are **partial** — they are not a signal's full
+    /// history and must not be cached or treated as such. The default
+    /// implementation decodes the full history (correct, but no faster than
+    /// [`load_traces`](Self::load_traces)); backends that report
+    /// [`supports_windowed`](Self::supports_windowed) `== true` override it to
+    /// seek. Same trace ordering and value encoding as `load_traces`.
+    fn load_traces_windowed(
+        &mut self,
+        sids: &[BackendSid],
+        _from: i64,
+        _to: Option<i64>,
+    ) -> Vec<SignalTrace> {
+        self.load_traces(sids)
+    }
 }

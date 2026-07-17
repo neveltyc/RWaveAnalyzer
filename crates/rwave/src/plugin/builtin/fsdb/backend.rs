@@ -134,15 +134,50 @@ impl FsdbBackend {
         let lib = npi();
         let sid_slice: &[u64] = unsafe { std::slice::from_raw_parts(sids, n) };
         for &sid in sid_slice {
-            let is_real = self
-                .decl_cache
-                .as_ref()
-                .and_then(|c| c.iter().find(|d| d.backend_sid == sid))
-                .map(|d| d.kind == RwaveValueKind::Real)
-                .unwrap_or(false);
-            self.stream_signal(lib, sid, is_real, emit, ctx);
+            self.stream_signal(lib, sid, self.is_real_sid(sid), emit, ctx);
         }
         0
+    }
+
+    /// Windowed decode: for each signal, its last change at-or-before `from`
+    /// followed by every change in `(from, to]`, via `emit` in time order.
+    /// `to == i64::MAX` means unbounded. Backed by `goto_time`, so a point
+    /// query (`from == to`) touches only the block around that time instead
+    /// of streaming the signal's whole history.
+    ///
+    /// # Safety
+    /// Same contract as [`load_traces`](Self::load_traces): `sids` points to
+    /// `n` valid `u64` `backend_sid`s, or is NULL when `n == 0`.
+    pub fn load_traces_windowed(
+        &mut self,
+        sids: *const u64,
+        n: usize,
+        from: i64,
+        to: i64,
+        emit: RwaveEmit,
+        ctx: *mut c_void,
+    ) -> c_int {
+        if sids.is_null() || n == 0 {
+            return 0;
+        }
+        if self.decl_cache.is_none() {
+            self.build_decl_cache();
+        }
+        let lib = npi();
+        let sid_slice: &[u64] = unsafe { std::slice::from_raw_parts(sids, n) };
+        for &sid in sid_slice {
+            self.stream_signal_windowed(lib, sid, self.is_real_sid(sid), from, to, emit, ctx);
+        }
+        0
+    }
+
+    /// Declared kind of `sid` is real (selects the NPI value format).
+    fn is_real_sid(&self, sid: u64) -> bool {
+        self.decl_cache
+            .as_ref()
+            .and_then(|c| c.iter().find(|d| d.backend_sid == sid))
+            .map(|d| d.kind == RwaveValueKind::Real)
+            .unwrap_or(false)
     }
 
     /// Stream every value change of one signal in time order via `emit`.
@@ -160,26 +195,56 @@ impl FsdbBackend {
             loop {
                 let mut tick: u64 = 0;
                 unsafe { (lib.vct_time)(vct, &mut tick) };
-                let mut v = NpiFsdbValue::with_format(fmt);
-                if unsafe { (lib.vct_value)(vct, &mut v) } != 0 {
-                    if is_real {
-                        let r = unsafe { v.value.real };
-                        if let Ok(cs) = CString::new(format!("{r}")) {
-                            let len = cs.as_bytes().len() as u32;
-                            unsafe { emit(ctx, sid, tick as i64, cs.as_ptr(), len) };
-                        }
-                    } else {
-                        let s = unsafe { v.value.str_ };
-                        if !s.is_null() {
-                            let len = unsafe { CStr::from_ptr(s) }.to_bytes().len() as u32;
-                            unsafe { emit(ctx, sid, tick as i64, s, len) };
-                        }
-                    }
-                }
+                emit_vc(lib, vct, sid, tick, is_real, fmt, emit, ctx);
                 if unsafe { (lib.goto_next)(vct) } == 0 {
                     break;
                 }
             }
+        }
+        unsafe { (lib.release_vct)(vct) };
+    }
+
+    /// Stream only the changes a `[from, to]` query needs (see
+    /// [`load_traces_windowed`](Self::load_traces_windowed)).
+    ///
+    /// `goto_time` positions on the value change at-or-before the requested
+    /// time (standard waveform-cursor semantics), which yields the seed —
+    /// the value in effect entering the window. If nothing precedes `from`
+    /// (it lands before the first change), fall back to `goto_first` so the
+    /// `(from, to]` scan still runs.
+    #[allow(clippy::too_many_arguments)]
+    fn stream_signal_windowed(
+        &self,
+        lib: &LibNpi,
+        sid: u64,
+        is_real: bool,
+        from: i64,
+        to: i64,
+        emit: RwaveEmit,
+        ctx: *mut c_void,
+    ) {
+        let sig: NpiHandle = sid as usize as NpiHandle;
+        let vct = unsafe { (lib.create_vct)(sig) };
+        if vct.is_null() {
+            return;
+        }
+        let fmt = if is_real { val_fmt::REAL } else { val_fmt::BIN_STR };
+
+        // Seed: last VC at-or-before `from`. goto_time is non-zero when it
+        // lands on such a VC; otherwise start at the first VC.
+        let mut positioned = from >= 0 && unsafe { (lib.goto_time)(vct, from as u64) } != 0;
+        if !positioned {
+            positioned = unsafe { (lib.goto_first)(vct) } != 0;
+        }
+        while positioned {
+            let mut tick: u64 = 0;
+            unsafe { (lib.vct_time)(vct, &mut tick) };
+            // Upper bound: stop once past `to` (i64::MAX ⇒ unbounded).
+            if (tick as i64) > to {
+                break;
+            }
+            emit_vc(lib, vct, sid, tick, is_real, fmt, emit, ctx);
+            positioned = unsafe { (lib.goto_next)(vct) } != 0;
         }
         unsafe { (lib.release_vct)(vct) };
     }
@@ -202,6 +267,38 @@ impl FsdbBackend {
             let _ = unsafe { (lib.iter_scope_stop)(top) };
         }
         self.decl_cache = Some(out);
+    }
+}
+
+/// Read the value of the VC the handle is currently positioned on (whose time
+/// is `tick`) and forward it to `emit`. Shared by the full and windowed
+/// readers so both format values identically.
+#[allow(clippy::too_many_arguments)]
+fn emit_vc(
+    lib: &LibNpi,
+    vct: NpiHandle,
+    sid: u64,
+    tick: u64,
+    is_real: bool,
+    fmt: c_int,
+    emit: RwaveEmit,
+    ctx: *mut c_void,
+) {
+    let mut v = NpiFsdbValue::with_format(fmt);
+    if unsafe { (lib.vct_value)(vct, &mut v) } != 0 {
+        if is_real {
+            let r = unsafe { v.value.real };
+            if let Ok(cs) = CString::new(format!("{r}")) {
+                let len = cs.as_bytes().len() as u32;
+                unsafe { emit(ctx, sid, tick as i64, cs.as_ptr(), len) };
+            }
+        } else {
+            let s = unsafe { v.value.str_ };
+            if !s.is_null() {
+                let len = unsafe { CStr::from_ptr(s) }.to_bytes().len() as u32;
+                unsafe { emit(ctx, sid, tick as i64, s, len) };
+            }
+        }
     }
 }
 

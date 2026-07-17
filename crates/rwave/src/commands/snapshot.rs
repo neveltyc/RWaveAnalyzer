@@ -37,8 +37,10 @@ fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let selected = selected_sids(wave, &sel);
 
     // Large/unfiltered selections decode in batches to bound memory; small
-    // selections load eagerly (cheaper, identical result).
-    let state = if should_stream(selected.len()) {
+    // selections load eagerly (cheaper, identical result). A backend that can
+    // seek by time also takes the streaming path even for small selections, so
+    // the point query reads just the value at `t_at` instead of full histories.
+    let state = if should_stream(selected.len()) || wave.supports_windowed() {
         wave.snapshot_streaming(t_at, Some(&selected), STREAMING_BATCH)
     } else {
         wave.ensure_loaded(&selected);

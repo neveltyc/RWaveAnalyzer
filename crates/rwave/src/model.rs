@@ -298,6 +298,19 @@ impl Wave {
 
     // -- trace loading -------------------------------------------------------
 
+    /// Whether the backend can decode a time window meaningfully faster than a
+    /// full history (i.e. it can seek by time); when false, callers behave
+    /// exactly as before. Currently only the built-in FSDB (NPI) backend
+    /// reports true.
+    ///
+    /// Only `snapshot` and `compare` consult this to prefer the windowed
+    /// collector. `dump` reaches it only via `collect_events_bounded`, i.e.
+    /// when a selection exceeds `STREAMING_SIGNAL_THRESHOLD`; `summary` and
+    /// `search` still decode full histories through `ensure_loaded`.
+    pub fn supports_windowed(&self) -> bool {
+        self.backend.supports_windowed()
+    }
+
     /// Ensure the given signals' traces are decoded and cached. Idempotent;
     /// only the not-yet-cached signals are requested from the backend, and the
     /// backend decodes each underlying signal once even across alias `Sid`s.
@@ -394,6 +407,68 @@ impl Wave {
                     self.traces[sid] = None;
                 }
             }
+            i = end;
+        }
+    }
+
+    /// Like [`for_each_signal_batched`](Self::for_each_signal_batched), but for
+    /// queries confined to `[from, to]`: when the backend can seek by time
+    /// ([`supports_windowed`](Self::supports_windowed)), it decodes only each
+    /// signal's value entering the window plus the in-window changes, avoiding
+    /// a full-history scan. Otherwise it falls back to the full batched decode,
+    /// so behavior is identical for backends that don't specialize.
+    ///
+    /// The windowed traces handed to `f` are **partial** and never enter the
+    /// trace cache: `f` must derive its answer from `[from, to]` alone (which
+    /// is exactly what the point/window commands do). `to = None` = unbounded.
+    fn for_each_signal_windowed<F>(
+        &mut self,
+        sids: Option<&[Sid]>,
+        from: i64,
+        to: Option<i64>,
+        batch: usize,
+        mut f: F,
+    ) where
+        F: FnMut(Sid, &SignalTrace),
+    {
+        // No by-time seek available: identical to the full batched path.
+        if !self.backend.supports_windowed() {
+            self.for_each_signal_batched(sids, batch, f);
+            return;
+        }
+
+        let batch = batch.max(1);
+        let all: Vec<Sid> = match sids {
+            Some(s) => s.to_vec(),
+            None => (0..self.signals.len()).collect(),
+        };
+        let mut i = 0;
+        while i < all.len() {
+            let end = (i + batch).min(all.len());
+            let chunk = &all[i..end];
+
+            // Distinct backend handles for this batch, remembering which Sids
+            // map to each so aliases share one windowed decode. Unlike
+            // `ensure_loaded`, this ignores the resident cache: windowed traces
+            // are partial and must stay out of it.
+            let mut need_backend: Vec<BackendSid> = Vec::new();
+            let mut backend_to_sids: HashMap<BackendSid, Vec<Sid>> = HashMap::new();
+            for &sid in chunk {
+                let bsid = self.signals[sid].backend_sid;
+                let entry = backend_to_sids.entry(bsid).or_default();
+                entry.push(sid);
+                if entry.len() == 1 {
+                    need_backend.push(bsid);
+                }
+            }
+
+            let decoded = self.backend.load_traces_windowed(&need_backend, from, to);
+            for (bsid, trace) in need_backend.iter().zip(decoded.iter()) {
+                for &sid in &backend_to_sids[bsid] {
+                    f(sid, trace);
+                }
+            }
+            // `decoded` drops here — partial traces are never cached.
             i = end;
         }
     }
@@ -515,8 +590,11 @@ impl Wave {
         // keys and retain the wrong subset. This is a cheap O(signals) copy.
         let decl_order: Vec<usize> = self.signals.iter().map(|s| s.decl_order).collect();
 
-        self.for_each_signal_batched(sids, batch, |sid, tr| {
-            // Window bounds within this signal's trace.
+        self.for_each_signal_windowed(sids, t0, t1, batch, |sid, tr| {
+            // Window bounds within this signal's trace. On a windowed decode the
+            // trace already covers only `[t0, t1]` (plus the pre-window seed,
+            // which `lower_bound(t0)` skips), so these bounds pick out exactly
+            // the same in-range events as a full-trace scan would.
             let lo = lower_bound(&tr.times, t0);
             let hi = match t1 {
                 Some(t1) => upper_bound(&tr.times, t1),
@@ -610,7 +688,9 @@ impl Wave {
         batch: usize,
     ) -> HashMap<Sid, RawValue> {
         let mut state: HashMap<Sid, RawValue> = HashMap::new();
-        self.for_each_signal_batched(sids, batch, |sid, tr| {
+        // A point query: the window collapses to `t_at`, so a seeking backend
+        // reads just the value in effect at `t_at` per signal.
+        self.for_each_signal_windowed(sids, t_at, Some(t_at), batch, |sid, tr| {
             if let Some(pos) = last_at_or_before(&tr.times, t_at) {
                 state.insert(sid, tr.values[pos].clone());
             }
@@ -628,7 +708,10 @@ impl Wave {
     ) -> (HashMap<Sid, RawValue>, HashMap<Sid, RawValue>) {
         let mut a: HashMap<Sid, RawValue> = HashMap::new();
         let mut b: HashMap<Sid, RawValue> = HashMap::new();
-        self.for_each_signal_batched(sids, batch, |sid, tr| {
+        // `ta <= tb`, so one window `[ta, tb]` carries both answers: the seed
+        // (last change <= ta) resolves `ta`, and the last change <= tb resolves
+        // `tb`. A seeking backend thus reads one bounded slice per signal.
+        self.for_each_signal_windowed(sids, ta, Some(tb), batch, |sid, tr| {
             if let Some(pos) = last_at_or_before(&tr.times, ta) {
                 a.insert(sid, tr.values[pos].clone());
             }
@@ -862,4 +945,216 @@ fn build_signal_table(
     counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     (infos, raw_var_count, counts)
+}
+
+#[cfg(test)]
+mod windowed_equiv_tests {
+    //! The windowed (by-time-seek) collector must produce byte-identical
+    //! answers to the full-history path. We drive both through one in-memory
+    //! backend whose `windowed` flag toggles the seek path on and off; when on,
+    //! it serves the documented window (each signal's last change at-or-before
+    //! `from`, then the changes in `(from, to]`) derived from the same data the
+    //! full path returns. Equality across the two therefore pins the domain
+    //! wiring and the window contract that the NPI backend implements natively.
+
+    use super::*;
+    use crate::backend::{BitStr, Timescale, VarDecl};
+
+    struct MockBackend {
+        /// `(backend_sid, ascending (tick, value) changes)` per signal.
+        data: Vec<(usize, Vec<(i64, RawValue)>)>,
+        windowed: bool,
+    }
+
+    impl MockBackend {
+        fn changes(&self, bsid: usize) -> &[(i64, RawValue)] {
+            self.data
+                .iter()
+                .find(|(s, _)| *s == bsid)
+                .map(|(_, c)| c.as_slice())
+                .unwrap_or(&[])
+        }
+
+        fn full_trace(&self, bsid: usize) -> SignalTrace {
+            let ch = self.changes(bsid);
+            SignalTrace {
+                times: ch.iter().map(|(t, _)| *t).collect(),
+                values: ch.iter().map(|(_, v)| v.clone()).collect(),
+            }
+        }
+
+        /// Seed (last change `<= from`) followed by every change in
+        /// `(from, to]` — the exact contract `load_traces_windowed` documents.
+        fn window_trace(&self, bsid: usize, from: i64, to: Option<i64>) -> SignalTrace {
+            let ch = self.changes(bsid);
+            let mut times = Vec::new();
+            let mut values = Vec::new();
+            if let Some((t, v)) = ch.iter().rev().find(|(t, _)| *t <= from) {
+                times.push(*t);
+                values.push(v.clone());
+            }
+            for (t, v) in ch {
+                if *t > from && to.is_none_or(|hi| *t <= hi) {
+                    times.push(*t);
+                    values.push(v.clone());
+                }
+            }
+            SignalTrace { times, values }
+        }
+    }
+
+    impl WaveformBackend for MockBackend {
+        fn path(&self) -> &str {
+            "mock"
+        }
+        fn file_format(&self) -> FileFormat {
+            FileFormat::Unknown
+        }
+        fn timescale(&self) -> Timescale {
+            Timescale {
+                seconds_per_tick: 1e-9,
+                display: "1ns".to_string(),
+            }
+        }
+        fn date(&self) -> &str {
+            ""
+        }
+        fn version(&self) -> &str {
+            ""
+        }
+        fn comments(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn var_decls(&self) -> Vec<VarDecl> {
+            self.data
+                .iter()
+                .enumerate()
+                .map(|(i, (bsid, _))| VarDecl {
+                    full_path: format!("top.s{i}"),
+                    scope_path: "top".to_string(),
+                    width: 1,
+                    type_str: "wire",
+                    kind: ValueKind::Bits,
+                    backend_sid: BackendSid(*bsid),
+                })
+                .collect()
+        }
+        fn time_range(&self) -> Option<(i64, i64)> {
+            let mut lo = i64::MAX;
+            let mut hi = i64::MIN;
+            for (_, ch) in &self.data {
+                for (t, _) in ch {
+                    lo = lo.min(*t);
+                    hi = hi.max(*t);
+                }
+            }
+            if lo <= hi {
+                Some((lo, hi))
+            } else {
+                None
+            }
+        }
+        fn time_step_count(&self) -> usize {
+            0
+        }
+        fn load_traces(&mut self, sids: &[BackendSid]) -> Vec<SignalTrace> {
+            sids.iter().map(|s| self.full_trace(s.0)).collect()
+        }
+        fn supports_windowed(&self) -> bool {
+            self.windowed
+        }
+        fn load_traces_windowed(
+            &mut self,
+            sids: &[BackendSid],
+            from: i64,
+            to: Option<i64>,
+        ) -> Vec<SignalTrace> {
+            sids.iter().map(|s| self.window_trace(s.0, from, to)).collect()
+        }
+    }
+
+    fn bits(s: &str) -> RawValue {
+        RawValue::Bits(BitStr::new(s))
+    }
+
+    fn dataset() -> Vec<(usize, Vec<(i64, RawValue)>)> {
+        vec![
+            // A toggling multi-change signal.
+            (
+                10,
+                vec![
+                    (0, bits("0")),
+                    (5, bits("1")),
+                    (12, bits("0")),
+                    (20, bits("1")),
+                ],
+            ),
+            // Different edges, first change after 0.
+            (11, vec![(3, bits("1")), (8, bits("0")), (15, bits("1"))]),
+            // Static signal: one change at 0.
+            (12, vec![(0, bits("1"))]),
+            // A signal whose first change is well past the small ticks.
+            (13, vec![(18, bits("1")), (25, bits("0"))]),
+        ]
+    }
+
+    fn mk(windowed: bool) -> Wave {
+        Wave::from_backend(Box::new(MockBackend {
+            data: dataset(),
+            windowed,
+        }))
+    }
+
+    #[test]
+    fn snapshot_windowed_matches_full() {
+        let mut full = mk(false);
+        full.ensure_all_loaded();
+        let mut win = mk(true);
+        // Probe before, at, and between every edge, and past the end.
+        for t in [-1, 0, 2, 3, 5, 6, 8, 12, 15, 17, 18, 20, 25, 100] {
+            let a = full.snapshot(t, None);
+            let b = win.snapshot_streaming(t, None, 2);
+            assert_eq!(a, b, "snapshot mismatch at t={t}");
+        }
+    }
+
+    #[test]
+    fn compare_pair_windowed_matches_full() {
+        let mut full = mk(false);
+        full.ensure_all_loaded();
+        let mut win = mk(true);
+        for (ta, tb) in [(-1, 0), (0, 12), (3, 15), (5, 20), (8, 25), (0, 100)] {
+            let (fa, fb) = full.snapshot_pair(ta, tb, None);
+            let (wa, wb) = win.snapshot_pair_streaming(ta, tb, None, 2);
+            assert_eq!(fa, wa, "compare-a mismatch at ta={ta}");
+            assert_eq!(fb, wb, "compare-b mismatch at tb={tb}");
+        }
+    }
+
+    #[test]
+    fn dump_windowed_matches_full() {
+        // collect_events_bounded falls back to the full batched path when
+        // windowed is off, so `full` here is the ground truth.
+        let windows: [(i64, Option<i64>); 6] = [
+            (0, Some(100)),
+            (0, Some(10)),
+            (5, Some(15)),
+            (12, Some(20)),
+            (18, None),
+            (21, Some(24)),
+        ];
+        for (t0, t1) in windows {
+            let mut full = mk(false);
+            let mut win = mk(true);
+            let (fe, ft, ftr) = full.collect_events_bounded(t0, t1, None, 0, 2);
+            let (we, wt, wtr) = win.collect_events_bounded(t0, t1, None, 0, 2);
+            let fv: Vec<(i64, Sid, RawValue)> =
+                fe.iter().map(|e| (e.tick, e.sid, e.value.clone())).collect();
+            let wv: Vec<(i64, Sid, RawValue)> =
+                we.iter().map(|e| (e.tick, e.sid, e.value.clone())).collect();
+            assert_eq!(fv, wv, "dump events mismatch for [{t0}, {t1:?}]");
+            assert_eq!(ft, wt, "dump total mismatch for [{t0}, {t1:?}]");
+            assert_eq!(ftr, wtr, "dump truncated mismatch for [{t0}, {t1:?}]");
+        }
+    }
 }

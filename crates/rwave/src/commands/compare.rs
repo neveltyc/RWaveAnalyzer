@@ -44,7 +44,9 @@ fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
     let selected = selected_sids(wave, &sel);
     let sel_ref = sel.as_deref();
 
-    let (sa, sb) = if should_stream(selected.len()) {
+    // A backend that can seek by time takes the streaming (windowed) path even
+    // for small selections, so the two point reads avoid full-history decode.
+    let (sa, sb) = if should_stream(selected.len()) || wave.supports_windowed() {
         wave.snapshot_pair_streaming(ta, tb, sel_ref, STREAMING_BATCH)
     } else {
         wave.ensure_loaded(&selected);
