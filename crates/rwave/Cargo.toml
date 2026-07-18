@@ -30,6 +30,9 @@ fsdb = []
 [dependencies]
 # Waveform parsing front-end: vendored under vendor/wellen, pinned to 0.23.0.
 wellen = { path = "../../vendor/wellen" }
+# Direct FST access for the windowed (seek-by-time) decode path; same vendored
+# copy wellen itself parses with, so both paths read identical bytes.
+fst-reader = { workspace = true }
 # Fast non-cryptographic hasher for the signal-table grouping map (SipHash
 # dominated build time on large hierarchies). Same crate wellen already uses.
 rustc-hash = { workspace = true }

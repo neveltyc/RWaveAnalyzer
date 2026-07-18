@@ -737,6 +737,7 @@ dependencies = [
 name = "rwave"
 version = "0.1.4"
 dependencies = [
+ "fst-reader",
  "libloading",
  "rustc-hash",
  "wellen",

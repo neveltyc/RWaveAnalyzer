@@ -7,19 +7,33 @@
 //! wellen's hierarchy/signal API into the format-neutral types in the parent
 //! module. Swapping in a different parser (or adding a native reader for a new
 //! format) means writing a sibling of this file; nothing else changes.
+//! (The windowed FST fast path lives in the sibling [`super::fst_window`],
+//! which depends on `fst-reader` — the same vendored parser wellen reads
+//! FST with.)
 
 use std::cell::RefCell;
 
 use wellen::simple::Waveform;
 use wellen::{
-    FileFormat as WFileFormat, Hierarchy, Signal, SignalRef, TimescaleUnit, Var, VarType,
+    FileFormat as WFileFormat, Hierarchy, Signal, SignalEncoding, SignalRef, TimescaleUnit, Var,
+    VarType,
 };
 
+use super::fst_window::{FstWindowReader, WinKind};
 use super::{
     BackendError, BackendSid, BitStr, FileFormat, RawValue, SignalTrace, Timescale, VarDecl,
     WaveformBackend,
 };
 use crate::format::ValueKind;
+
+/// Lazily created windowed FST reader (see [`WaveformBackend::load_traces_windowed`]).
+enum WindowState {
+    Unopened,
+    Ready(FstWindowReader),
+    /// Re-opening the file for windowed access failed (e.g. an incomplete
+    /// dump wellen recovered through its own fallback); stay on full decodes.
+    Unavailable,
+}
 
 /// A waveform loaded through wellen.
 pub struct WellenBackend {
@@ -29,6 +43,9 @@ pub struct WellenBackend {
     /// `load_traces` calls don't reload). wellen owns the loaded `Signal`s; we
     /// borrow them when decoding.
     loaded: RefCell<std::collections::BTreeSet<usize>>,
+    /// Second reader over the same file serving windowed (seek-by-time)
+    /// queries on FST; other formats never touch it.
+    window: WindowState,
 }
 
 impl WellenBackend {
@@ -58,6 +75,7 @@ impl WellenBackend {
             wave,
             path: path.to_string(),
             loaded: RefCell::new(std::collections::BTreeSet::new()),
+            window: WindowState::Unopened,
         })
     }
 
@@ -194,6 +212,61 @@ impl WaveformBackend for WellenBackend {
                 }
             })
             .collect()
+    }
+
+    // FST is the one wellen format that can seek: its data sections are
+    // time-ranged, so a window touches only the sections around it. VCD has
+    // no index (the whole body is parsed at open) and GHW's section positions
+    // are not used by wellen, so both stay on the full decode.
+    fn supports_windowed(&self) -> bool {
+        self.file_format() == FileFormat::Fst
+    }
+
+    fn load_traces_windowed(
+        &mut self,
+        sids: &[BackendSid],
+        from: i64,
+        to: Option<i64>,
+    ) -> Vec<SignalTrace> {
+        if self.file_format() != FileFormat::Fst {
+            return self.load_traces(sids);
+        }
+        // Resolve each sid to an FST handle plus payload kind. Anything the
+        // windowed reader cannot serve exactly — derived signals (which FST
+        // hierarchies never produce) or unknown handles — routes the whole
+        // request to the full decode, which is always a correct answer.
+        let mut slots: Vec<(usize, WinKind)> = Vec::with_capacity(sids.len());
+        for s in sids {
+            let kind = SignalRef::from_index(s.0)
+                .filter(|r| !r.is_derived_signal())
+                .and_then(|r| self.hierarchy().get_signal_tpe(r))
+                .map(|enc| match enc {
+                    SignalEncoding::String => WinKind::Str,
+                    SignalEncoding::Real => WinKind::Real,
+                    SignalEncoding::BitVector(0) => WinKind::Event,
+                    SignalEncoding::BitVector(_) => WinKind::Bits,
+                });
+            match kind {
+                Some(k) => slots.push((s.0, k)),
+                None => return self.load_traces(sids),
+            }
+        }
+
+        if matches!(self.window, WindowState::Unopened) {
+            self.window = match FstWindowReader::open(&self.path) {
+                Some(r) => WindowState::Ready(r),
+                None => WindowState::Unavailable,
+            };
+        }
+        let WindowState::Ready(reader) = &mut self.window else {
+            return self.load_traces(sids);
+        };
+        let traces = reader.load_windowed(&slots, from, to, self.wave.time_table());
+        if traces.len() != sids.len() {
+            // Mid-stream read failure: serve the correct full decode instead.
+            return self.load_traces(sids);
+        }
+        traces
     }
 }
 
@@ -366,5 +439,184 @@ fn unit_str(u: TimescaleUnit) -> &'static str {
         TimescaleUnit::MilliSeconds => "ms",
         TimescaleUnit::Seconds => "s",
         TimescaleUnit::Unknown => "",
+    }
+}
+
+#[cfg(test)]
+mod windowed_fst_tests {
+    //! `load_traces_windowed` on real FST files must return exactly the
+    //! window-slice of the full decode: the signal's last change at-or-before
+    //! `from` (true value *and* true timestamp), then every change in
+    //! `(from, to]` — nothing synthesized, nothing missing. These tests sweep
+    //! window grids over every bundled FST fixture (single-section files:
+    //! phase 1 + empty-phase-2 paths) and, when present, the multi-section
+    //! bench trace (real section skipping + phase-2 seed recovery).
+
+    use super::*;
+
+    fn repo_path(rel: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(rel)
+    }
+
+    /// Oracle: slice a full trace to the windowed contract.
+    fn window_slice(full: &SignalTrace, from: i64, to: Option<i64>) -> (Vec<i64>, Vec<String>) {
+        let mut times = Vec::new();
+        let mut values = Vec::new();
+        if let Some(i) = full.times.iter().rposition(|&t| t <= from) {
+            times.push(full.times[i]);
+            values.push(full.values[i].raw_str().into_owned());
+        }
+        for (i, &t) in full.times.iter().enumerate() {
+            if t > from && to.is_none_or(|hi| t <= hi) {
+                times.push(t);
+                values.push(full.values[i].raw_str().into_owned());
+            }
+        }
+        (times, values)
+    }
+
+    fn flat(tr: &SignalTrace) -> (Vec<i64>, Vec<String>) {
+        (
+            tr.times.clone(),
+            tr.values.iter().map(|v| v.raw_str().into_owned()).collect(),
+        )
+    }
+
+    /// Sweep `windows` over all signals of `path`, comparing windowed decode
+    /// against the sliced full decode.
+    fn check_file(path: &std::path::Path, windows: &[(i64, Option<i64>)]) {
+        let mut b = WellenBackend::open(path.to_str().unwrap()).expect("open fst");
+        assert!(b.supports_windowed(), "{path:?} should support windowed");
+        let mut bsids: Vec<BackendSid> = b.var_decls().iter().map(|v| v.backend_sid).collect();
+        bsids.sort_by_key(|s| s.0);
+        bsids.dedup_by_key(|s| s.0);
+        let full = b.load_traces(&bsids);
+        for &(from, to) in windows {
+            let win = b.load_traces_windowed(&bsids, from, to);
+            assert_eq!(win.len(), bsids.len());
+            for ((sid, f), w) in bsids.iter().zip(&full).zip(&win) {
+                assert_eq!(
+                    window_slice(f, from, to),
+                    flat(w),
+                    "{path:?} sid={} window=[{from}, {to:?}]",
+                    sid.0
+                );
+            }
+        }
+    }
+
+    /// Window grid derived from a file's recorded time steps: every point
+    /// window, every ordered pair (strided to stay small), edges and
+    /// out-of-range probes, and unbounded tails.
+    fn grid(path: &std::path::Path) -> Vec<(i64, Option<i64>)> {
+        let b = WellenBackend::open(path.to_str().unwrap()).expect("open fst");
+        let (t0, t1) = b.time_range().expect("time range");
+        let steps: Vec<i64> = {
+            // Reconstruct the recorded steps from the traces (the backend has
+            // no public time-table accessor; the union of change times is it).
+            let bsids: Vec<BackendSid> = b.var_decls().iter().map(|v| v.backend_sid).collect();
+            let mut b2 = b;
+            let mut all: Vec<i64> = b2
+                .load_traces(&bsids)
+                .iter()
+                .flat_map(|t| t.times.iter().copied())
+                .collect();
+            all.sort_unstable();
+            all.dedup();
+            all
+        };
+        let mut w: Vec<(i64, Option<i64>)> = Vec::new();
+        for &t in &steps {
+            w.push((t, Some(t))); // point
+            w.push((t - 1, Some(t + 1)));
+            w.push((t, None)); // unbounded tail
+        }
+        let stride = (steps.len() / 12).max(1);
+        for (i, &a) in steps.iter().step_by(stride).enumerate() {
+            for &bt in steps.iter().skip(i * stride).step_by(stride) {
+                if bt >= a {
+                    w.push((a, Some(bt)));
+                }
+            }
+        }
+        w.push((t0 - 10, None));
+        w.push((t0 - 10, Some(t0 - 1))); // entirely before the dump
+        w.push((t1 + 10, Some(t1 + 20))); // entirely after the dump
+        w.push((t1 + 10, None));
+        w.push(((t0 + t1) / 2, None));
+        w
+    }
+
+    #[test]
+    fn fixtures_windowed_equals_full_slice() {
+        let files = [
+            "verify/fixtures/basic_trace.fst",
+            "verify/fixtures/bus_range_trace.fst",
+            "verify/fixtures/escaped_trace.fst",
+            "verify/fixtures/handshake_trace.fst",
+            "verify/fixtures/search_trace.fst",
+            "verify/stimulus/counter_fsm.fst",
+            "verify/stimulus/handshake_proto.fst",
+            "verify/stimulus/hier_deep.fst",
+            "verify/stimulus/real_event.fst",
+            "verify/stimulus/xz_tristate.fst",
+        ];
+        for rel in files {
+            let path = repo_path(rel);
+            let windows = grid(&path);
+            check_file(&path, &windows);
+        }
+    }
+
+    #[test]
+    fn vcd_does_not_claim_windowed() {
+        let path = repo_path("verify/fixtures/basic_trace.vcd");
+        let b = WellenBackend::open(path.to_str().unwrap()).expect("open vcd");
+        assert!(!b.supports_windowed());
+    }
+
+    /// Multi-section coverage: 84 data sections, so mid/late windows skip most
+    /// of the file and cold signals (last change far before the window) must
+    /// come back through phase 2. Skipped when the decompressed bench trace is
+    /// absent (`bench/stress.fst` is git-ignored; `bench/run.py` creates it).
+    #[test]
+    fn stress_multi_section_windowed_equals_full_slice() {
+        let path = repo_path("bench/stress.fst");
+        if !path.exists() {
+            eprintln!("skipping: {path:?} not present (run bench/run.py once to create it)");
+            return;
+        }
+        let mut b = WellenBackend::open(path.to_str().unwrap()).expect("open stress fst");
+        let mut bsids: Vec<BackendSid> = b.var_decls().iter().map(|v| v.backend_sid).collect();
+        bsids.sort_by_key(|s| s.0);
+        bsids.dedup_by_key(|s| s.0);
+        // Sample across the id space: constants, buses, and hot clocks all
+        // appear; every ~400th signal keeps the full decode tractable.
+        let sample: Vec<BackendSid> = bsids.iter().copied().step_by(400).collect();
+        let full = b.load_traces(&sample);
+        // Ticks span 0..=20_000_000 over 84 sections (~240k ticks each).
+        let windows: [(i64, Option<i64>); 7] = [
+            (19_900_000, Some(19_950_000)), // late: most sections skipped
+            (10_000_000, Some(10_100_000)), // mid
+            (0, Some(1_000)),               // head
+            (5_000_000, Some(5_000_000)),   // point
+            (19_999_990, None),             // unbounded tail
+            (20_500_000, Some(21_000_000)), // beyond the dump
+            (236_540, Some(236_540)),       // exactly a section boundary tick
+        ];
+        for (from, to) in windows {
+            let win = b.load_traces_windowed(&sample, from, to);
+            assert_eq!(win.len(), sample.len());
+            for ((sid, f), w) in sample.iter().zip(&full).zip(&win) {
+                assert_eq!(
+                    window_slice(f, from, to),
+                    flat(w),
+                    "stress sid={} window=[{from}, {to:?}]",
+                    sid.0
+                );
+            }
+        }
     }
 }

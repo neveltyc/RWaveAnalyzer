@@ -22,18 +22,32 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   memory-bounded collector (~3.6× on a 9422-signal FSDB). Narrower selections,
   and `summary` and `search` at any width, still decode full histories and do
   not benefit yet.
+- **FST point queries seek too.** FST files are time-partitioned into data
+  sections, so the same windowed decode now applies: `snapshot`/`compare` read
+  only the sections around the query point, recovering each signal's entering
+  value with a second narrow pass over just the signals that didn't change
+  nearby (frames are unusable for this — real writers never satisfy the
+  reader's frame-emit condition). The win tracks the fraction of sections the
+  query skips: on a 63 MB / 84-section Verilator FST (10 220 signals) a late
+  `snapshot --at T` over all signals runs 42.7 s / 6.9 GB → 0.3 s / 93 MB
+  (~130×) and `compare` over two nearby points 42.1 s / 9.1 GB → 0.4 s / 240 MB
+  (~120×), while `compare` across half the file is only ~2×; a coarser
+  26 MB / 3-section Icarus FST gives ~10× on the same all-signal snapshot.
+  VCD (no index; body parsed at open) and GHW (section positions unused by
+  wellen) stay on the full decode.
 - The backend contract gained an optional, appended `load_traces_windowed`
   vtable entry (C ABI in `include/rwave_backend.h`; `abi_version` unchanged, per
-  the header's append rule). Backends that leave it NULL — the `wellen`
-  VCD/FST/GHW backend and the WLF backend, neither of which can seek by time —
-  transparently fall back to the existing full decode, so their behavior is
-  untouched.
+  the header's append rule). Backends that leave it NULL — WLF, which cannot
+  seek by time — transparently fall back to the existing full decode, so their
+  behavior is untouched.
 
 ### Compatibility
 - Output is byte-for-byte unchanged for every backend and command: the windowed
   path is a decode-time optimization gated on the backend advertising by-time
   seek, and it returns exactly the values the full path did (covered by
-  windowed-vs-full equivalence tests for snapshot, compare, and dump, and
+  windowed-vs-full equivalence tests for snapshot, compare, and dump; FST
+  additionally by window-grid equivalence tests over every bundled fixture and
+  the multi-section bench trace, plus byte-compared command outputs on it; FSDB
   verified against the full-scan build on a licensed Verdi/NPI host across
   10 MB and 5.5 GB FSDBs).
 

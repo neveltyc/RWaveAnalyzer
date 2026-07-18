@@ -29,6 +29,7 @@ use std::borrow::Cow;
 use crate::format::ValueKind;
 
 pub mod bitstr;
+mod fst_window;
 pub mod plugin_backend;
 pub mod wellen_backend;
 
