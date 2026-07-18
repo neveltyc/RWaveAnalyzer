@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **VCD: mid-file `$dumpall` checkpoints are no longer dropped.** The vendored
+  wellen parser treated `$dumpall` as timestep zero; per IEEE 1364-2005
+  §18.2.3.9 it is a checkpoint of current values at the *current* time. A
+  mid-file checkpoint parsed as time flowing backwards, so its values were
+  skipped with a `WARN: time decreased` message, and later redundant
+  re-statements of the lost values could register as transitions at wrong
+  times. Patched in `vendor/wellen` (see `vendor/PATCHES.md`).
+
 ## [0.1.5] — 2026-07-18
 
 A performance point release: `snapshot` and `compare` confined to a single
