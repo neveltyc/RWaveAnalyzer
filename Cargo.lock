@@ -735,8 +735,9 @@ dependencies = [
 
 [[package]]
 name = "rwave"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
+ "fst-reader",
  "libloading",
  "rustc-hash",
  "wellen",

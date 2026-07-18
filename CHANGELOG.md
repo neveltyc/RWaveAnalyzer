@@ -4,38 +4,44 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.5] — 2026-07-18
+
+A performance point release: `snapshot` and `compare` confined to a single
+instant now **seek by time** instead of decoding every selected signal's full
+change history. On backends that can seek — the built-in FSDB (NPI) reader and
+FST — a point query reads only the data around the instant rather than the whole
+run, an order of magnitude or more faster and lighter on large traces.
+Whole-file (unbounded) reads are unchanged.
 
 ### Performance
-- **FSDB point queries seek instead of scanning.** `snapshot` and `compare` on
-  FSDB no longer decode every selected signal's full change history to answer a
-  query confined to one instant. The built-in NPI backend now seeks with
-  `npi_fsdb_goto_time`, reading each signal's value entering the window plus the
-  changes inside it — so `snapshot --at T` touches the blocks around `T` rather
-  than streaming the whole run. Measured on a licensed Verdi host against a
-  5.5 GB / 2 ms FSDB: `snapshot --at T` over a few signals 1.23 s → 0.10 s
-  (~12×), over all 1113 signals 16 min → 12.5 s (~77×); `compare` behaves the
-  same (~73× over all signals). The win scales with how narrow the query is
-  relative to the file; whole-file (unbounded) reads are unchanged.
-- `dump` takes the windowed decode only when a query selects more than
-  `STREAMING_SIGNAL_THRESHOLD` (8192) signals and so routes through the
-  memory-bounded collector (~3.6× on a 9422-signal FSDB). Narrower selections,
-  and `summary` and `search` at any width, still decode full histories and do
-  not benefit yet.
+- **FSDB seeks with `npi_fsdb_goto_time`.** `snapshot --at T` and `compare` read
+  each selected signal's value entering the window plus the changes inside it,
+  touching the blocks around `T` instead of streaming the run.
+- **FST seeks by data section.** FST files are time-partitioned, so the windowed
+  decode reads only the sections overlapping the query. FST frames cannot supply
+  each signal's value entering the window (real writers never emit them where it
+  would help), so a second narrow pass recovers it for just the signals that did
+  not change nearby. Values are canonicalized and duplicate-suppressed exactly
+  as in the full decode.
+- **`dump` seeks only for wide selections.** It takes the windowed path when a
+  query selects more than `STREAMING_SIGNAL_THRESHOLD` (8192) signals and so
+  already routes through the memory-bounded collector; narrower `dump`, and
+  `summary` and `search` at any width, still decode full histories.
+- VCD (no on-disk index — the body is parsed at open) and GHW (section positions
+  unused by wellen) cannot seek by time and keep the full decode.
+
+### Internal
 - The backend contract gained an optional, appended `load_traces_windowed`
   vtable entry (C ABI in `include/rwave_backend.h`; `abi_version` unchanged, per
-  the header's append rule). Backends that leave it NULL — the `wellen`
-  VCD/FST/GHW backend and the WLF backend, neither of which can seek by time —
-  transparently fall back to the existing full decode, so their behavior is
-  untouched.
+  the header's append rule). Backends that leave it NULL — WLF, and any external
+  plugin predating it — transparently fall back to a full `load_traces`, so
+  their behavior is untouched.
 
 ### Compatibility
 - Output is byte-for-byte unchanged for every backend and command: the windowed
-  path is a decode-time optimization gated on the backend advertising by-time
-  seek, and it returns exactly the values the full path did (covered by
-  windowed-vs-full equivalence tests for snapshot, compare, and dump, and
-  verified against the full-scan build on a licensed Verdi/NPI host across
-  10 MB and 5.5 GB FSDBs).
+  path returns exactly the values the full decode did, covered by windowed-vs-
+  full equivalence tests for `snapshot`, `compare`, and `dump` (FST additionally
+  over every bundled fixture and a multi-section trace).
 
 ## [0.1.4] — 2026-06-22
 
