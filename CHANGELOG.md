@@ -4,52 +4,44 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.5] — 2026-07-18
+
+A performance point release: `snapshot` and `compare` confined to a single
+instant now **seek by time** instead of decoding every selected signal's full
+change history. On backends that can seek — the built-in FSDB (NPI) reader and
+FST — a point query reads only the data around the instant rather than the whole
+run, an order of magnitude or more faster and lighter on large traces.
+Whole-file (unbounded) reads are unchanged.
 
 ### Performance
-- **FSDB point queries seek instead of scanning.** `snapshot` and `compare` on
-  FSDB no longer decode every selected signal's full change history to answer a
-  query confined to one instant. The built-in NPI backend now seeks with
-  `npi_fsdb_goto_time`, reading each signal's value entering the window plus the
-  changes inside it — so `snapshot --at T` touches the blocks around `T` rather
-  than streaming the whole run. Measured on a licensed Verdi host against a
-  5.5 GB / 2 ms FSDB: `snapshot --at T` over a few signals 1.23 s → 0.10 s
-  (~12×), over all 1113 signals 16 min → 12.5 s (~77×); `compare` behaves the
-  same (~73× over all signals). The win scales with how narrow the query is
-  relative to the file; whole-file (unbounded) reads are unchanged.
-- `dump` takes the windowed decode only when a query selects more than
-  `STREAMING_SIGNAL_THRESHOLD` (8192) signals and so routes through the
-  memory-bounded collector (~3.6× on a 9422-signal FSDB). Narrower selections,
-  and `summary` and `search` at any width, still decode full histories and do
-  not benefit yet.
-- **FST point queries seek too.** FST files are time-partitioned into data
-  sections, so the same windowed decode now applies: `snapshot`/`compare` read
-  only the sections around the query point, recovering each signal's entering
-  value with a second narrow pass over just the signals that didn't change
-  nearby (frames are unusable for this — real writers never satisfy the
-  reader's frame-emit condition). The win tracks the fraction of sections the
-  query skips: on a 63 MB / 84-section Verilator FST (10 220 signals) a late
-  `snapshot --at T` over all signals runs 42.7 s / 6.9 GB → 0.3 s / 93 MB
-  (~130×) and `compare` over two nearby points 42.1 s / 9.1 GB → 0.4 s / 240 MB
-  (~120×), while `compare` across half the file is only ~2×; a coarser
-  26 MB / 3-section Icarus FST gives ~10× on the same all-signal snapshot.
-  VCD (no index; body parsed at open) and GHW (section positions unused by
-  wellen) stay on the full decode.
+- **FSDB seeks with `npi_fsdb_goto_time`.** `snapshot --at T` and `compare` read
+  each selected signal's value entering the window plus the changes inside it,
+  touching the blocks around `T` instead of streaming the run.
+- **FST seeks by data section.** FST files are time-partitioned, so the windowed
+  decode reads only the sections overlapping the query. FST frames cannot supply
+  each signal's value entering the window (real writers never emit them where it
+  would help), so a second narrow pass recovers it for just the signals that did
+  not change nearby. Values are canonicalized and duplicate-suppressed exactly
+  as in the full decode.
+- **`dump` seeks only for wide selections.** It takes the windowed path when a
+  query selects more than `STREAMING_SIGNAL_THRESHOLD` (8192) signals and so
+  already routes through the memory-bounded collector; narrower `dump`, and
+  `summary` and `search` at any width, still decode full histories.
+- VCD (no on-disk index — the body is parsed at open) and GHW (section positions
+  unused by wellen) cannot seek by time and keep the full decode.
+
+### Internal
 - The backend contract gained an optional, appended `load_traces_windowed`
   vtable entry (C ABI in `include/rwave_backend.h`; `abi_version` unchanged, per
-  the header's append rule). Backends that leave it NULL — WLF, which cannot
-  seek by time — transparently fall back to the existing full decode, so their
-  behavior is untouched.
+  the header's append rule). Backends that leave it NULL — WLF, and any external
+  plugin predating it — transparently fall back to a full `load_traces`, so
+  their behavior is untouched.
 
 ### Compatibility
 - Output is byte-for-byte unchanged for every backend and command: the windowed
-  path is a decode-time optimization gated on the backend advertising by-time
-  seek, and it returns exactly the values the full path did (covered by
-  windowed-vs-full equivalence tests for snapshot, compare, and dump; FST
-  additionally by window-grid equivalence tests over every bundled fixture and
-  the multi-section bench trace, plus byte-compared command outputs on it; FSDB
-  verified against the full-scan build on a licensed Verdi/NPI host across
-  10 MB and 5.5 GB FSDBs).
+  path returns exactly the values the full decode did, covered by windowed-vs-
+  full equivalence tests for `snapshot`, `compare`, and `dump` (FST additionally
+  over every bundled fixture and a multi-section trace).
 
 ## [0.1.4] — 2026-06-22
 
