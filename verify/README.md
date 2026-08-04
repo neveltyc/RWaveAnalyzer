@@ -8,7 +8,7 @@ baseline. Performance lives in [`bench/`](../bench).
 
 | script | what it checks | reference required |
 |---|---|---|
-| `run.sh` | every command runs on both VCD and FST without error, and the value-bearing commands produce identical output across the two formats for the same design | no — only needs the built `rwave` |
+| `run.sh` | every command runs on both VCD and FST without error, the value-bearing commands produce identical output across the two formats for the same design, `search`'s three modes agree across formats (and `changed()` selects event mode), and batch mode frames and isolates results | no — only needs the built `rwave` |
 
 Run:
 
@@ -18,7 +18,7 @@ bash verify/run.sh
 ```
 
 Expected: `RESULT: PASS=N FAIL=0`. The exact `N` is stable per stimulus
-set (currently 106 for `run.sh`).
+set (currently 126 for `run.sh`).
 
 ## Stimulus sets
 

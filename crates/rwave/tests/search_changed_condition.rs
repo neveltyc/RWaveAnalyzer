@@ -215,6 +215,58 @@ fn event_json_shape() {
 }
 
 #[test]
+fn event_mode_truncates_with_limit() {
+    // Event mode has its own truncation path: `total` becomes shown+1 and
+    // `total_is_exact` drops to false (req transitions 4 times).
+    let vcd = fixture("limit");
+    let out = ok_stdout(
+        &vcd,
+        &[&["--json", "--limit", "2", "--condition", "changed(req)"], WIN].concat(),
+    );
+    assert!(out.contains("\"shown\":2"), "{out}");
+    assert!(out.contains("\"truncated\":true"), "{out}");
+    assert!(out.contains("\"total\":3") && out.contains("\"total_is_exact\":false"), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+#[test]
+fn batch_lines_accept_changed_terms() {
+    // A changed() term works through --batch, both on a line of its own and
+    // inherited from the batch-level default --condition group. The removed
+    // --changed flag fails that line only, without killing the batch.
+    let vcd = fixture("batch");
+    let mut child = Command::new(rwave())
+        .args(["--batch", "--json", vcd.to_str().unwrap(), "--condition", "changed(ack)"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn rwave --batch");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            b"search --condition \"changed(req),ready=0\"\n\
+              search\n\
+              search --condition valid=1 --changed req\n",
+        )
+        .expect("write batch input");
+    let out = child.wait_with_output().expect("wait rwave --batch");
+    assert!(out.status.success(), "batch should exit 0: {}", String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert_eq!(lines.len(), 3, "one result per line: {lines:?}");
+    // Line 1: its own clause replaces the default group — req edges at 30/40.
+    assert!(lines[0].contains("\"ok\":true") && lines[0].contains("\"mode\":\"event\""), "{}", lines[0]);
+    assert!(lines[0].contains("\"changed\":[\"tb.req\"]"), "{}", lines[0]);
+    // Line 2: inherits the batch default `changed(ack)` — ack edges at 20/40.
+    assert!(lines[1].contains("\"changed\":[\"tb.ack\"]"), "{}", lines[1]);
+    // Line 3: the removed flag fails this line alone.
+    assert!(lines[2].contains("\"ok\":false") && lines[2].contains("changed(SIG)"), "{}", lines[2]);
+    let _ = std::fs::remove_file(&vcd);
+}
+
+#[test]
 fn interval_mode_unaffected() {
     // A level-only condition still yields intervals: ready=1 holds [10, 30).
     let vcd = fixture("interval");

@@ -6,6 +6,18 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-08-05
+
+`search`'s event mode moves out of a flag and into the condition itself:
+`changed(SIG)` is an edge predicate term, true at exactly the ticks where SIG
+transitions. It was the one part of a search that could not be written as a
+condition, and being a flag it applied to the whole query — so an edge could
+not be scoped to one OR clause, and two signals could not be required to
+transition together. Both now fall out of the existing grammar. The
+`--changed` flag is removed. Also fixes a VCD correctness bug: mid-file
+`$dumpall` checkpoints were parsed as time flowing backwards and their values
+dropped.
+
 ### Changed
 - **`search` event mode is now spelled inside the condition: `changed(SIG)`.**
   `--condition "changed(req),ready=0"` fires at the ticks where `req`
