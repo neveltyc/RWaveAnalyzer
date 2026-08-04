@@ -24,7 +24,7 @@ down the hierarchy, and reading values off a cursor. RWaveAnalyzer answers the
 same questions from the terminal, in a single command:
 
 ```sh
-rwave search sim.fst --condition 'arvalid=1,arready=1' --show araddr,arlen
+rwave search sim.fst --condition "arvalid=1,arready=1" --show araddr,arlen
 ```
 
 The tool is a single self-contained binary called `rwave`. It reads the open
@@ -51,10 +51,13 @@ rwave list sim.fst --filter clk,rst
 rwave dump sim.fst --begin 100ns --end 200ns --filter state
 
 # When were valid and ready both high?
-rwave search sim.fst --condition 'valid=1,ready=1' --show data
+rwave search sim.fst --condition "valid=1,ready=1" --show data
+
+# At which instants does req toggle while ready is low?
+rwave search sim.fst --condition "changed(req),ready=0" --show state
 
 # When does ANY of several channels handshake? (repeat --condition to OR)
-rwave search sim.fst --condition 'ch0_valid=1,ch0_ready=1' --condition 'ch1_valid=1,ch1_ready=1'
+rwave search sim.fst --condition "ch0_valid=1,ch0_ready=1" --condition "ch1_valid=1,ch1_ready=1"
 
 # What are all known values at exactly 17.55 us?
 rwave snapshot sim.fst --at 17.55us --filter state,init_done
@@ -155,7 +158,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges |
 | `snapshot` | All known signal values at one time point (`--at T`) |
 | `compare`  | What changed between two time points (`--at T1,T2`) |
-| `search`   | Find the intervals where a condition holds, optionally watching related signals |
+| `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 
 Every command accepts a `--begin`/`--end` time window and a `--filter`. Times
 take the unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example
@@ -163,12 +166,16 @@ take the unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example
 comma-separated and match by substring or `*`-glob. The global flags are `--json`
 for structured output, `--limit N` to cap the number of rows (the default is
 200, and `0` means unlimited), and `--verbose` for extra fields. A search
-condition is a comma-separated AND-list of `SIG=VAL` or `SIG!=VAL` terms, with
-values written in decimal, hexadecimal (`0xff`), binary (`b1010`), or 4-state.
-Repeating `--condition` ORs the clauses (OR-of-ANDs): the search holds wherever
-*any* clause holds — e.g. one clause per channel to find when any handshakes.
-There is no in-string OR (`|`/parentheses); OR is only the repeated flag.
-Run `rwave <command> --help` for the complete reference.
+condition is a comma-separated AND-list of `SIG=VAL`, `SIG!=VAL`, or
+`changed(SIG)` terms, with values written in decimal, hexadecimal (`0xff`),
+binary (`b1010`), or 4-state. `changed(SIG)` is an edge predicate: the search
+then reports the instants where SIG transitions and the rest of the clause
+holds (event mode), instead of time intervals. Repeating `--condition` ORs the
+clauses (OR-of-ANDs): the search holds wherever *any* clause holds — e.g. one
+clause per channel to find when any handshakes; every clause must contain a
+`changed()` term or none may. There is no in-string OR (`|`/parentheses); OR
+is only the repeated flag. Run `rwave <command> --help` for the complete
+reference.
 
 ## JSON output
 
@@ -183,7 +190,7 @@ width is in each signal's metadata, so it is not re-encoded as hex padding.
 
 ```sh
 rwave --json info sim.fst
-rwave --json search sim.fst --condition 'state=5' --show data
+rwave --json search sim.fst --condition "state=5" --show data
 ```
 
 ## Batch mode

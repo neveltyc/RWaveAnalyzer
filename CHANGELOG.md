@@ -6,6 +6,23 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+### Changed
+- **`search` event mode is now spelled inside the condition: `changed(SIG)`.**
+  `--condition "changed(req),ready=0"` fires at the ticks where `req`
+  transitions while `ready=0` holds (level terms evaluated post-update, as
+  before; t=0 initialization is not a transition). `changed(a),changed(b)`
+  requires both to transition on the same tick — previously inexpressible, as
+  was scoping an edge to one OR clause. A `changed()` term may appear in any
+  clause, but then every clause must carry one (event ticks and level spans
+  cannot merge into one result shape). With no `--show`, event mode defaults
+  to showing the `changed()` signals. The JSON `changed` echo field is now an
+  array of paths.
+
+### Removed
+- **The `--changed` flag.** Its event mode was a variant of `--condition`
+  wearing a flag's clothes, and it could not compose with OR clauses. Using it
+  now fails with a pointer to the `changed(SIG)` syntax.
+
 ### Fixed
 - **VCD: mid-file `$dumpall` checkpoints are no longer dropped.** The vendored
   wellen parser treated `$dumpall` as timestep zero; per IEEE 1364-2005

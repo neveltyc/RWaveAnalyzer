@@ -63,19 +63,18 @@ User wants to know...
 │   └─ compare        diff of signal values at two time points
 └─ "When does condition C hold?" / "Find handshakes"
     └─ search         condition-based, three sub-modes:
-        ├─ interval   time ranges where condition is true (no --show, no --changed)
+        ├─ interval   time ranges where condition is true (no --show, no changed())
         ├─ segment    intervals + observed values         (with --show)
-        └─ event      fires when one signal transitions   (--changed SIG)
+        └─ event      fires when signals transition       (changed(SIG) in condition)
 ```
 
 `search`'s JSON top-level key depends on the mode: `intervals` /
 `segments` / `events`. Always check `mode` before parsing.
-`--changed` takes one signal pattern, not comma-separated.
-To catch both edges, run two searches: `!=0` for rising, `=0` for falling.
 
 ## Condition syntax (search only)
 
-Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`.
+Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, `SIG!=VAL`,
+or `changed(SIG)`.
 
 - Signal pattern must resolve to **exactly one** signal. If ambiguous,
   the error lists candidates — use a more specific path.
@@ -83,10 +82,18 @@ Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`.
   4-state (`b1x0z`), or bare `x`/`z`.
 - `!=` does **not** match `x`/`z` ("unknown is not evidence of
   difference"). To find unknowns, ask explicitly with `sig=x`.
+- `changed(SIG)`: edge predicate, true at exactly the ticks where SIG
+  transitions (t=0 initialization is not a transition). Its presence
+  switches the search to event mode. One signal per changed();
+  `changed(a),changed(b)` = both transition on the same tick. Level terms
+  in the clause are evaluated on the post-update state at that tick.
+  Rising edges only: `changed(x),x!=0`; falling only: `changed(x),x=0`.
+  With no `--show`, event mode shows the changed() signals.
 - OR: repeat `--condition`. Each `--condition` is one AND clause; the search
   holds wherever **any** clause holds (OR-of-ANDs) — e.g. one clause per
   channel for "any channel handshakes". Identical / term-reordered / alias-
   equivalent clauses fold silently. No in-string OR (`|` / parentheses).
+  Every clause must contain a `changed()` term or none may (modes cannot mix).
 
 ## Command quick reference
 
@@ -196,12 +203,12 @@ summary --filter clk,rst,reset
 ### Event-driven signal investigation
 
 Use `search --condition --show` to bulk-extract field values across events —
-one call replaces multiple `snapshot` calls. Catch both edges with
-complementary `search --changed` (rising: `!=0`, falling: `=0`). Then drill
-down with `compare` for jump deltas, `dump --limit 0` for full traces, and
-`snapshot` for precise checkpoints.
+one call replaces multiple `snapshot` calls. Catch specific edges with
+`changed()` terms (rising: `changed(x),x!=0`; falling: `changed(x),x=0`).
+Then drill down with `compare` for jump deltas, `dump --limit 0` for full
+traces, and `snapshot` for precise checkpoints.
 When a transition is visible in a different signal's trace, use `dump --limit 0` +
-external post-processing — not `search --changed`.
+external post-processing — not `search` with `changed()`.
 
 `dump` with multiple signals interleaves their events chronologically —
 see e.g. a push flag and data bus transition side-by-side in one timeline.
@@ -219,6 +226,9 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
   starting with `Error:`. Catch and parse them.
 - **`--json` everywhere.** Mixing text-mode parsing in is the most common
   source of fragility. Pass `--json` on every invocation.
+- **Shell quoting.** Double-quote conditions (`--condition "changed(req),ready=0"`
+  — parens are shell metacharacters). If a signal name contains `$` (common
+  in gate-level netlists), single-quote so the shell doesn't expand it.
 
 ## Documented behaviors that may surprise
 

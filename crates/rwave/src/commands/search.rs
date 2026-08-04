@@ -1,13 +1,14 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! `search` command: evaluate conditions over time — event mode (a signal
-//! changes while conditions hold), interval mode (spans where conditions
-//! hold), and segment mode (intervals split by `--show` value changes).
+//! `search` command: evaluate conditions over time — interval mode (spans
+//! where conditions hold), segment mode (intervals split by `--show` value
+//! changes), and event mode (any clause carries a `changed(SIG)` term: fire at
+//! the ticks where SIG transitions while the rest of the clause holds).
 
 use std::collections::{BTreeMap, BTreeSet};
 use crate::cli::Args;
-use crate::condition::{self, Op, ParsedCondition};
+use crate::condition::{self, Op, ParsedCondition, TermBody};
 use crate::filter::Filters;
 use crate::format::{fmt_time, fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::{Json, Obj};
@@ -17,15 +18,28 @@ use super::common::*;
 /// A resolved condition: a parsed term bound to a specific signal id.
 struct ResolvedCond {
     sid: Sid,
-    op: Op,
-    target: condition::Target,
-    width: u32,
-    /// Formatting class of the bound signal; decides whether the recorded value
-    /// is treated as a logic-bit string during matching (see `conditions_hold`).
-    kind: ValueKind,
+    term: ResolvedTerm,
     original: String,
     path: String,
-    value_text: String,
+}
+
+/// The signal-resolved body of one condition term.
+enum ResolvedTerm {
+    /// `SIG op VAL` — evaluated against the current state.
+    Level {
+        op: Op,
+        target: condition::Target,
+        width: u32,
+        /// Formatting class of the bound signal; decides whether the recorded
+        /// value is treated as a logic-bit string during matching (see
+        /// `conditions_hold`).
+        kind: ValueKind,
+        value_text: String,
+    },
+    /// `changed(SIG)` — evaluated against the set of signals that transitioned
+    /// at the tick under evaluation (event mode only; setup rejects it in
+    /// interval/segment mode by requiring every clause to carry one or none).
+    Changed,
 }
 
 /// Resolve a single signal pattern to exactly one sid. An exact full-path match
@@ -146,45 +160,75 @@ fn resolve_conditions(wave: &Wave, text: &str) -> Result<Vec<ResolvedCond>, Stri
     let mut resolved: Vec<ResolvedCond> = Vec::new();
     let mut seen: BTreeSet<(Sid, &'static str, String)> = BTreeSet::new();
     for c in parsed {
-        let sid = resolve_one_signal(wave, &c.pattern, "condition signal")?;
-        let op_s = c.op.as_str();
-        let key = (sid, op_s, c.target.dedup_key());
-        if seen.contains(&key) {
-            continue;
-        }
-        seen.insert(key);
+        let role = match c.term {
+            TermBody::Changed => "changed() signal",
+            TermBody::Level { .. } => "condition signal",
+        };
+        let sid = resolve_one_signal(wave, &c.pattern, role)?;
         let info = wave.signal(sid);
-        resolved.push(ResolvedCond {
-            sid,
-            op: c.op,
-            target: c.target,
-            width: info.width,
-            kind: info.kind,
-            original: c.original,
-            path: info.path.clone(),
-            value_text: c.value_text,
-        });
+        let term = match c.term {
+            TermBody::Level { op, target, value_text } => ResolvedTerm::Level {
+                op,
+                target,
+                width: info.width,
+                kind: info.kind,
+                value_text,
+            },
+            TermBody::Changed => ResolvedTerm::Changed,
+        };
+        let cond = ResolvedCond { sid, term, original: c.original, path: info.path.clone() };
+        if seen.insert(term_key(&cond)) {
+            resolved.push(cond);
+        }
     }
     Ok(resolved)
 }
 
-/// Evaluate whether all conditions hold for the given state. State maps sid to
-/// the raw decoded value string; absent => undefined.
-fn conditions_hold(state: &BTreeMap<Sid, String>, conds: &[ResolvedCond]) -> bool {
+/// De-duplication key for one resolved term: resolved `sid` (folds alias paths
+/// to one signal), the operator slot (`changed` for edge predicates, which no
+/// comparison operator can spell), and the target value *as written* (`5` and
+/// `0x5` differ → not folded; no cross-base normalizing). Shared by the
+/// within-clause term de-dup and `clause_key` so the two can never drift apart.
+fn term_key(c: &ResolvedCond) -> (Sid, &'static str, String) {
+    match &c.term {
+        ResolvedTerm::Level { op, target, .. } => (c.sid, op.as_str(), target.dedup_key()),
+        ResolvedTerm::Changed => (c.sid, "changed", String::new()),
+    }
+}
+
+/// Evaluate whether all terms of one clause hold. `state` maps sid to the raw
+/// decoded value string (absent => undefined); `changed` is the set of signals
+/// that truly transitioned at the tick under evaluation (empty outside event
+/// mode).
+fn conditions_hold(
+    state: &BTreeMap<Sid, String>,
+    changed: &BTreeSet<Sid>,
+    conds: &[ResolvedCond],
+) -> bool {
     for c in conds {
-        let raw = state.get(&c.sid).map(|s| s.as_str());
-        // Classify the recorded value as a logic-bit string by the signal's
-        // declared `kind`, never by sniffing its characters. A real signal
-        // renders as decimal text (e.g. 100.0 -> "100"); treating that as a bit
-        // string made `dac=4` spuriously match (binary 100 == 4) and `dac=100`
-        // miss. Non-logic signals (real/string/event) carry `None` here and so
-        // never satisfy a numeric/bit target — only the literal-compare path.
-        let bits = match c.kind {
-            ValueKind::Bits => raw,
-            _ => None,
-        };
-        if !condition::condition_match(bits, raw, c.op, &c.target, c.width) {
-            return false;
+        match &c.term {
+            ResolvedTerm::Changed => {
+                if !changed.contains(&c.sid) {
+                    return false;
+                }
+            }
+            ResolvedTerm::Level { op, target, width, kind, .. } => {
+                let raw = state.get(&c.sid).map(|s| s.as_str());
+                // Classify the recorded value as a logic-bit string by the
+                // signal's declared `kind`, never by sniffing its characters. A
+                // real signal renders as decimal text (e.g. 100.0 -> "100");
+                // treating that as a bit string made `dac=4` spuriously match
+                // (binary 100 == 4) and `dac=100` miss. Non-logic signals
+                // (real/string/event) carry `None` here and so never satisfy a
+                // numeric/bit target — only the literal-compare path.
+                let bits = match kind {
+                    ValueKind::Bits => raw,
+                    _ => None,
+                };
+                if !condition::condition_match(bits, raw, *op, target, *width) {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -193,19 +237,18 @@ fn conditions_hold(state: &BTreeMap<Sid, String>, conds: &[ResolvedCond]) -> boo
 /// OR across clauses: the search holds at a time when *any* clause's AND-terms
 /// all hold. With a single clause this is exactly `conditions_hold`, so single
 /// `--condition` behavior is unchanged.
-fn any_clause_holds(state: &BTreeMap<Sid, String>, clauses: &[Vec<ResolvedCond>]) -> bool {
-    clauses.iter().any(|c| conditions_hold(state, c))
+fn any_clause_holds(
+    state: &BTreeMap<Sid, String>,
+    changed: &BTreeSet<Sid>,
+    clauses: &[Vec<ResolvedCond>],
+) -> bool {
+    clauses.iter().any(|c| conditions_hold(state, changed, c))
 }
 
 /// Order-independent canonical key for clause de-duplication (PRD §7). Reuses
-/// the per-term key shape from `resolve_conditions` so it stays consistent:
-/// resolved `sid` (folds alias paths to one signal), operator, and the value
-/// *as written* (`5` and `0x5` differ → not folded; no cross-base normalizing).
+/// the per-term key shape from `resolve_conditions` (see [`term_key`]).
 fn clause_key(clause: &[ResolvedCond]) -> Vec<(Sid, &'static str, String)> {
-    let mut key: Vec<(Sid, &'static str, String)> = clause
-        .iter()
-        .map(|c| (c.sid, c.op.as_str(), c.target.dedup_key()))
-        .collect();
+    let mut key: Vec<(Sid, &'static str, String)> = clause.iter().map(term_key).collect();
     key.sort();
     key
 }
@@ -215,11 +258,17 @@ fn condition_label(conds: &[ResolvedCond]) -> String {
     conds.iter().map(|c| c.original.clone()).collect::<Vec<_>>().join(",")
 }
 
-/// Render one clause's resolved label: `path op value` terms joined by `,`.
+/// Render one clause's resolved label: `path op value` / `changed(path)` terms
+/// joined by `,`.
 fn condition_result_text(conds: &[ResolvedCond]) -> String {
     conds
         .iter()
-        .map(|c| format!("{}{}{}", c.path, c.op.as_str(), c.value_text))
+        .map(|c| match &c.term {
+            ResolvedTerm::Level { op, value_text, .. } => {
+                format!("{}{}{}", c.path, op.as_str(), value_text)
+            }
+            ResolvedTerm::Changed => format!("changed({})", c.path),
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -332,14 +381,17 @@ struct IntervalRow {
 }
 
 /// Resolved inputs shared by the `search` collectors and renderers: the parsed
-/// condition clauses, the `--show`/`--changed` selections, the loaded signal
-/// set, the time window, and the display labels. Built once per invocation.
+/// condition clauses, the `--show` selection, the loaded signal set, the time
+/// window, and the display labels. Built once per invocation.
 struct SearchSetup {
     /// OR clauses: each inner vec is one `--condition` (a comma-separated AND
     /// list); a time satisfies the search when *any* clause holds.
     clauses: Vec<Vec<ResolvedCond>>,
     show_sids: Vec<Sid>,
-    changed_sid: Option<Sid>,
+    /// Distinct signals under a `changed()` term, path-sorted. Non-empty ⇔
+    /// event mode (setup guarantees every clause carries a changed() term
+    /// then); empty ⇔ interval/segment mode.
+    changed_sids: Vec<Sid>,
     sel_ref: Vec<Sid>,
     t0: i64,
     t1: i64,
@@ -382,25 +434,42 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
         }
     }
 
+    // Mode split: a clause with a changed() term describes ticks (event mode);
+    // a clause without one describes spans (interval/segment mode). The two
+    // row shapes cannot merge, so mixing is rejected: either every clause
+    // carries a changed() term or none does.
+    let with_changed = clauses
+        .iter()
+        .filter(|cl| cl.iter().any(|c| matches!(c.term, ResolvedTerm::Changed)))
+        .count();
+    if with_changed > 0 && with_changed < clauses.len() {
+        return Err(
+            "cannot mix changed() and level-only --condition clauses: a changed() clause \
+             fires at ticks (event mode) while a level-only clause spans time (interval \
+             mode); give every clause a changed() term, or run two searches"
+                .to_string(),
+        );
+    }
+    let changed_set: BTreeSet<Sid> = clauses
+        .iter()
+        .flatten()
+        .filter(|c| matches!(c.term, ResolvedTerm::Changed))
+        .map(|c| c.sid)
+        .collect();
+    let mut changed_sids: Vec<Sid> = changed_set.into_iter().collect();
+    changed_sids.sort_by(|a, b| wave.signal(*a).path.cmp(&wave.signal(*b).path));
+
     let mut show_sids = resolve_show_sids(wave, &args.show)?;
-    let changed_sid = match &args.changed {
-        Some(c) => Some(resolve_one_signal(wave, c, "changed signal")?),
-        None => None,
-    };
-    if let Some(cs) = changed_sid {
-        if show_sids.is_empty() {
-            show_sids = vec![cs];
-        }
+    if !changed_sids.is_empty() && show_sids.is_empty() {
+        // Event mode with no --show: default to watching the changed() signals.
+        show_sids = changed_sids.clone();
     }
 
-    // The set of signals we must load: the union of every clause's signals +
-    // show + changed. Cost scales with the distinct signals referenced, not the
-    // clause count (PRD §9).
+    // The set of signals we must load: the union of every clause's signals
+    // (changed() terms included) + show. Cost scales with the distinct signals
+    // referenced, not the clause count (PRD §9).
     let mut selected: BTreeSet<Sid> = clauses.iter().flatten().map(|c| c.sid).collect();
     selected.extend(show_sids.iter().copied());
-    if let Some(cs) = changed_sid {
-        selected.insert(cs);
-    }
     let sel_vec: Vec<Sid> = selected.iter().copied().collect();
     wave.ensure_loaded(&sel_vec);
 
@@ -410,7 +479,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     Ok(SearchSetup {
         clauses,
         show_sids,
-        changed_sid,
+        changed_sids,
         sel_ref: sel_vec,
         t0,
         t1,
@@ -424,9 +493,9 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
 
 pub(super) fn compute_search(wave: &mut Wave, args: &Args) -> Result<Json, String> {
     let s = search_setup(wave, args)?;
-    if let Some(changed_sid) = s.changed_sid {
-        let (events, total, truncated) = search_event_collect(wave, &s, changed_sid);
-        Ok(search_event_json(wave, &s, changed_sid, &events, total, truncated))
+    if !s.changed_sids.is_empty() {
+        let (events, total, truncated) = search_event_collect(wave, &s);
+        Ok(search_event_json(wave, &s, &events, total, truncated))
     } else {
         let (results, total, truncated, has_show) = search_interval_collect(wave, &s);
         Ok(search_interval_json(wave, &s, &results, total, truncated, has_show))
@@ -435,9 +504,9 @@ pub(super) fn compute_search(wave: &mut Wave, args: &Args) -> Result<Json, Strin
 
 pub(super) fn text_search(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let s = search_setup(wave, args)?;
-    if let Some(changed_sid) = s.changed_sid {
-        let (events, total, truncated) = search_event_collect(wave, &s, changed_sid);
-        search_event_text(wave, &s, changed_sid, &events, total, truncated);
+    if !s.changed_sids.is_empty() {
+        let (events, total, truncated) = search_event_collect(wave, &s);
+        search_event_text(&s, &events, total, truncated);
     } else {
         let (results, total, truncated, has_show) = search_interval_collect(wave, &s);
         search_interval_text(&s, &results, total, truncated, has_show);
@@ -445,13 +514,13 @@ pub(super) fn text_search(wave: &mut Wave, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// Event mode collect: fire when `changed_sid` truly transitions and all
-/// conditions hold. Groups events by timestamp; a t=0 initialization is not a
-/// change. Returns `(events, total, truncated)`.
+/// Event mode collect: fire at ticks where any clause holds — its changed()
+/// signals all truly transition at that tick and its level terms hold. Groups
+/// events by timestamp; a t=0 initialization is not a change. Returns
+/// `(events, total, truncated)`.
 fn search_event_collect(
     wave: &Wave,
     s: &SearchSetup,
-    changed_sid: Sid,
 ) -> (Vec<Ev>, usize, bool) {
     let sel: &[Sid] = &s.sel_ref;
     let clauses: &[Vec<ResolvedCond>] = &s.clauses;
@@ -480,8 +549,10 @@ fn search_event_collect(
 
     let process_group =
         |state: &mut BTreeMap<Sid, String>, group: &[(Sid, String)], gt: i64| -> bool {
-            // Returns whether changed_sid is among the changed set after applying
-            // group, AND conditions hold (evaluated post-update).
+            // Compute the set of signals that truly transitioned at gt, apply
+            // the group, then evaluate the clauses post-update: fired ⇔ any
+            // clause's changed() signals are all in the set and its level
+            // terms hold.
             let mut changed: BTreeSet<Sid> = BTreeSet::new();
             for (gsid, gval) in group {
                 let old = state.get(gsid);
@@ -499,7 +570,7 @@ fn search_event_collect(
             for (gsid, gval) in group {
                 state.insert(*gsid, gval.clone());
             }
-            changed.contains(&changed_sid) && any_clause_holds(state, clauses)
+            any_clause_holds(state, &changed, clauses)
         };
 
     'outer: for (t, sid, raw) in stream {
@@ -567,7 +638,6 @@ fn search_event_collect(
 fn search_event_json(
     wave: &Wave,
     s: &SearchSetup,
-    changed_sid: Sid,
     events: &[Ev],
     total: usize,
     truncated: bool,
@@ -595,11 +665,16 @@ fn search_event_json(
     } else {
         (total, false)
     };
+    let changed_paths: Vec<Json> = s
+        .changed_sids
+        .iter()
+        .map(|sid| Json::str(wave.signal(*sid).path.clone()))
+        .collect();
     Obj::new()
         .push("mode", Json::str("event"))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
-        .push("changed", Json::str(wave.signal(changed_sid).path.clone()))
+        .push("changed", Json::Array(changed_paths))
         .push("show", Json::Array(show_paths))
         .push("begin_ticks", Json::Int(s.t0))
         .push("begin_h", Json::str(fmt_time(s.t0, s.ts)))
@@ -613,9 +688,7 @@ fn search_event_json(
 }
 
 fn search_event_text(
-    wave: &Wave,
     s: &SearchSetup,
-    changed_sid: Sid,
     events: &[Ev],
     total: usize,
     truncated: bool,
@@ -633,10 +706,9 @@ fn search_event_text(
         }
     } else {
         println!(
-            "No event in {}..{} where {} changed and {}.",
+            "No event in {}..{} where {}.",
             fmt_time(s.t0, s.ts),
             fmt_time(s.t1, s.ts),
-            wave.signal(changed_sid).path,
             s.cond_text
         );
     }
@@ -655,6 +727,9 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
     let limit = s.limit;
     let verbose = s.verbose;
     let has_show = !show_sids.is_empty();
+    // Interval/segment mode carries no changed() terms (setup guarantees it),
+    // so clause evaluation always sees an empty transition set.
+    let no_changed: BTreeSet<Sid> = BTreeSet::new();
 
     let mut state: BTreeMap<Sid, String> = BTreeMap::new();
     let mut results: Vec<IntervalRow> = Vec::new();
@@ -703,7 +778,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
             continue;
         }
         if !init_checks_done {
-            active = any_clause_holds(&state, clauses);
+            active = any_clause_holds(&state, &no_changed, clauses);
             seg_start = if active { Some(t0) } else { None };
             if active && has_show {
                 seg_values = Some(show_values(wave, &state, show_sids));
@@ -722,7 +797,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
             for (gsid, gval) in &group {
                 state.insert(*gsid, gval.clone());
             }
-            let cond_ok = any_clause_holds(&state, clauses);
+            let cond_ok = any_clause_holds(&state, &no_changed, clauses);
             if !has_show {
                 if cond_ok && !active {
                     active = true;
@@ -802,7 +877,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
     // final-emit path would otherwise materialize a `[T, T)` row, which the
     // reference correctly suppresses.
     if !init_checks_done && !truncated && t0 < t1 {
-        active = any_clause_holds(&state, clauses);
+        active = any_clause_holds(&state, &no_changed, clauses);
         seg_start = if active { Some(t0) } else { None };
         if active && has_show {
             seg_values = Some(show_values(wave, &state, show_sids));
@@ -820,7 +895,7 @@ fn search_interval_collect(wave: &Wave, s: &SearchSetup) -> (Vec<IntervalRow>, u
         for (gsid, gval) in &group {
             state.insert(*gsid, gval.clone());
         }
-        let cond_ok = any_clause_holds(&state, clauses);
+        let cond_ok = any_clause_holds(&state, &no_changed, clauses);
         if !has_show {
             if cond_ok && !active {
                 active = true;
