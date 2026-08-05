@@ -84,19 +84,6 @@ jobs:
           fi
           echo "OK: $bin glibc requirements within 2.17 baseline"
 
-      - name: Compute SHA256
-        run: |
-          cd dist
-          if command -v sha256sum >/dev/null; then
-            HASH=sha256sum
-          else
-            HASH="shasum -a 256"
-          fi
-          for f in rwave-*; do
-            $HASH "$f" > "$f.sha256"
-          done
-          ls -la
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -123,6 +110,20 @@ jobs:
           # files are already uniquely named, so a flat copy is unambiguous.
           find dist-staging -type f -exec cp -v {} dist/ \;
           ls -la dist/
+
+      # One SHA256SUMS instead of a .sha256 beside every binary: four one-line
+      # files cost four rows on the release page to carry four lines of text,
+      # and `sha256sum -c SHA256SUMS` verifies the whole set in one command.
+      #
+      # Computed here rather than per build job, so the hashes cover exactly the
+      # bytes being uploaded — after the artifact round-trip, not before it. The
+      # publish runner is always ubuntu, so plain sha256sum is available and the
+      # macOS `shasum -a 256` fallback the per-job step needed is gone.
+      - name: Compute SHA256SUMS
+        run: |
+          cd dist
+          sha256sum rwave-* > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Extract release notes for this tag from CHANGELOG.md
         id: notes
@@ -179,12 +180,9 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
-            THIRD-PARTY-NOTICES.md
             dist/rwave-linux-amd64
-            dist/rwave-linux-amd64.sha256
             dist/rwave-linux-arm64
-            dist/rwave-linux-arm64.sha256
             dist/rwave-windows-amd64.exe
-            dist/rwave-windows-amd64.exe.sha256
             dist/rwave-macos-arm64
-            dist/rwave-macos-arm64.sha256
+            dist/SHA256SUMS
+            THIRD-PARTY-NOTICES.md
