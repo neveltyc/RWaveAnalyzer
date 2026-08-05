@@ -129,13 +129,36 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           # Pull the `## [<tag>] ...` section out of CHANGELOG.md, stopping at
-          # the next `## ` heading. Falls back to a one-liner if the section
-          # isn't found.
+          # the next `## ` heading, then unwrap it.
+          #
+          # The unwrap is not cosmetic. GitHub renders a release body with hard
+          # line breaks (every newline becomes a <br>), unlike a .md file in the
+          # repo, where a hard-wrapped paragraph reflows into one block. Pasting
+          # the changelog verbatim therefore shows a jagged column of ~76-char
+          # lines. Joining each paragraph and list item back onto one line makes
+          # the release page render the way the file does.
+          #
+          # Blank lines, headings, table rows, and fenced blocks pass through as
+          # structure; every other line joins the item it continues, keeping that
+          # item's original indent so nested lists survive. Note the corollary:
+          # code in CHANGELOG.md must be fenced, since an indented-only block
+          # would be joined into a paragraph.
           notes="$(awk -v t="$tag" '
             $0 ~ "^## \\[" t "\\]" { capture = 1; next }
             capture && /^## / { exit }
             capture { print }
-          ' CHANGELOG.md)"
+          ' CHANGELOG.md | awk '
+            function flush() { if (buf != "") { print buf; buf = "" } }
+            /^```/ || /^~~~/   { flush(); fence = !fence; print; next }
+            fence              { print; next }
+            /^[ \t]*$/         { flush(); print ""; next }
+            /^#/               { flush(); print; next }
+            /^\|/              { flush(); print; next }
+            /^[ ]*[-*+][ ]/    { flush(); buf = $0; next }
+            /^[ ]*[0-9]+\.[ ]/ { flush(); buf = $0; next }
+            { line = $0; sub(/^[ \t]+/, "", line); buf = (buf == "" ? line : buf " " line) }
+            END { flush() }
+          ')"
           if [ -z "${notes//[[:space:]]/}" ]; then
             notes="Release $GITHUB_REF_NAME"
           fi
