@@ -71,6 +71,49 @@ for d in "${designs[@]}"; do
 done
 rm -f /tmp/_pv.$$ /tmp/_pf.$$
 
+# `search` needs signal names, so it cannot ride the all-designs loops above.
+# handshake_proto exists to exercise it: valid/ready/data cover all three modes
+# (interval, segment, event). Both that the mode runs and that VCD and FST agree.
+echo "== search modes (VCD/FST parity) =="
+SD=handshake_proto
+for cmd in "search --condition valid=1,ready=1" \
+           "search --condition valid=1,ready=1 --show data" \
+           "search --condition changed(data)" \
+           "search --condition changed(data),valid=1,ready=1" \
+           "--json search --condition changed(data)"; do
+  $RW $cmd "$STIM/$SD.vcd" > /tmp/_sv.$$ 2>&1; rcv=$?
+  $RW $cmd "$STIM/$SD.fst" > /tmp/_sf.$$ 2>&1; rcf=$?
+  if [[ "$rcv" -eq 0 && "$rcf" -eq 0 ]] && diff -q /tmp/_sv.$$ /tmp/_sf.$$ >/dev/null; then
+    ok
+  else
+    bad "$SD :: $cmd (rc=$rcv/$rcf, VCD≠FST?)"
+  fi
+done
+
+# Mode discriminator: the top-level key follows the condition, not a flag.
+if $RW --json search "$STIM/$SD.vcd" --condition 'changed(data)' 2>/dev/null \
+     | grep -q '"mode":"event"'; then ok; else bad "changed() selects event mode"; fi
+if $RW --json search "$STIM/$SD.vcd" --condition 'valid=1' 2>/dev/null \
+     | grep -q '"mode":"interval"'; then ok; else bad "level-only stays interval mode"; fi
+
+# Mixing edge and level clauses has no single row shape. It is caught in setup
+# (resolving terms needs the file), so it is a runtime error — exit 1, not the
+# exit 2 of an argv usage error.
+mix=$($RW search "$STIM/$SD.vcd" --condition 'changed(data)' --condition 'valid=1' 2>&1)
+mixcode=$?
+[[ "$mixcode" -eq 1 && "$mix" == *"cannot mix changed()"* ]] \
+  && ok || bad "mixed changed()/level clauses (exit=$mixcode)"
+
+# The removed --changed flag is an argv error (exit 2) that names the
+# replacement syntax. Captured, not piped: `pipefail` would report rwave's
+# non-zero exit for the whole pipeline even when the grep matched.
+cf=$($RW search "$STIM/$SD.vcd" --condition 'valid=1' --changed data 2>&1)
+cfcode=$?
+[[ "$cfcode" -eq 2 && "$cf" == *'changed(SIG)'* ]] \
+  && ok || bad "--changed hints at changed(SIG) (exit=$cfcode)"
+
+rm -f /tmp/_sv.$$ /tmp/_sf.$$
+
 echo "== batch mode =="
 BF="$STIM/handshake_proto.vcd"
 # Consistency (core): a batch `result` is byte-identical to the equivalent

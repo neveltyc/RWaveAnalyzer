@@ -1,6 +1,6 @@
 // handshake_proto.v — a valid/ready data handshake with back-pressure. Built
 // to exercise `search`: interval mode (valid=1), segment mode (--show data),
-// event mode (--changed data), and multi-condition (valid=1,ready=1).
+// event mode (changed(data)), and multi-condition (valid=1,ready=1).
 `timescale 1ns/1ps
 module handshake_proto;
   reg        clk;

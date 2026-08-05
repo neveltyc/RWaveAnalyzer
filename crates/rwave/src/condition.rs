@@ -4,7 +4,9 @@
 //! Search condition parsing and value matching.
 //!
 //! A condition list is comma-separated AND terms. Each term is
-//! `SIG=VAL`, `SIG==VAL`, or `SIG!=VAL`. Values may be decimal (`5`), hex
+//! `SIG=VAL`, `SIG==VAL`, `SIG!=VAL`, or the edge predicate `changed(SIG)`
+//! (true at exactly the ticks where SIG transitions; its presence switches
+//! `search` to event mode). Values may be decimal (`5`), hex
 //! (`0xff`), binary (`b1010`, `0b1010`), 4-state (`b1x0z`), or a bare 4-state
 //! literal (`1x0`). Numeric targets match by numeric equality; 4-state targets
 //! match as (width-aware) bit patterns. `!=` does **not** match x/z/undefined.
@@ -70,16 +72,27 @@ impl Target {
     }
 }
 
+/// The body of one condition term.
+#[derive(Debug, Clone)]
+pub enum TermBody {
+    /// `SIG op VAL`: compare the signal's current value against a target.
+    Level {
+        op: Op,
+        target: Target,
+        /// The value text as written (for the resolved label).
+        value_text: String,
+    },
+    /// `changed(SIG)`: true at exactly the ticks where the signal transitions.
+    Changed,
+}
+
 /// A parsed condition term prior to resolving the signal pattern.
 #[derive(Debug, Clone)]
 pub struct ParsedCondition {
     pub pattern: String,
-    pub op: Op,
-    pub target: Target,
-    /// Original `SIG op VAL` text (for labels).
+    pub term: TermBody,
+    /// Original term text (for labels).
     pub original: String,
-    /// The value text as written (for the resolved label).
-    pub value_text: String,
 }
 
 /// Minimal arbitrary-precision unsigned integer for comparing wide bus values
@@ -253,9 +266,13 @@ pub fn parse_conditions(text: &str) -> Result<Vec<ParsedCondition>, ConditionPar
         if item.is_empty() {
             continue;
         }
+        if let Some(term) = parse_changed_term(item)? {
+            out.push(term);
+            continue;
+        }
         let (sig, op, val) = split_condition(item)
             .ok_or_else(|| ConditionParseError(format!(
-                "invalid condition {}; expected SIG=VAL, SIG==VAL, or SIG!=VAL", crate::format::pyrepr(item)
+                "invalid condition {}; expected SIG=VAL, SIG==VAL, SIG!=VAL, or changed(SIG)", crate::format::pyrepr(item)
             )))?;
         if sig.is_empty() || val.is_empty() {
             return Err(ConditionParseError(format!(
@@ -266,16 +283,54 @@ pub fn parse_conditions(text: &str) -> Result<Vec<ParsedCondition>, ConditionPar
             .map_err(|e| ConditionParseError(e.0))?;
         out.push(ParsedCondition {
             pattern: sig.to_string(),
-            op,
-            target,
+            term: TermBody::Level { op, target, value_text: val.to_string() },
             original: item.to_string(),
-            value_text: val.to_string(),
         });
     }
     if out.is_empty() {
         return Err(ConditionParseError("search requires at least one condition".into()));
     }
     Ok(out)
+}
+
+/// Recognize the `changed(SIG)` edge-predicate form. Any term starting with
+/// `changed(` (case-insensitive) is claimed by this syntax. A bare term (no
+/// operator) was never valid before, so no working bare condition changes
+/// meaning; the one shadowed spelling is a `changed(...)=VAL` level term on an
+/// escaped identifier that itself begins with `changed(`, which stays
+/// reachable through a scope-qualified pattern (`tb.changed(a)=1` does not
+/// start with the prefix). Returns `Ok(None)` when the term does not start
+/// with the prefix; malformed `changed(...` shapes get targeted errors.
+fn parse_changed_term(item: &str) -> Result<Option<ParsedCondition>, ConditionParseError> {
+    const PREFIX_LEN: usize = "changed(".len();
+    if item.len() < PREFIX_LEN || !item.as_bytes()[..PREFIX_LEN].eq_ignore_ascii_case(b"changed(") {
+        return Ok(None);
+    }
+    let body = &item[PREFIX_LEN..];
+    if let Some(inner) = body.strip_suffix(')') {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return Err(ConditionParseError(
+                "changed() requires a signal, e.g. changed(req)".into(),
+            ));
+        }
+        return Ok(Some(ParsedCondition {
+            pattern: inner.to_string(),
+            term: TermBody::Changed,
+            original: item.to_string(),
+        }));
+    }
+    if body.contains(')') {
+        // e.g. `changed(req)=1` — trailing text after the closing paren.
+        return Err(ConditionParseError(format!(
+            "invalid term {}: changed(SIG) is a predicate and takes no comparison", crate::format::pyrepr(item)
+        )));
+    }
+    // No closing paren — a plain missing `)`, or `changed(a,b)` cut apart by
+    // the AND comma.
+    Err(ConditionParseError(format!(
+        "invalid term {}: unclosed changed( — missing ')'? note changed() takes exactly one signal: a comma inside the parens is read as an AND separator, so \"both changed\" is changed(a),changed(b)", crate::format::pyrepr(item)
+    )))
 }
 
 /// Split `SIG op VAL`, finding the operator. Order matters: check `==`/`!=`
@@ -480,7 +535,39 @@ mod tests {
         let conds = parse_conditions("valid=1,ready=1").unwrap();
         assert_eq!(conds.len(), 2);
         assert_eq!(conds[0].pattern, "valid");
-        assert_eq!(conds[0].op, Op::Eq);
+        assert!(matches!(conds[0].term, TermBody::Level { op: Op::Eq, .. }));
+    }
+
+    #[test]
+    fn changed_term_parses() {
+        let conds = parse_conditions("changed(req),ready=0").unwrap();
+        assert_eq!(conds.len(), 2);
+        assert_eq!(conds[0].pattern, "req");
+        assert!(matches!(conds[0].term, TermBody::Changed));
+        assert_eq!(conds[0].original, "changed(req)");
+        assert!(matches!(conds[1].term, TermBody::Level { op: Op::Eq, .. }));
+        // Case-insensitive prefix; inner whitespace trimmed.
+        let conds = parse_conditions("Changed( top.req )").unwrap();
+        assert_eq!(conds[0].pattern, "top.req");
+        assert!(matches!(conds[0].term, TermBody::Changed));
+    }
+
+    #[test]
+    fn changed_term_errors_are_targeted() {
+        // Empty signal.
+        let e = parse_conditions("changed()").unwrap_err();
+        assert!(e.0.contains("requires a signal"), "{}", e.0);
+        // Comma inside the parens is cut by the AND split; the orphan
+        // `changed(a` gets the one-signal guidance (parse short-circuits, so
+        // the stray `b)` never produces a second confusing error).
+        let e = parse_conditions("changed(a,b)").unwrap_err();
+        assert!(e.0.contains("exactly one signal"), "{}", e.0);
+        // Trailing comparison after the closing paren.
+        let e = parse_conditions("changed(req)=1").unwrap_err();
+        assert!(e.0.contains("takes no comparison"), "{}", e.0);
+        // The generic error now advertises the form.
+        let e = parse_conditions("req").unwrap_err();
+        assert!(e.0.contains("changed(SIG)"), "{}", e.0);
     }
 
     #[test]

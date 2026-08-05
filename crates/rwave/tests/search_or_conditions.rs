@@ -202,16 +202,15 @@ fn or_segment_mode_splits_within_union_windows() {
 
 #[test]
 fn or_event_mode_fires_per_clause() {
-    // #14: event mode fires when --changed truly transitions AND any clause
-    // holds. `data` changes at 15ns (inside ch0's handshake) and 35ns (inside
-    // ch1's) — one event enabled by each distinct clause.
+    // #14: event mode fires when a clause's changed() signal truly transitions
+    // AND that clause's level terms hold. `data` changes at 15ns (inside ch0's
+    // handshake) and 35ns (inside ch1's) — one event enabled by each clause.
     let vcd = fixture("event_union");
     let out = ok_stdout(
         &vcd,
         &[
-            "--condition", "ch0_valid=1,ch0_ready=1",
-            "--condition", "ch1_valid=1,ch1_ready=1",
-            "--changed", "data",
+            "--condition", "changed(data),ch0_valid=1,ch0_ready=1",
+            "--condition", "changed(data),ch1_valid=1,ch1_ready=1",
             "--begin", "0", "--end", "100ns",
         ],
     );

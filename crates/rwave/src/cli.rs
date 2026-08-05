@@ -5,9 +5,9 @@
 //!
 //! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
 //! per-command flags are `--begin`, `--end`, `--filter`, `--at`, `--condition`,
-//! `--show`, `--changed`. `--json`, `--limit`, and `--verbose` may appear
-//! either before or after the subcommand. We avoid a third-party arg parser to
-//! keep the static binary small and the error text under our control.
+//! `--show`. `--json`, `--limit`, and `--verbose` may appear either before or
+//! after the subcommand. We avoid a third-party arg parser to keep the static
+//! binary small and the error text under our control.
 
 /// Default result limit when neither `--limit` nor `--verbose` is given.
 pub const DEFAULT_LIMIT: usize = 200;
@@ -57,7 +57,6 @@ pub struct Args {
     /// (OR-of-ANDs). Empty = no `--condition` given.
     pub condition: Vec<String>,
     pub show: Option<String>,
-    pub changed: Option<String>,
 }
 
 /// Global default options for a batch run, applied to every command unless a
@@ -76,7 +75,6 @@ pub struct Defaults {
     /// of its own replaces this whole group (see [`parse_batch_line`]).
     pub condition: Vec<String>,
     pub show: Option<String>,
-    pub changed: Option<String>,
 }
 
 /// A fully parsed `--batch` invocation: the file to load once, the output
@@ -117,8 +115,9 @@ Commands:\n\
                                                 Per-signal stats: change count, edges, static detection\n\
   snapshot  <file> --at T [--filter K1,K2]      Known signal values at a given time point\n\
   compare   <file> --at T1,T2 [--filter K1,K2]  Diff signal values between two time points\n\
-  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--changed K] [--begin T] [--end T]\n\
-                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses\n\
+  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]\n\
+                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;\n\
+                                                a changed(SIG) term fires at SIG's transitions (event mode)\n\
 \n\
 Global options:\n\
   --json        Output compact structured JSON instead of text\n\
@@ -148,7 +147,7 @@ Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is ra
 /// for --filter", not "print version").
 const VALUE_FLAGS: &[&str] = &[
     "--limit", "--begin", "--end", "--filter", "--at",
-    "--condition", "--show", "--changed",
+    "--condition", "--show",
 ];
 
 /// Parse a slice of argv tokens (excluding argv[0]).
@@ -201,7 +200,6 @@ struct Acc {
     at: Option<String>,
     condition: Vec<String>,
     show: Option<String>,
-    changed: Option<String>,
     command: Option<Command>,
     positionals: Vec<String>,
 }
@@ -256,8 +254,10 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                 acc.show = Some(require_value(argv, i, "--show")?);
             }
             "--changed" => {
-                i += 1;
-                acc.changed = Some(require_value(argv, i, "--changed")?);
+                return Err(
+                    "--changed is not available; did you mean --condition \"changed(SIG)\"?"
+                        .into(),
+                );
             }
             s if s.starts_with("--") => {
                 return Err(format!("unrecognized argument: {s}"));
@@ -366,7 +366,6 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         at: acc.at,
         condition: acc.condition,
         show: acc.show,
-        changed: acc.changed,
     }))
 }
 
@@ -404,7 +403,6 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
-            changed: acc.changed,
         },
     }))
 }
@@ -446,7 +444,6 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         acc.condition
     };
     let show = acc.show.or_else(|| defaults.show.clone());
-    let changed = acc.changed.or_else(|| defaults.changed.clone());
     check_required(&command, &at, &condition)?;
     check_limit(limit)?;
     Ok(Args {
@@ -461,7 +458,6 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         at,
         condition,
         show,
-        changed,
     })
 }
 
@@ -638,6 +634,16 @@ mod tests {
         match p(&["snapshot", "x.vcd"]) {
             ParseOutcome::Error(e) => assert!(e.contains("--at")),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn changed_flag_removed_with_hint() {
+        match p(&["search", "x.vcd", "--condition", "a=1", "--changed", "b"]) {
+            ParseOutcome::Error(e) => {
+                assert!(e.contains("--condition \"changed(SIG)\""), "{e}");
+            }
+            _ => panic!("expected error for removed --changed flag"),
         }
     }
 

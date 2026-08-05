@@ -6,6 +6,35 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-08-05
+
+`search`'s event mode moves out of a flag and into the condition itself:
+`changed(SIG)` is an edge predicate term, true at exactly the ticks where SIG
+transitions. It was the one part of a search that could not be written as a
+condition, and being a flag it applied to the whole query — so an edge could
+not be scoped to one OR clause, and two signals could not be required to
+transition together. Both now fall out of the existing grammar. The
+`--changed` flag is removed. Also fixes a VCD correctness bug: mid-file
+`$dumpall` checkpoints were parsed as time flowing backwards and their values
+dropped.
+
+### Changed
+- **`search` event mode is now spelled inside the condition: `changed(SIG)`.**
+  `--condition "changed(req),ready=0"` fires at the ticks where `req`
+  transitions while `ready=0` holds (level terms evaluated post-update, as
+  before; t=0 initialization is not a transition). `changed(a),changed(b)`
+  requires both to transition on the same tick — previously inexpressible, as
+  was scoping an edge to one OR clause. A `changed()` term may appear in any
+  clause, but then every clause must carry one (event ticks and level spans
+  cannot merge into one result shape). With no `--show`, event mode defaults
+  to showing the `changed()` signals. The JSON `changed` echo field is now an
+  array of paths.
+
+### Removed
+- **The `--changed` flag.** Its event mode was a variant of `--condition`
+  wearing a flag's clothes, and it could not compose with OR clauses. Using it
+  now fails with a pointer to the `changed(SIG)` syntax.
+
 ### Fixed
 - **VCD: mid-file `$dumpall` checkpoints are no longer dropped.** The vendored
   wellen parser treated `$dumpall` as timestep zero; per IEEE 1364-2005
