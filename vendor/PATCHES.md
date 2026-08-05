@@ -22,4 +22,14 @@ entry when updating a vendor copy.
 - **Safety:** files that open with a dump block before any `#` timestamp are
   unaffected — `VcdEncoder::value` already synthesizes time 0 for values seen
   before the first timestep.
-- **Upstream:** not fixed as of ekiwi/wellen main, 2026-07-18.
+- **Upstream:** reported as [ekiwi/wellen#137][w137] and **fixed upstream in
+  v0.25.6** (issue closed 2026-07-21). Upstream's fix is the same edit this
+  patch makes — `$dumpall` moved into the `IgnoredCmd` arm — so the two are
+  behaviourally identical, and upstream additionally carries an Icarus-generated
+  regression VCD.
+- **On next sync: drop this patch.** It is redundant at wellen >= 0.25.6; the
+  vendored copy is pinned at 0.23.0, which predates the fix, so it is still
+  required until that bump happens. Re-applying it on top of >= 0.25.6 would
+  not break anything (the arm is already correct) but the hunk will not apply.
+
+[w137]: https://github.com/ekiwi/wellen/issues/137
