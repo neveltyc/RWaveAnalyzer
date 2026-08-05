@@ -401,5 +401,16 @@ net that needs no external reference.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The vendored components keep their own licenses:
-`vendor/wellen` and `vendor/fst-reader` are both BSD-3-Clause.
+MIT — see [LICENSE](LICENSE), which covers rwave's own code. The vendored
+components keep their own licenses: `vendor/wellen` and `vendor/fst-reader` are
+both BSD-3-Clause, and each retains its license file in its own directory.
+
+Because rwave ships as a single statically linked binary, a downloaded release
+asset carries no repository around it — so the notices its dependencies require
+in a binary redistribution are collected in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which is published with every
+release. Regenerate it after a dependency change:
+
+```sh
+bash scripts/gen-notices.sh
+```

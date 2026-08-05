@@ -179,6 +179,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
+            THIRD-PARTY-NOTICES.md
             dist/rwave-linux-amd64
             dist/rwave-linux-amd64.sha256
             dist/rwave-linux-arm64
