@@ -47,20 +47,20 @@ jobs:
       - name: verify/run.sh against bundled stimuli
         run: bash verify/run.sh
 
-      # THIRD-PARTY-NOTICES.md is published as a release asset, so a dependency
-      # change that is not reflected there ships a binary whose notices are
+      # third-party-licenses.md is published as a release asset, so a dependency
+      # change that is not reflected there ships a binary whose licence list is
       # incomplete. Regenerate and fail on drift rather than trusting the author
       # to remember. The generator pins `--target all`, so this is stable
       # regardless of the runner's OS.
-      - name: THIRD-PARTY-NOTICES.md is up to date
+      - name: third-party-licenses.md is up to date
         run: |
-          bash scripts/gen-notices.sh
-          if ! git diff --quiet -- THIRD-PARTY-NOTICES.md; then
-            echo "THIRD-PARTY-NOTICES.md is stale; run: bash scripts/gen-notices.sh" >&2
-            git diff --stat -- THIRD-PARTY-NOTICES.md >&2
+          bash scripts/gen-licenses.sh
+          if ! git diff --quiet -- third-party-licenses.md; then
+            echo "third-party-licenses.md is stale; run: bash scripts/gen-licenses.sh" >&2
+            git diff --stat -- third-party-licenses.md >&2
             exit 1
           fi
-          echo "OK: notices match the current dependency graph"
+          echo "OK: licence list matches the current dependency graph"
 
   cross-build:
     name: Cross build (${{ matrix.target }})

@@ -16,8 +16,8 @@ full reference.
 
 ## Install
 
-Prebuilt binaries are attached to every tagged release, with one `SHA256SUMS`
-covering them all (`sha256sum -c SHA256SUMS`).
+Prebuilt binaries are attached to every tagged release, with one `sha256sums.txt`
+covering them all (`sha256sum -c sha256sums.txt`).
 All four read VCD/FST/GHW; only `rwave-linux-amd64` includes experimental
 WLF and FSDB support. Pick the one matching the runtime and `chmod +x`:
 
