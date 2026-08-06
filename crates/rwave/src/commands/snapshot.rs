@@ -130,7 +130,9 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
         .push("undefined", Json::Int(d.undef_len as i64))
         .push("shown", Json::Int(shown_n as i64))
         .push("truncated", Json::Bool(trunc));
-    let obj = push_trunc_hint(obj, trunc, shown_n, d.known_count, true, "signals")
+    // `total`, not `known_count`: under --verbose the rows also carry the
+    // undefined signals, so the known count is not what was clipped.
+    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "signals")
         .push("signals", Json::Array(sig_arr))
         .build();
     Ok(obj)
