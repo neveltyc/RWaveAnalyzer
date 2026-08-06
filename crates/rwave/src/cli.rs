@@ -134,19 +134,19 @@ Commands:
                                                 a changed(SIG) term fires at SIG's transitions (event mode)
 
 Selection options (every command above except info):
-  --scope P1,P2     Restrict to hierarchy subtrees. A name without a '.' matches an
-                    instance name ('*' and '?' allowed); a dotted path matches as a
-                    segment-aligned suffix of a scope path, so 'u_tx.u_fifo' finds
-                    that subtree wherever it sits.
+  --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
+                    name ('*' and '?' allowed); a path matches as a segment-aligned
+                    suffix of a scope path, so 'u_tx.u_fifo' finds that subtree
+                    wherever it sits.
   --depth N         Keep signals at most N levels below the matched --scope root; a
                     signal sitting directly in the scope is depth 1. Requires --scope.
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
 
-Patterns are comma-separated and case-insensitive. One without a '.' matches the
-signal's leaf name, so 'tx_err' finds the signal and not the synchronizer instance
-named after it; one containing a '.' matches the whole hierarchical path. Either
+Patterns are comma-separated and case-insensitive. One with no separator matches
+the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
+instance named after it; one containing a '.' or '/' matches the whole path. Either
 way, no '*' or '?' means substring, and '*'/'?' make it an anchored glob ('[' and
 ']' stay literal, for bus ranges). An empty value ('') means "not given".
 
