@@ -78,7 +78,8 @@ Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, `SIG!=VAL`,
 or `changed(SIG)`.
 
 - Signal pattern must resolve to **exactly one** signal. If ambiguous,
-  the error lists candidates — use a more specific path.
+  the error lists candidates — add `--scope`/`--exclude` to narrow the
+  lookup, or give the full path (a full path bypasses selection).
 - Values: decimal (`5`), hex (`0xff`), binary (`b1010` / `0b1010`),
   4-state (`b1x0z`), or bare `x`/`z`.
 - `!=` does **not** match `x`/`z` ("unknown is not evidence of
@@ -105,21 +106,60 @@ fields you'll usually parse out.
 | Command | Common invocation | Useful JSON fields |
 |---|---|---|
 | `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
-| `list` | `rwave --json list <F> [--filter K]` | `signals[].path`, `signals[].width`, `signals[].type` |
-| `dump` | `rwave --json dump <F> --begin T --end T --filter K` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
-| `summary` | `rwave --json summary <F> [--filter K]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `active`, `static` |
-| `snapshot` | `rwave --json snapshot <F> --at T [--filter K]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
-| `compare` | `rwave --json compare <F> --at T1,T2 [--filter K]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
+| `list` | `rwave --json list <F> [selection]` | `signals[].path`, `signals[].width`, `signals[].type` |
+| `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
+| `summary` | `rwave --json summary <F> [selection]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `active`, `static` |
+| `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
+| `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
 | `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
 
-For `dump`, **always pass `--begin/--end` and `--filter`** — running it
+For `dump`, **always pass `--begin/--end` and a selection** — running it
 unbounded on a large dump streams the whole file.
-For `snapshot` and `compare` on large files, **always pass `--filter`** — unfiltered scans emit every signal.
+For `snapshot` and `compare` on large files, **always pass a selection** — unfiltered scans emit every signal.
 
-Filter patterns: substring (`clk`), suffix glob (`*_valid`), prefix glob (`top.u_dma.*`).
-`list` shows all aliases of matched signals, not only the matching paths.
-A signal hit once may surface dozens of alias rows — use `--verbose` to group by `id`.
-For one signal = one row, filter precisely and use `--verbose` — same `id` means same signal.
+## Selecting signals
+
+Four options, applied to each signal path in turn. All work on every command
+(`search` included, see below) and all work as `--batch` defaults.
+
+| | |
+|---|---|
+| `--scope P1,P2` | restrict to subtrees |
+| `--depth N` | at most N levels below the `--scope` root; a signal directly in it is depth 1. Requires `--scope` |
+| `--filter K1,K2` | keep matching signals |
+| `--exclude K1,K2` | drop matching signals; applied last |
+
+**A pattern with no `.` matches the leaf name; a pattern with a `.` matches the
+whole path.** This is the rule to internalize. RTL names scopes after signals —
+a CDC synchronizer instance is conventionally `u_sync_<sig>` — so `--filter
+tx_fifo_push_err` gets you the status bit, not the synchronizer's clocks and
+flops. When you *do* want a subtree, write the dot: `--filter 'u_dma.'`, or
+`--exclude 'u_sync_status.'` to drop one. `--exclude u_sync_status` (no dot)
+drops nothing, because no *leaf* is called that.
+
+`--scope` matches segment-wise, so `u_fifo` never selects `u_fifo_ctrl`. A
+dot-free value names an instance (`*`/`?` allowed) and includes its
+descendants; a dotted value is a segment-aligned suffix, so `u_tx.u_fifo`
+finds that subtree without you knowing the path from the root.
+
+If `list --filter X` returns far more rows than expected, **do not just raise
+`--limit`** — narrow structurally with `--scope`/`--depth`, or subtract with
+`--exclude`.
+
+Selection is per path: a signal is kept when any one of its paths clears every
+option, so excluding a synchronizer never costs you the status bit wired into
+it. `list` prints only the paths that survived `--scope`/`--depth`/`--exclude`;
+`--filter` hides no rows, so a hit may still surface several alias rows — use
+`--verbose` and group by `id` (same `id` = same signal).
+
+`search` has no row filter (its `--condition`/`--show` names are the
+selection), so the options narrow **name resolution** instead: they are usually
+what turns `pattern ... matches N signals` into a unique hit. A name written as
+a full path bypasses selection entirely. Note for batch plans: a `--batch`-line
+`--filter` now narrows `search` lines too; pass `--filter ''` on a line to lift
+it.
+
+A selection matching nothing is an empty result with `ok:true`, not an error.
 
 
 ## Batch mode (one load, many queries)
@@ -160,9 +200,10 @@ printf '%s\n' \
 
 ```
 1. info                        learn time range, scopes, timescale
-2. list --filter <suspect>     find the signals of interest
-3. summary --filter <window>   spot active vs static signals
-4. dump or search              drill into specifics
+2. list --scope <block>        see one block at a time (--depth 1 to skip submodules)
+3. list --filter <suspect>     find the signals of interest by name
+4. summary --filter <window>   spot active vs static signals
+5. dump or search              drill into specifics
 ```
 
 ### "What happened at time T?"
@@ -199,6 +240,7 @@ sub-interval, with `--show` capturing the field values you care about.
 summary --filter clk,rst,reset
 # clk should toggle with balanced rise/fall
 # rst should be static after the initial assertion
+# noisy? --exclude '*_clkgen.*' drops generated clock trees
 ```
 
 ### Event-driven signal investigation
