@@ -74,7 +74,10 @@ fn resolve_one_signal(wave: &Wave, pattern: &str, role: &str) -> Result<Sid, Str
     let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
     let mut matched: Vec<Sid> = Vec::new();
     for (sid, info) in wave.signals().iter().enumerate() {
-        if info.aliases.iter().any(|p| filters.matches(p)) {
+        if info
+            .alias_pairs()
+            .any(|(p, sc)| filters.matches_path_leaf(p, crate::model::leaf_of(p, sc)))
+        {
             matched.push(sid);
         }
     }
@@ -134,7 +137,10 @@ fn resolve_show_sids(wave: &Wave, show: &Option<String>) -> Result<Vec<Sid>, Str
         }
         let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
         for (sid, info) in wave.signals().iter().enumerate() {
-            if info.aliases.iter().any(|p| filters.matches(p)) {
+            if info
+                .alias_pairs()
+                .any(|(p, sc)| filters.matches_path_leaf(p, crate::model::leaf_of(p, sc)))
+            {
                 selected.insert(sid);
                 matched_any = true;
             }
