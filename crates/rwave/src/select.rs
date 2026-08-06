@@ -23,16 +23,15 @@
 //!
 //! Gates are ANDed and `--exclude` is applied last, so it always wins.
 
-use crate::filter::{compile_glob, glob_match, Filters, GlobTok};
+use crate::filter::{compile_glob, glob_match, Filters, GlobTok, SEPARATORS};
 use crate::filter::{MAX_FILTER_PATTERN_LEN, MAX_FILTER_WILDCARDS};
 use crate::model::{leaf_of, SignalInfo};
 
-/// Hierarchy separators. Wellen normalizes VCD/FST/GHW paths to `.`; the
-/// built-in FSDB backend emits either `.` or `/`, so segmentation accepts both.
-/// A scope whose *name* contains a separator (an escaped identifier) segments
-/// wrongly here — documented in docs/PLUGIN.md, and harmless for the leaf name,
-/// which is never derived by splitting.
-const SEPARATORS: [char; 2] = ['.', '/'];
+// Scope paths are segmented on [`SEPARATORS`], the same set that decides
+// whether a `--filter` pattern addresses a leaf or a path. A scope whose *name*
+// contains a separator (an escaped identifier) segments wrongly here —
+// documented in docs/PLUGIN.md, and harmless for the leaf name, which is never
+// derived by splitting.
 
 /// One compiled `--scope` value.
 #[derive(Debug, Clone)]
@@ -470,6 +469,27 @@ mod tests {
         assert!(s.keeps_alias("top/u_dma/req", "top/u_dma"));
         let s = sel(Some("top.u_dma"), None, None, None);
         assert!(s.keeps_alias("top/u_dma/req", "top/u_dma"), "pattern separator is free");
+    }
+
+    #[test]
+    fn filter_and_exclude_reach_slash_hierarchies_too() {
+        // The gate that used to be blind to '/': only `--scope` segmented on
+        // both separators, so on an FSDB hierarchy a path-shaped --filter or
+        // --exclude was matched against the leaf name and could never hit.
+        const REQ: (&str, &str) = ("top/u_dma/req", "top/u_dma");
+        const OTHER: (&str, &str) = ("top/u_cpu/req", "top/u_cpu");
+
+        let s = sel(None, None, Some("top/u_dma/*"), None);
+        assert!(keeps(&s, REQ));
+        assert!(!keeps(&s, OTHER));
+
+        let s = sel(None, None, None, Some("u_dma/"));
+        assert!(!keeps(&s, REQ), "the subtree is dropped");
+        assert!(keeps(&s, OTHER));
+
+        // A bare name still means the leaf, so it spans both subtrees.
+        let s = sel(None, None, Some("req"), None);
+        assert!(keeps(&s, REQ) && keeps(&s, OTHER));
     }
 
     // -- --depth -------------------------------------------------------------
