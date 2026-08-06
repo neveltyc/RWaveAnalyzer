@@ -150,8 +150,13 @@ impl Selection {
         let depth = match depth {
             // A depth without a scope cannot be honored and is rejected at the
             // CLI layer; ignore it here rather than filtering on a base that
-            // does not exist.
-            Some(n) if n > 0 && scope.is_some() => Some(n as u32),
+            // does not exist. Saturate rather than cast: a depth past u32 means
+            // "as deep as it goes", and wrapping would turn it into a small
+            // number — or into 0, which matches nothing — and answer with a
+            // quietly wrong result set instead of everything.
+            Some(n) if n > 0 && scope.is_some() => {
+                Some(u32::try_from(n).unwrap_or(u32::MAX))
+            }
             _ => None,
         };
         Ok(Selection {
@@ -523,6 +528,20 @@ mod tests {
         // would put this signal a level deeper than it is.
         let s = sel(Some("tb"), Some(1), None, None);
         assert!(s.keeps_alias(r"tb.\foo.bar", "tb"));
+    }
+
+    #[test]
+    fn an_enormous_depth_saturates_instead_of_wrapping() {
+        // A depth past u32 means "as deep as it goes". Casting wrapped it —
+        // 2^32 became 0, which matches nothing — so a larger depth returned
+        // fewer signals than a smaller one.
+        for n in [u32::MAX as i64 + 1, u32::MAX as i64 + 2, i64::MAX] {
+            let s = sel(Some("u_m0"), Some(n), None, None);
+            assert!(
+                s.keeps_alias("root.u_m0.u_a.u_x.cnt", "root.u_m0.u_a.u_x"),
+                "--depth {n} should keep everything under the scope"
+            );
+        }
     }
 
     #[test]
