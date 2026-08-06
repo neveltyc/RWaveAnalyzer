@@ -129,7 +129,8 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
         .push("known", Json::Int(d.known_count as i64))
         .push("undefined", Json::Int(d.undef_len as i64))
         .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc))
+        .push("truncated", Json::Bool(trunc));
+    let obj = push_trunc_hint(obj, trunc, shown_n, d.known_count, true, "signals")
         .push("signals", Json::Array(sig_arr))
         .build();
     Ok(obj)

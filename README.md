@@ -171,7 +171,8 @@ options described in [Selecting signals](#selecting-signals). Times take the
 unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example `17.5us`); a
 bare integer is interpreted as raw ticks. The global flags are `--json`
 for structured output, `--limit N` to cap the number of rows (the default is
-200, and `0` means unlimited), and `--verbose` for extra fields. A search
+500, and `0` means unlimited), and `--verbose` for extra fields. A clipped
+result says so on its last line, and carries a `hint` field under `--json`. A search
 condition is a comma-separated AND-list of `SIG=VAL`, `SIG!=VAL`, or
 `changed(SIG)` terms, with values written in decimal, hexadecimal (`0xff`),
 binary (`b1010`), or 4-state. `changed(SIG)` is an edge predicate: the search

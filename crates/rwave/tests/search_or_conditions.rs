@@ -235,8 +235,10 @@ fn or_limit_caps_merged_results() {
         &[&clauses[..], &["--limit", "2", "--begin", "0", "--end", "100ns"]].concat(),
     );
     assert!(
-        capped.contains("Found: 3+ interval(s)") && capped.contains("truncated"),
-        "--limit 2 shows 2 of 3 and notes truncation:\n{capped}"
+        capped.contains("Found: 3+ interval(s)")
+            && capped.contains("TRUNCATED: showing 2 of 3+ intervals")
+            && capped.contains("--limit"),
+        "--limit 2 shows 2 of 3 and says so, naming the flag that lifts the cap:\n{capped}"
     );
     let all = ok_stdout(
         &vcd,

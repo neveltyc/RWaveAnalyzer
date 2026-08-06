@@ -11,7 +11,7 @@
 //! under our control.
 
 /// Default result limit when neither `--limit` nor `--verbose` is given.
-pub const DEFAULT_LIMIT: usize = 200;
+pub const DEFAULT_LIMIT: usize = 500;
 
 /// Which subcommand to run.
 #[derive(Debug, Clone, PartialEq, Eq)]

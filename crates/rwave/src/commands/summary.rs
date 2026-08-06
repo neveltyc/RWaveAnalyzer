@@ -352,7 +352,8 @@ pub(super) fn compute_summary(wave: &mut Wave, args: &Args) -> Result<Json, Stri
         .push("active", Json::Int(d.counts.active as i64))
         .push("static", Json::Int(d.counts.static_ as i64))
         .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc))
+        .push("truncated", Json::Bool(trunc));
+    let obj = push_trunc_hint(obj, trunc, shown_n, d.ordered.len(), true, "rows")
         .push("rows", Json::Array(row_arr))
         .build();
     Ok(obj)
