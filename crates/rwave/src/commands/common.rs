@@ -11,7 +11,7 @@
 use crate::backend::RawValue;
 use crate::cli::{Args, DEFAULT_LIMIT};
 use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
-use crate::json::Json;
+use crate::json::{Json, Obj};
 use crate::model::{Sid, SignalInfo, Wave};
 use crate::select::Selection;
 
@@ -58,12 +58,47 @@ pub(super) fn clip_len(total: usize, limit: usize) -> (usize, bool) {
     }
 }
 
+/// The text-mode truncation notice. Preceded by a blank line so it separates
+/// from the rows above instead of reading as one more of them — a clipped
+/// result that looks complete is the expensive kind of mistake.
 pub(super) fn trunc_line(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total} {noun} shown. (use --limit 0 to see all)")
+    format!(
+        "\n>> TRUNCATED: showing {shown} of {total} {noun}. \
+         Raise the cap with --limit N, or --limit 0 for all."
+    )
 }
 
+/// As [`trunc_line`], where the total is only known to be a lower bound
+/// (streaming commands stop reading once the limit is met).
 pub(super) fn trunc_line_lb(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total}+ {noun} shown. (use --limit 0 to see all)")
+    format!(
+        "\n>> TRUNCATED: showing {shown} of {total}+ {noun}. \
+         Raise the cap with --limit N, or --limit 0 for all."
+    )
+}
+
+/// Append a `hint` field to a clipped `--json` result, and nothing to a
+/// complete one. `truncated: true` alone is easy to skim past; a sentence
+/// naming the flag that lifts the cap is not.
+pub(super) fn push_trunc_hint(
+    obj: Obj,
+    trunc: bool,
+    shown: usize,
+    total: usize,
+    exact: bool,
+    noun: &str,
+) -> Obj {
+    if !trunc {
+        return obj;
+    }
+    let plus = if exact { "" } else { "+" };
+    obj.push(
+        "hint",
+        Json::str(format!(
+            "showing {shown} of {total}{plus} {noun}; \
+             re-run with --limit N (or --limit 0 for all) to see the rest"
+        )),
+    )
 }
 
 pub(super) fn count_label(total: usize, truncated: bool) -> String {

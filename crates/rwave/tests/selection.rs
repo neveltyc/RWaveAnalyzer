@@ -484,3 +484,27 @@ fn a_batch_line_matches_the_equivalent_single_command_byte_for_byte() {
     }
     let _ = std::fs::remove_file(&vcd);
 }
+
+// -- truncation notice --------------------------------------------------------
+
+#[test]
+fn a_clipped_result_says_so_in_both_output_modes() {
+    // A truncated result that looks complete is the expensive mistake, so the
+    // notice names the flag that lifts the cap — and `--json` carries the same
+    // sentence, since `truncated: true` alone is easy to skim past.
+    let vcd = fixture("truncation", DEEP_VCD);
+    let text = ok_stdout(&vcd, &["list", "--limit", "2"]);
+    assert!(text.contains("TRUNCATED: showing 2 of "), "{text}");
+    assert!(text.contains("--limit 0 for all"), "{text}");
+
+    let json = ok_stdout(&vcd, &["list", "--json", "--limit", "2"]);
+    assert!(json.contains("\"truncated\":true"), "{json}");
+    assert!(json.contains("\"hint\":\"showing 2 of "), "{json}");
+    assert!(json.contains("--limit"), "{json}");
+
+    // A complete result carries no hint at all.
+    let json = ok_stdout(&vcd, &["list", "--json"]);
+    assert!(json.contains("\"truncated\":false"), "{json}");
+    assert!(!json.contains("\"hint\""), "no hint when nothing was clipped: {json}");
+    let _ = std::fs::remove_file(&vcd);
+}

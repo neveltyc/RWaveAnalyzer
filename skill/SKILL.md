@@ -258,10 +258,11 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
 
 ## Agent-side gotchas
 
-- **Output truncation.** Default `--limit` is 200. If `truncated: true`,
-  there are more rows — either re-run with `--limit 0` (unlimited) or a
-  larger value. `total_is_exact: false` means `total` is a lower bound,
-  not the true count.
+- **Output truncation.** Default `--limit` is 500. A clipped result carries
+  `truncated: true` and a `hint` field spelling out the re-run — take it,
+  with `--limit 0` (unlimited) or a larger value. `total_is_exact: false`
+  means `total` is a lower bound, not the true count. Never treat a
+  truncated result as the whole answer.
 - **`search` mode discriminator.** The output's top-level array key
   depends on the mode (`intervals` / `segments` / `events`). Always read
   the `mode` field first.

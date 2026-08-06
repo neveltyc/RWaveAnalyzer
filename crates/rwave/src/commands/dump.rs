@@ -111,7 +111,8 @@ pub(super) fn compute_dump(wave: &mut Wave, args: &Args) -> Result<Json, String>
     };
     let obj = Obj::new()
         .push("shown", Json::Int(shown as i64))
-        .push("truncated", Json::Bool(trunc_final))
+        .push("truncated", Json::Bool(trunc_final));
+    let obj = push_trunc_hint(obj, trunc_final, shown, total_field, false, "events")
         .push("events", Json::Array(arr))
         .extend(total_json_fields(total_field, trunc_final))
         .build();

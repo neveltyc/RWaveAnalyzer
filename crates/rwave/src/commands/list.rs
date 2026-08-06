@@ -70,7 +70,8 @@ pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String>
     let obj = Obj::new()
         .push("total", Json::Int(total as i64))
         .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc))
+        .push("truncated", Json::Bool(trunc));
+    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "signals")
         .push("signals", Json::Array(sig_arr))
         .build();
     Ok(obj)

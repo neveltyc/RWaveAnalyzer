@@ -703,7 +703,7 @@ fn search_event_json(
         .iter()
         .map(|sid| Json::str(wave.signal(*sid).path.clone()))
         .collect();
-    Obj::new()
+    let obj = Obj::new()
         .push("mode", Json::str("event"))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
@@ -714,7 +714,8 @@ fn search_event_json(
         .push("end_ticks", Json::Int(s.t1))
         .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
         .push("shown", Json::Int(events.len() as i64))
-        .push("truncated", Json::Bool(trunc_final))
+        .push("truncated", Json::Bool(trunc_final));
+    push_trunc_hint(obj, trunc_final, events.len(), total_field, false, "events")
         .push("events", Json::Array(evs))
         .extend(total_json_fields(total_field, trunc_final))
         .build()
@@ -1035,7 +1036,7 @@ fn search_interval_json(
     } else {
         (total, false)
     };
-    Obj::new()
+    let obj = Obj::new()
         .push("mode", Json::str(mode))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
@@ -1045,7 +1046,8 @@ fn search_interval_json(
         .push("end_ticks", Json::Int(s.t1))
         .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
         .push("shown", Json::Int(results.len() as i64))
-        .push("truncated", Json::Bool(trunc_final))
+        .push("truncated", Json::Bool(trunc_final));
+    push_trunc_hint(obj, trunc_final, results.len(), total_field, false, &format!("{key}"))
         .push(key, Json::Array(rows_json))
         .extend(total_json_fields(total_field, trunc_final))
         .build()
