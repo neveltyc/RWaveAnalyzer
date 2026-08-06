@@ -166,10 +166,13 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 
-Every command accepts a `--begin`/`--end` time window and the four selection
-options described in [Selecting signals](#selecting-signals). Times take the
-unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example `17.5us`); a
-bare integer is interpreted as raw ticks. The global flags are `--json`
+Every command except `info` accepts the four selection options described in
+[Selecting signals](#selecting-signals). The commands that read a span of time
+— `dump`, `summary`, and `search` — also take a `--begin`/`--end` window;
+`snapshot` and `compare` take instants instead (`--at`), and `list` and `info`
+describe the file rather than a time. Times take the unit suffixes `fs`, `ps`,
+`ns`, `us`, `ms`, and `s` (for example `17.5us`); a bare integer is interpreted
+as raw ticks. The global flags are `--json`
 for structured output, `--limit N` to cap the number of rows (the default is
 500, and `0` means unlimited), and `--verbose` for extra fields. A clipped
 result says so on its last line, and carries a `hint` field under `--json`. A search
@@ -207,9 +210,10 @@ rwave summary sim.fst --filter tx_fifo_push_err
 rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
 ```
 
-**Patterns match a name, or a path.** A pattern with no `.` matches the
-signal's **leaf name**; one containing a `.` matches its **whole hierarchical
-path**. This matters because RTL names scopes after signals: a CDC
+**Patterns match a name, or a path.** A pattern with no separator matches the
+signal's **leaf name**; one containing a `.` or `/` matches its **whole
+hierarchical path** (both separate hierarchies — FST and VCD use `.`, FSDB may
+use either). This matters because RTL names scopes after signals: a CDC
 synchronizer instance is conventionally `u_sync_<sig>`, so a whole-path match
 for `tx_fifo_push_err` returns the status bit *and* every net inside the
 synchronizer — clocks and pipeline flops whose change counts can run five
@@ -221,10 +225,10 @@ with them is an anchored glob, `[` and `]` are literal (for bus ranges), and
 matching is case-insensitive. Comma-separated patterns are ORed.
 
 **`--scope` matches segment by segment**, so `u_fifo` never selects
-`u_fifo_ctrl`. A value with no `.` names one instance and takes its
-descendants with it; `*` and `?` are allowed (`--scope 'u_ch?'`). A dotted
-value matches as a segment-aligned suffix, so `u_tx.u_fifo` finds that subtree
-wherever it sits in the tree, and a path written out from the root works too.
+`u_fifo_ctrl`. A bare value names one instance and takes its descendants with
+it; `*` and `?` are allowed (`--scope 'u_ch?'`). A path value matches as a
+segment-aligned suffix, so `u_tx.u_fifo` finds that subtree wherever it sits in
+the tree, and a path written out from the root works too.
 
 **`--depth` counts from the matched scope**, with a signal sitting directly in
 it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of

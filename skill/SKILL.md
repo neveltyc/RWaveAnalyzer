@@ -119,8 +119,10 @@ For `snapshot` and `compare` on large files, **always pass a selection** — unf
 
 ## Selecting signals
 
-Four options, applied to each signal path in turn. All work on every command
-(`search` included, see below) and all work as `--batch` defaults.
+Four options, applied to each signal path in turn. They work on every command
+except `info` — `list`, `dump`, `summary`, `snapshot`, `compare`, and `search`
+(the last narrows name resolution rather than rows, see below) — and all work
+as `--batch` defaults. `info` describes the file and ignores them.
 
 | | |
 |---|---|
@@ -129,18 +131,18 @@ Four options, applied to each signal path in turn. All work on every command
 | `--filter K1,K2` | keep matching signals |
 | `--exclude K1,K2` | drop matching signals; applied last |
 
-**A pattern with no `.` matches the leaf name; a pattern with a `.` matches the
-whole path.** This is the rule to internalize. RTL names scopes after signals —
+**A pattern with no separator matches the leaf name; one containing a `.` or
+`/` matches the whole path.** This is the rule to internalize. RTL names scopes after signals —
 a CDC synchronizer instance is conventionally `u_sync_<sig>` — so `--filter
 tx_fifo_push_err` gets you the status bit, not the synchronizer's clocks and
-flops. When you *do* want a subtree, write the dot: `--filter 'u_dma.'`, or
-`--exclude 'u_sync_status.'` to drop one. `--exclude u_sync_status` (no dot)
+flops. When you *do* want a subtree, write the separator: `--filter 'u_dma.'`, or
+`--exclude 'u_sync_status.'` to drop one. `--exclude u_sync_status` (bare)
 drops nothing, because no *leaf* is called that.
 
-`--scope` matches segment-wise, so `u_fifo` never selects `u_fifo_ctrl`. A
-dot-free value names an instance (`*`/`?` allowed) and includes its
-descendants; a dotted value is a segment-aligned suffix, so `u_tx.u_fifo`
-finds that subtree without you knowing the path from the root.
+`--scope` matches segment-wise, so `u_fifo` never selects `u_fifo_ctrl`. A bare
+value names an instance (`*`/`?` allowed) and includes its descendants; a path
+value is a segment-aligned suffix, so `u_tx.u_fifo` finds that subtree without
+you knowing the path from the root.
 
 If `list --filter X` returns far more rows than expected, **do not just raise
 `--limit`** — narrow structurally with `--scope`/`--depth`, or subtract with

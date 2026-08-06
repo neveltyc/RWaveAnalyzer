@@ -44,9 +44,11 @@ name and one with a dot matches the path, so both questions are askable.
   "not given" — which is how a `--batch` line lifts an inherited default.
 
 ### Changed
-- **BREAKING: a `--filter` pattern without a dot now matches the leaf name.**
-  To keep whole-path matching, put a dot in the pattern: `--filter 'u_dma.'`,
-  or `--filter 'top.u_dma.*'` anchored from the root. Most invocations are
+- **BREAKING: a `--filter` pattern without a separator now matches the leaf
+  name.** To keep whole-path matching, put one in the pattern: `--filter
+  'u_dma.'`, or `--filter 'top.u_dma.*'` anchored from the root. Both `.` and
+  `/` count as separators, since the built-in FSDB backend emits either, so a
+  `/`-shaped hierarchy is addressed the same way. Most invocations are
   unaffected — `clk` and `*_valid` mean what they always did. What changes is
   the pattern that only ever worked by accident: a bare name pulling in a
   subtree through a scope of the same name. One consequence to know: naming a
