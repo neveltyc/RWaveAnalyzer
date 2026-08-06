@@ -10,10 +10,10 @@
 
 use crate::backend::RawValue;
 use crate::cli::{Args, DEFAULT_LIMIT};
-use crate::filter::Filters;
 use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::Json;
-use crate::model::{Sid, Wave};
+use crate::model::{Sid, SignalInfo, Wave};
+use crate::select::Selection;
 
 /// Above this many selected signals, per-signal-independent commands
 /// (snapshot, compare, summary) decode in memory-bounded batches rather than
@@ -82,29 +82,26 @@ pub(super) fn total_json_fields(total: usize, truncated: bool) -> Vec<(String, J
     ]
 }
 
-/// Resolve a `--filter` value into an optional set of selected sids. `None`
-/// means "no filter" (all signals selected).
-pub(super) fn match_filter(wave: &Wave, filter: &Option<String>) -> Result<Option<Vec<Sid>>, String> {
-    let raw = match filter {
-        Some(f) => f,
-        None => return Ok(None),
-    };
-    let filters = Filters::parse_csv(raw).map_err(|e| e.0)?;
-    if filters.is_empty() {
+/// Every sid whose signal satisfies `pred`, in ascending order. The one place
+/// the signal table is scanned; selection and `search`'s name resolution both
+/// come through here so they cannot drift apart.
+pub(crate) fn sids_where(wave: &Wave, pred: impl Fn(&SignalInfo) -> bool) -> Vec<Sid> {
+    wave.signals()
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| pred(info))
+        .map(|(sid, _)| sid)
+        .collect()
+}
+
+/// Resolve the selection options into an optional set of selected sids. `None`
+/// means "no selection given" (all signals).
+pub(super) fn match_selection(wave: &Wave, args: &Args) -> Result<Option<Vec<Sid>>, String> {
+    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
+    if sel.is_all() {
         return Ok(None);
     }
-    let mut sids: Vec<Sid> = Vec::new();
-    for (sid, info) in wave.signals().iter().enumerate() {
-        // A signal matches if any of its alias paths matches. Each path is
-        // judged with its own leaf, since a pattern may address either.
-        if info
-            .alias_pairs()
-            .any(|(p, sc)| filters.matches_path_leaf(p, crate::model::leaf_of(p, sc)))
-        {
-            sids.push(sid);
-        }
-    }
-    Ok(Some(sids))
+    Ok(Some(sids_where(wave, |info| sel.keeps_signal(info))))
 }
 
 /// The set of selected sids as an explicit sorted vec (all signals if `None`).

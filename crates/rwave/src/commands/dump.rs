@@ -26,7 +26,7 @@ struct DumpRow {
 fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let sel = match_filter(wave, &args.filter)?;
+    let sel = match_selection(wave, args)?;
     let limit = limit_of(args);
     let selected = selected_sids(wave, &sel);
     let sel_ref = sel.as_deref();
