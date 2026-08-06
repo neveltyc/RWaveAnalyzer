@@ -3,32 +3,16 @@
 
 //! Filter pattern matching.
 //!
-//! Patterns are comma-separated and case-insensitive. Each one is matched
-//! against either the signal's **leaf name** or its **whole hierarchical path**,
-//! chosen by the pattern itself:
-//!
-//! * A pattern with no `.` matches the **leaf name** — the local variable name,
-//!   with no scope around it. `tx_fifo_push_err` finds the status bit and not
-//!   the nets inside a synchronizer instance named after it.
-//! * A pattern containing a `.` matches the **whole path**, so `top.u_dma.*`
-//!   and `dma.req` still select by hierarchy position.
-//!
-//! Within the chosen haystack, a pattern with no `*`/`?` is a **substring**
-//! match, and a pattern containing `*` or `?` is an anchored **glob-lite** match
-//! where only `*` (any span) and `?` (one char) are special; every other
-//! character — notably `[` and `]` in bus ranges such as `data[7:0]` — is
-//! literal. This intentionally differs from shell `fnmatch`.
-
-/// Hierarchy separators. Wellen normalizes VCD/FST/GHW paths to `.`; the
-/// built-in FSDB backend emits either `.` or `/`. Both a pattern's
-/// leaf-versus-path decision and `select`'s scope segmentation key off this one
-/// set, so the two cannot disagree about what counts as a hierarchy.
-pub(crate) const SEPARATORS: [char; 2] = ['.', '/'];
+//! Patterns are comma-separated. A pattern with no `*`/`?` is a
+//! case-insensitive **substring** match. A pattern containing `*` or `?` is a
+//! **glob-lite** match where only `*` (any span) and `?` (one char) are
+//! special; every other character — notably `[` and `]` in bus ranges such as
+//! `data[7:0]` — is literal. This intentionally differs from shell `fnmatch`.
 
 /// Maximum length of a single filter pattern (DoS guard).
-pub(crate) const MAX_FILTER_PATTERN_LEN: usize = 256;
+const MAX_FILTER_PATTERN_LEN: usize = 256;
 /// Maximum number of wildcard chars in one pattern (regex-blowup guard).
-pub(crate) const MAX_FILTER_WILDCARDS: usize = 16;
+const MAX_FILTER_WILDCARDS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct FilterParseError(pub String);
@@ -39,25 +23,9 @@ impl std::fmt::Display for FilterParseError {
     }
 }
 
-/// A single compiled pattern: which haystack it applies to, and how it matches.
+/// A single compiled pattern.
 #[derive(Debug, Clone)]
-struct Pat {
-    domain: Domain,
-    kind: PatKind,
-}
-
-/// Which string a pattern is matched against. Decided once, at parse time, by
-/// whether the pattern contains a `.`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Domain {
-    /// The whole hierarchical path.
-    Path,
-    /// The leaf (local variable) name only.
-    Leaf,
-}
-
-#[derive(Debug, Clone)]
-enum PatKind {
+enum Pat {
     /// Lower-cased substring.
     Substr(String),
     /// Glob-lite: a sequence of tokens to match against a lower-cased haystack.
@@ -65,7 +33,7 @@ enum PatKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum GlobTok {
+enum GlobTok {
     /// `*` — match any (possibly empty) span.
     Star,
     /// `?` — match exactly one character.
@@ -105,18 +73,11 @@ impl Filters {
                 )));
             }
             let lower = collapsed.to_lowercase();
-            // A separator in the pattern is the user reaching for the hierarchy;
-            // with none, they are naming a signal and mean the leaf. Both
-            // separators count: the built-in FSDB backend emits '/'-separated
-            // paths, and a pattern like `top/u_dma/*` addresses a hierarchy just
-            // as plainly as its dotted equivalent.
-            let domain = if lower.contains(SEPARATORS) { Domain::Path } else { Domain::Leaf };
-            let kind = if lower.contains('*') || lower.contains('?') {
-                PatKind::Glob(compile_glob(&lower))
+            if lower.contains('*') || lower.contains('?') {
+                pats.push(Pat::Glob(compile_glob(&lower)));
             } else {
-                PatKind::Substr(lower)
-            };
-            pats.push(Pat { domain, kind });
+                pats.push(Pat::Substr(lower));
+            }
         }
         Ok(Filters { pats })
     }
@@ -131,31 +92,24 @@ impl Filters {
         self.pats.is_empty()
     }
 
-    /// Does any pattern match? Both haystacks must already be lower-cased —
-    /// and lower-cased *separately*: `to_lowercase` can change a string's byte
-    /// length, so a leaf can never be sliced out of an already-lowered path
-    /// using offsets measured on the original.
-    pub fn matches_lower(&self, path_lower: &str, leaf_lower: &str) -> bool {
+    /// Does any pattern match the given path? Matching is case-insensitive.
+    pub fn matches(&self, path: &str) -> bool {
+        let hay = path.to_lowercase();
         for p in &self.pats {
-            let hay = match p.domain {
-                Domain::Path => path_lower,
-                Domain::Leaf => leaf_lower,
-            };
-            let hit = match &p.kind {
-                PatKind::Substr(s) => hay.contains(s.as_str()),
-                PatKind::Glob(toks) => glob_match(toks, hay),
-            };
-            if hit {
-                return true;
+            match p {
+                Pat::Substr(s) => {
+                    if hay.contains(s.as_str()) {
+                        return true;
+                    }
+                }
+                Pat::Glob(toks) => {
+                    if glob_match(toks, &hay) {
+                        return true;
+                    }
+                }
             }
         }
         false
-    }
-
-    /// [`matches_lower`](Self::matches_lower) for callers that hold the
-    /// original-case strings and are not matching in a hot loop.
-    pub fn matches_path_leaf(&self, path: &str, leaf: &str) -> bool {
-        self.matches_lower(&path.to_lowercase(), &leaf.to_lowercase())
     }
 }
 
@@ -176,9 +130,7 @@ fn collapse_stars(s: &str) -> String {
     out
 }
 
-/// Compile a lower-cased glob-lite pattern into tokens. Shared with `select`,
-/// which matches the same syntax against one hierarchy segment at a time.
-pub(crate) fn compile_glob(pat: &str) -> Vec<GlobTok> {
+fn compile_glob(pat: &str) -> Vec<GlobTok> {
     let mut toks = Vec::new();
     let mut lit = String::new();
     for c in pat.chars() {
@@ -207,7 +159,7 @@ pub(crate) fn compile_glob(pat: &str) -> Vec<GlobTok> {
 /// Anchored glob match (the whole string must match), supporting `*` and `?`.
 /// Implemented as a backtracking matcher over char slices; pattern size is
 /// bounded by the parser so worst-case cost is acceptable.
-pub(crate) fn glob_match(toks: &[GlobTok], hay: &str) -> bool {
+fn glob_match(toks: &[GlobTok], hay: &str) -> bool {
     let hay: Vec<char> = hay.chars().collect();
     glob_rec(toks, 0, &hay, 0)
 }
@@ -254,125 +206,48 @@ fn glob_rec(toks: &[GlobTok], ti: usize, hay: &[char], hi: usize) -> bool {
 mod tests {
     use super::*;
 
-    /// Match a path whose leaf is everything after the last '.', which is what
-    /// the ordinary (non-escaped) signals in these cases have. Real callers
-    /// take the leaf from the signal table, never by splitting.
-    fn m(f: &Filters, path: &str) -> bool {
-        let leaf = path.rsplit('.').next().unwrap_or(path);
-        f.matches_path_leaf(path, leaf)
-    }
-
     #[test]
     fn substring_default() {
         let f = Filters::parse_csv("clk,rst").unwrap();
-        assert!(m(&f, "tb.clk"));
-        assert!(m(&f, "tb.rst_n"));
-        assert!(!m(&f, "tb.data"));
+        assert!(f.matches("tb.clk"));
+        assert!(f.matches("tb.rst_n"));
+        assert!(!f.matches("tb.data"));
     }
 
     #[test]
     fn case_insensitive() {
         let f = Filters::parse_csv("CLK").unwrap();
-        assert!(m(&f, "tb.clk"));
+        assert!(f.matches("tb.clk"));
     }
 
     #[test]
     fn glob_suffix() {
         let f = Filters::parse_csv("*_valid,*_ready").unwrap();
-        assert!(m(&f, "tb.a_valid"));
-        assert!(m(&f, "tb.b_ready"));
-        assert!(!m(&f, "tb.valid_x"));
+        assert!(f.matches("tb.a_valid"));
+        assert!(f.matches("tb.b_ready"));
+        assert!(!f.matches("tb.valid_x"));
     }
 
     #[test]
     fn glob_scope_prefix() {
         let f = Filters::parse_csv("top.u_dma.*").unwrap();
-        assert!(m(&f, "top.u_dma.req"));
-        assert!(!m(&f, "top.u_cpu.req"));
+        assert!(f.matches("top.u_dma.req"));
+        assert!(!f.matches("top.u_cpu.req"));
     }
 
     #[test]
     fn brackets_are_literal() {
-        // The '[' is literal; '*data[7:0]' matches the leaf 'data[7:0]'.
+        // The '[' is literal; '*data[7:0]' matches 'tb.data[7:0]'.
         let f = Filters::parse_csv("*data[7:0]").unwrap();
-        assert!(m(&f, "tb.data[7:0]"));
-        assert!(!m(&f, "tb.data[3:0]"));
+        assert!(f.matches("tb.data[7:0]"));
+        assert!(!f.matches("tb.data[3:0]"));
     }
 
     #[test]
     fn question_mark() {
         let f = Filters::parse_csv("d?ta").unwrap();
-        assert!(m(&f, "data"));
-        assert!(m(&f, "dxta"));
-        assert!(!m(&f, "dta"));
-    }
-
-    #[test]
-    fn dotless_pattern_matches_the_leaf_not_the_scope() {
-        // The motivating case: a CDC synchronizer instance is named after the
-        // signal it synchronizes, so a whole-path match would drag in every net
-        // inside it.
-        let f = Filters::parse_csv("status").unwrap();
-        assert!(m(&f, "top.status"));
-        assert!(m(&f, "top.u_dma.status_q"));
-        assert!(!m(&f, "top.u_bcm21_sync_status.clk_d"));
-        assert!(!m(&f, "top.u_bcm21_sync_status.q_p"));
-    }
-
-    #[test]
-    fn dotless_glob_anchors_to_the_leaf() {
-        // Anchored against the leaf alone, so it cannot swallow scopes.
-        let f = Filters::parse_csv("tb*").unwrap();
-        assert!(m(&f, "tb_done"));
-        assert!(!m(&f, "tb.clk"));
-    }
-
-    #[test]
-    fn dotted_pattern_matches_the_whole_path() {
-        let f = Filters::parse_csv("dma.req").unwrap();
-        assert!(m(&f, "top.u_dma.req"));
-        assert!(!m(&f, "top.u_cpu.req"));
-        // A trailing dot is the way to ask for "anywhere under this name".
-        let f = Filters::parse_csv("u_bcm21_sync_status.").unwrap();
-        assert!(m(&f, "top.u_bcm21_sync_status.clk_d"));
-    }
-
-    #[test]
-    fn leaf_matching_ignores_a_scope_that_shares_the_name() {
-        // `clk` must not select every signal under a scope called `clk_gen`.
-        let f = Filters::parse_csv("clk").unwrap();
-        assert!(m(&f, "top.clk_div"));
-        assert!(!m(&f, "top.clk_gen.enable"));
-    }
-
-    #[test]
-    fn a_slash_separated_pattern_addresses_the_path() {
-        // The built-in FSDB backend emits '/'-separated hierarchies. A pattern
-        // written that way is reaching for the hierarchy just as plainly as a
-        // dotted one, so it must not be matched against the leaf name.
-        let path = "top/u_dma/req";
-        let leaf = "req";
-        for pat in ["top/u_dma/*", "u_dma/", "u_dma/req"] {
-            let f = Filters::parse_csv(pat).unwrap();
-            assert!(f.matches_path_leaf(path, leaf), "{pat} should match {path}");
-        }
-        // A different subtree is still excluded.
-        let f = Filters::parse_csv("u_cpu/").unwrap();
-        assert!(!f.matches_path_leaf(path, leaf));
-        // And a bare name still means the leaf, on either separator style.
-        let f = Filters::parse_csv("req").unwrap();
-        assert!(f.matches_path_leaf(path, leaf));
-        let f = Filters::parse_csv("u_dma").unwrap();
-        assert!(!f.matches_path_leaf(path, leaf), "a scope name is not a leaf name");
-    }
-
-    #[test]
-    fn escaped_identifier_leaf_is_matched_whole() {
-        // The leaf comes from the signal table, dots and all — so a pattern
-        // naming part of it matches, and one naming the scope does not.
-        let f = Filters::parse_csv("bar").unwrap();
-        assert!(f.matches_path_leaf(r"tb.\foo.bar", r"\foo.bar"));
-        let f = Filters::parse_csv("tb").unwrap();
-        assert!(!f.matches_path_leaf(r"tb.\foo.bar", r"\foo.bar"));
+        assert!(f.matches("data"));
+        assert!(f.matches("dxta"));
+        assert!(!f.matches("dta"));
     }
 }

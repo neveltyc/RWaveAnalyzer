@@ -26,7 +26,7 @@ struct DumpRow {
 fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let sel = match_selection(wave, args)?;
+    let sel = match_filter(wave, &args.filter)?;
     let limit = limit_of(args);
     let selected = selected_sids(wave, &sel);
     let sel_ref = sel.as_deref();
@@ -111,8 +111,7 @@ pub(super) fn compute_dump(wave: &mut Wave, args: &Args) -> Result<Json, String>
     };
     let obj = Obj::new()
         .push("shown", Json::Int(shown as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    let obj = push_trunc_hint(obj, trunc_final, shown, total_field, false, "events")
+        .push("truncated", Json::Bool(trunc_final))
         .push("events", Json::Array(arr))
         .extend(total_json_fields(total_field, trunc_final))
         .build();

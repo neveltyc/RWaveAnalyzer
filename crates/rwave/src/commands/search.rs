@@ -13,7 +13,6 @@ use crate::filter::Filters;
 use crate::format::{fmt_time, fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::{Json, Obj};
 use crate::model::{Sid, Wave};
-use crate::select::Selection;
 use super::common::*;
 
 /// A resolved condition: a parsed term bound to a specific signal id.
@@ -43,37 +42,21 @@ enum ResolvedTerm {
     Changed,
 }
 
-/// How the selection options bear on a name lookup, for the error text. Empty
-/// when nothing is narrowing, so an unconstrained failure reads as it always
-/// did.
-fn within_selection(sel: &Selection) -> String {
-    let gates = sel.active_gates();
-    if gates.is_empty() {
-        String::new()
-    } else {
-        format!(" within the current selection ({gates})")
-    }
-}
-
 /// Resolve a single signal pattern to exactly one sid. An exact full-path match
 /// (case-insensitive) wins over substring matches; otherwise fall back to the
-/// normal filter matcher, restricted to `sel`, and require a unique result.
-///
-/// Only the fallback is restricted. A path spelled out in full is an explicit
-/// choice, so a broad `--exclude` — or one inherited from a `--batch` line —
-/// must not make a named signal unreachable.
-fn resolve_one_signal(
-    wave: &Wave,
-    sel: &Selection,
-    pattern: &str,
-    role: &str,
-) -> Result<Sid, String> {
+/// normal filter matcher and require a unique result.
+fn resolve_one_signal(wave: &Wave, pattern: &str, role: &str) -> Result<Sid, String> {
     let pat = pattern.trim();
     let pl = pat.to_lowercase();
     let has_wild = pat.contains('*') || pat.contains('?');
 
     if !has_wild {
-        let exact = sids_where(wave, |info| info.has_exact_path_ci(&pl));
+        let mut exact: Vec<Sid> = Vec::new();
+        for (sid, info) in wave.signals().iter().enumerate() {
+            if info.aliases.iter().any(|p| p.to_lowercase() == pl) {
+                exact.push(sid);
+            }
+        }
         if exact.len() == 1 {
             return Ok(exact[0]);
         }
@@ -87,20 +70,16 @@ fn resolve_one_signal(
         }
     }
 
-    // Fall back to filter matching, inside the current selection.
+    // Fall back to filter matching.
     let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
-    let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
+    let mut matched: Vec<Sid> = Vec::new();
+    for (sid, info) in wave.signals().iter().enumerate() {
+        if info.aliases.iter().any(|p| filters.matches(p)) {
+            matched.push(sid);
+        }
+    }
     if matched.is_empty() {
-        let scoped = within_selection(sel);
-        let hint = if scoped.is_empty() {
-            String::new()
-        } else {
-            "; give the full hierarchical path to look outside it".to_string()
-        };
-        return Err(format!(
-            "{role} pattern {} matches no signals{scoped}{hint}",
-            crate::format::pyrepr(pattern)
-        ));
+        return Err(format!("{role} pattern {} matches no signals", crate::format::pyrepr(pattern)));
     }
     if matched.len() != 1 {
         let examples = example_paths(wave, &matched);
@@ -110,10 +89,8 @@ fn resolve_one_signal(
             format!(", examples: {examples}")
         };
         return Err(format!(
-            "{role} pattern {} matches {} signals{}; narrow it with --scope or --exclude, or give the full hierarchical path{extra}",
-            crate::format::pyrepr(pattern),
-            matched.len(),
-            within_selection(sel),
+            "{role} pattern {} matches {} signals; use list to choose a more specific name{extra}", crate::format::pyrepr(pattern),
+            matched.len()
         ));
     }
     Ok(matched[0])
@@ -127,13 +104,8 @@ fn example_paths(wave: &Wave, sids: &[Sid]) -> String {
 }
 
 /// Resolve `--show` patterns to a sorted, de-duplicated set of sids. Exact
-/// full-path match wins per-pattern and bypasses the selection, as in
-/// [`resolve_one_signal`]; otherwise pattern matching applies within `sel`.
-fn resolve_show_sids(
-    wave: &Wave,
-    sel: &Selection,
-    show: &Option<String>,
-) -> Result<Vec<Sid>, String> {
+/// full-path match wins per-pattern; otherwise substring/glob matching applies.
+fn resolve_show_sids(wave: &Wave, show: &Option<String>) -> Result<Vec<Sid>, String> {
     let raw = match show {
         Some(s) => s,
         None => return Ok(Vec::new()),
@@ -146,28 +118,33 @@ fn resolve_show_sids(
     let mut missing: Vec<String> = Vec::new();
     for pat in pats {
         let has_wild = pat.contains('*') || pat.contains('?');
+        let mut matched_any = false;
         if !has_wild {
             let pl = pat.to_lowercase();
-            let exact = sids_where(wave, |info| info.has_exact_path_ci(&pl));
+            let mut exact: Vec<Sid> = Vec::new();
+            for (sid, info) in wave.signals().iter().enumerate() {
+                if info.aliases.iter().any(|p| p.to_lowercase() == pl) {
+                    exact.push(sid);
+                }
+            }
             if !exact.is_empty() {
                 selected.extend(exact);
                 continue;
             }
         }
         let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
-        let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
-        if matched.is_empty() {
+        for (sid, info) in wave.signals().iter().enumerate() {
+            if info.aliases.iter().any(|p| filters.matches(p)) {
+                selected.insert(sid);
+                matched_any = true;
+            }
+        }
+        if !matched_any {
             missing.push(pat.to_string());
-        } else {
-            selected.extend(matched);
         }
     }
     if !missing.is_empty() {
-        return Err(format!(
-            "--show matches no signals{}: {}",
-            within_selection(sel),
-            missing.join(", ")
-        ));
+        return Err(format!("--show matches no signals: {}", missing.join(", ")));
     }
     if selected.is_empty() {
         return Err("--show matches no signals".to_string());
@@ -178,11 +155,7 @@ fn resolve_show_sids(
 }
 
 /// Resolve the comma-separated condition string against the waveform.
-fn resolve_conditions(
-    wave: &Wave,
-    sel: &Selection,
-    text: &str,
-) -> Result<Vec<ResolvedCond>, String> {
+fn resolve_conditions(wave: &Wave, text: &str) -> Result<Vec<ResolvedCond>, String> {
     let parsed: Vec<ParsedCondition> = condition::parse_conditions(text).map_err(|e| e.0)?;
     let mut resolved: Vec<ResolvedCond> = Vec::new();
     let mut seen: BTreeSet<(Sid, &'static str, String)> = BTreeSet::new();
@@ -191,7 +164,7 @@ fn resolve_conditions(
             TermBody::Changed => "changed() signal",
             TermBody::Level { .. } => "condition signal",
         };
-        let sid = resolve_one_signal(wave, sel, &c.pattern, role)?;
+        let sid = resolve_one_signal(wave, &c.pattern, role)?;
         let info = wave.signal(sid);
         let term = match c.term {
             TermBody::Level { op, target, value_text } => ResolvedTerm::Level {
@@ -447,12 +420,6 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     if args.condition.is_empty() {
         return Err("the following arguments are required: --condition".into());
     }
-    // `search` selects through its condition and `--show` names rather than a
-    // row filter, so the selection options apply to *resolving* those names:
-    // they are the context a bare name is looked up in, which is usually what
-    // turns "matches N signals" into a unique hit. A name written as a full
-    // path is exempt.
-    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
     // Each `--condition` is one OR clause (a comma-separated AND list). Resolve
     // every clause, then drop duplicate clauses (PRD §7): identical, term-order-
     // permuted, or alias-equivalent clauses fold to one; different value
@@ -461,7 +428,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let mut clauses: Vec<Vec<ResolvedCond>> = Vec::new();
     let mut seen: BTreeSet<Vec<(Sid, &'static str, String)>> = BTreeSet::new();
     for text in &args.condition {
-        let clause = resolve_conditions(wave, &sel, text)?;
+        let clause = resolve_conditions(wave, text)?;
         if seen.insert(clause_key(&clause)) {
             clauses.push(clause);
         }
@@ -492,7 +459,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let mut changed_sids: Vec<Sid> = changed_set.into_iter().collect();
     changed_sids.sort_by(|a, b| wave.signal(*a).path.cmp(&wave.signal(*b).path));
 
-    let mut show_sids = resolve_show_sids(wave, &sel, &args.show)?;
+    let mut show_sids = resolve_show_sids(wave, &args.show)?;
     if !changed_sids.is_empty() && show_sids.is_empty() {
         // Event mode with no --show: default to watching the changed() signals.
         show_sids = changed_sids.clone();
@@ -703,7 +670,7 @@ fn search_event_json(
         .iter()
         .map(|sid| Json::str(wave.signal(*sid).path.clone()))
         .collect();
-    let obj = Obj::new()
+    Obj::new()
         .push("mode", Json::str("event"))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
@@ -714,8 +681,7 @@ fn search_event_json(
         .push("end_ticks", Json::Int(s.t1))
         .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
         .push("shown", Json::Int(events.len() as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    push_trunc_hint(obj, trunc_final, events.len(), total_field, false, "events")
+        .push("truncated", Json::Bool(trunc_final))
         .push("events", Json::Array(evs))
         .extend(total_json_fields(total_field, trunc_final))
         .build()
@@ -1036,7 +1002,7 @@ fn search_interval_json(
     } else {
         (total, false)
     };
-    let obj = Obj::new()
+    Obj::new()
         .push("mode", Json::str(mode))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
@@ -1046,8 +1012,7 @@ fn search_interval_json(
         .push("end_ticks", Json::Int(s.t1))
         .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
         .push("shown", Json::Int(results.len() as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    push_trunc_hint(obj, trunc_final, results.len(), total_field, false, &format!("{key}"))
+        .push("truncated", Json::Bool(trunc_final))
         .push(key, Json::Array(rows_json))
         .extend(total_json_fields(total_field, trunc_final))
         .build()
