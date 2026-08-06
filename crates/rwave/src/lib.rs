@@ -34,6 +34,7 @@ pub mod format;
 pub mod json;
 pub mod model;
 pub mod plugin;
+pub mod select;
 
 /// Version reported by `rwave --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

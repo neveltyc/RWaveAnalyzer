@@ -298,7 +298,7 @@ struct SummaryData {
 fn summary_data(wave: &mut Wave, args: &Args) -> Result<SummaryData, String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let sel = match_filter(wave, &args.filter)?;
+    let sel = match_selection(wave, args)?;
     let selected = selected_sids(wave, &sel);
 
     // summary_rows loads traces in memory-bounded batches itself (the stats are

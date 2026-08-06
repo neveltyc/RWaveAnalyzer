@@ -86,6 +86,22 @@ impl SignalInfo {
     }
 }
 
+/// Build a bare [`SignalInfo`] from `(path, scope)` pairs, for tests that
+/// exercise alias handling without opening a waveform.
+#[cfg(test)]
+pub(crate) fn test_signal(aliases: &[(&str, &str)]) -> SignalInfo {
+    SignalInfo {
+        path: aliases[0].0.to_string(),
+        aliases: aliases.iter().map(|(p, _)| p.to_string()).collect(),
+        width: 1,
+        type_str: "wire",
+        kind: ValueKind::Bits,
+        alias_scopes: aliases.iter().map(|(_, s)| s.to_string()).collect(),
+        decl_order: 0,
+        backend_sid: crate::backend::BackendSid(0),
+    }
+}
+
 /// The leaf (local variable name) of `path`, given the scope path it sits in.
 ///
 /// Derived structurally — never by searching `path` for the last separator. A

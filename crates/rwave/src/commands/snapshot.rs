@@ -33,7 +33,7 @@ fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let t_at = parse_time(at_raw, ts).map_err(|e: TimeParseError| e.0)?;
-    let sel = match_filter(wave, &args.filter)?;
+    let sel = match_selection(wave, args)?;
     let selected = selected_sids(wave, &sel);
 
     // Large/unfiltered selections decode in batches to bound memory; small

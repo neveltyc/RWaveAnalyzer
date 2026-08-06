@@ -40,7 +40,7 @@ fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
     if tb < ta {
         return Err("second compare time must be >= first compare time".to_string());
     }
-    let sel = match_filter(wave, &args.filter)?;
+    let sel = match_selection(wave, args)?;
     let selected = selected_sids(wave, &sel);
     let sel_ref = sel.as_deref();
 
