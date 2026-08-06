@@ -54,74 +54,13 @@ pub struct SignalInfo {
     pub type_str: &'static str,
     /// Value formatting class.
     pub kind: ValueKind,
-    /// Parent scope path of each alias, index-aligned with [`aliases`]; a
-    /// top-level alias stores `""`. Kept per alias rather than de-duplicated
-    /// because hierarchy-aware selection (`--scope`, `--depth`) and leaf-name
-    /// matching all need the scope *of the path being judged* — and the leaf
-    /// can only be split off a path with its own scope, never by searching for
-    /// the last separator (escaped identifiers contain dots).
-    pub alias_scopes: Vec<String>,
+    /// Parent scope paths across this signal's aliases.
+    pub scopes: Vec<String>,
     /// Smallest declaration index among aliases; ties timestamp-coincident
     /// events back to writer order during replay.
     pub decl_order: usize,
     /// Opaque backend handle used to request this signal's trace.
     backend_sid: BackendSid,
-}
-
-impl SignalInfo {
-    /// Each alias as `(path, scope_path)`. The scope is `""` for a top-level
-    /// alias. Pair up rather than iterating `aliases` alone whenever the leaf
-    /// name or the hierarchy position matters.
-    pub fn alias_pairs(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.aliases
-            .iter()
-            .zip(self.alias_scopes.iter())
-            .map(|(p, s)| (p.as_str(), s.as_str()))
-    }
-
-    /// Does any alias equal `pattern_lower` (which must already be lower-cased)?
-    /// Used for the exact-full-path lookups that bypass pattern matching.
-    pub fn has_exact_path_ci(&self, pattern_lower: &str) -> bool {
-        self.aliases.iter().any(|p| p.to_lowercase() == pattern_lower)
-    }
-}
-
-/// Build a bare [`SignalInfo`] from `(path, scope)` pairs, for tests that
-/// exercise alias handling without opening a waveform.
-#[cfg(test)]
-pub(crate) fn test_signal(aliases: &[(&str, &str)]) -> SignalInfo {
-    SignalInfo {
-        path: aliases[0].0.to_string(),
-        aliases: aliases.iter().map(|(p, _)| p.to_string()).collect(),
-        width: 1,
-        type_str: "wire",
-        kind: ValueKind::Bits,
-        alias_scopes: aliases.iter().map(|(_, s)| s.to_string()).collect(),
-        decl_order: 0,
-        backend_sid: crate::backend::BackendSid(0),
-    }
-}
-
-/// The leaf (local variable name) of `path`, given the scope path it sits in.
-///
-/// Derived structurally — never by searching `path` for the last separator. A
-/// VCD escaped identifier may itself contain dots (`tb.\foo.bar` is the signal
-/// `\foo.bar` in scope `tb`), so only the scope's own length says where the
-/// name begins. A vector's range suffix is folded into the path but not into
-/// the declared name, so the leaf carries it (`data[7:0]`) — which is what a
-/// user matching on `data` or `data[7:0]` expects either way.
-pub fn leaf_of<'a>(path: &'a str, scope: &str) -> &'a str {
-    if scope.is_empty() {
-        return path;
-    }
-    // Skip the scope and the one separator byte between it and the name. Guard
-    // against a backend whose scope is not actually a prefix of the path.
-    match path.get(scope.len() + 1..) {
-        Some(leaf) if path.as_bytes().get(scope.len()).is_some_and(|b| *b == b'.' || *b == b'/') => {
-            leaf
-        }
-        _ => path,
-    }
 }
 
 /// The loaded waveform: a backend plus the derived signal table and a cache of
@@ -241,55 +180,6 @@ mod open_dispatch_tests {
     }
 }
 
-#[cfg(test)]
-mod leaf_tests {
-    //! `leaf_of` splits a path at its scope, which is the only correct way:
-    //! the separator search a reader expects (`rsplit('.')`) is wrong for the
-    //! escaped identifiers real VCDs contain.
-
-    use super::leaf_of;
-
-    #[test]
-    fn plain_path_splits_at_its_scope() {
-        assert_eq!(leaf_of("top.u_dma.req", "top.u_dma"), "req");
-        assert_eq!(leaf_of("top.status", "top"), "status");
-    }
-
-    #[test]
-    fn top_level_signal_is_its_own_leaf() {
-        assert_eq!(leaf_of("clk", ""), "clk");
-    }
-
-    #[test]
-    fn escaped_identifier_keeps_its_dots() {
-        // verify/fixtures/escaped_trace.vcd: `\foo.bar` declared in scope `tb`.
-        // rsplit('.') would answer "bar" and lose half the name.
-        assert_eq!(leaf_of(r"tb.\foo.bar", "tb"), r"\foo.bar");
-    }
-
-    #[test]
-    fn vector_range_travels_with_the_leaf() {
-        // The range is folded into the path, not the declared name, so the leaf
-        // carries it — `data` and `data[7:0]` both match it as a substring.
-        assert_eq!(leaf_of("tb.data[7:0]", "tb"), "data[7:0]");
-    }
-
-    #[test]
-    fn slash_separated_hierarchy_splits_too() {
-        // The built-in FSDB backend emits '/' as a hierarchy separator.
-        assert_eq!(leaf_of("top/u_dma/req", "top/u_dma"), "req");
-    }
-
-    #[test]
-    fn a_scope_that_is_not_a_prefix_yields_the_whole_path() {
-        // Defensive: a backend breaking the path/scope contract must not panic
-        // or slice mid-character.
-        assert_eq!(leaf_of("top.req", "other"), "top.req");
-        assert_eq!(leaf_of("ab", "abcdef"), "ab");
-        assert_eq!(leaf_of("tb·x", "tb"), "tb·x");
-    }
-}
-
 impl Wave {
     /// Build a domain model from an already-opened backend.
     pub fn from_backend(backend: Box<dyn WaveformBackend>) -> Wave {
@@ -389,7 +279,7 @@ impl Wave {
     pub fn scopes(&self) -> Vec<String> {
         let mut set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for s in &self.signals {
-            for sc in &s.alias_scopes {
+            for sc in &s.scopes {
                 if !sc.is_empty() {
                     set.insert(sc.as_str());
                 }
@@ -970,9 +860,8 @@ fn build_signal_table(
         type_str: &'static str,
         kind: ValueKind,
         backend_sid: BackendSid,
-        /// `(full_path, scope_path)` per declaration, kept paired: the scope is
-        /// what later splits the leaf name off its path.
-        paths: Vec<(String, String)>,
+        paths: Vec<String>,
+        scopes: Vec<String>,
         decl_order: usize,
     }
 
@@ -997,11 +886,18 @@ fn build_signal_table(
                 if decl_idx < g.decl_order {
                     g.decl_order = decl_idx;
                 }
-                g.paths.push((decl.full_path, decl.scope_path));
+                g.paths.push(decl.full_path);
+                if !decl.scope_path.is_empty() && !g.scopes.contains(&decl.scope_path) {
+                    g.scopes.push(decl.scope_path);
+                }
             }
             None => {
+                let mut scopes = Vec::new();
+                if !decl.scope_path.is_empty() {
+                    scopes.push(decl.scope_path);
+                }
                 let mut paths = Vec::with_capacity(1);
-                paths.push((decl.full_path, decl.scope_path));
+                paths.push(decl.full_path);
                 groups.insert(
                     decl.backend_sid,
                     Group {
@@ -1010,6 +906,7 @@ fn build_signal_table(
                         kind: decl.kind,
                         backend_sid: decl.backend_sid,
                         paths,
+                        scopes,
                         decl_order: decl_idx,
                     },
                 );
@@ -1020,22 +917,19 @@ fn build_signal_table(
     let mut infos: Vec<SignalInfo> = Vec::with_capacity(groups.len());
     for mut g in groups.into_values() {
         // The vast majority of signals have a single path; only pay the
-        // sort/dedup when there is more than one alias. Sorting and de-duping
-        // by path alone keeps the two output vectors index-aligned; one path
-        // always carries one scope, so the discarded duplicates are identical.
+        // sort/dedup when there is more than one alias.
         if g.paths.len() > 1 {
-            g.paths.sort_by(|a, b| a.0.cmp(&b.0));
-            g.paths.dedup_by(|a, b| a.0 == b.0);
+            g.paths.sort();
+            g.paths.dedup();
         }
-        let path = g.paths[0].0.clone();
-        let (aliases, alias_scopes): (Vec<String>, Vec<String>) = g.paths.into_iter().unzip();
+        let path = g.paths[0].clone();
         infos.push(SignalInfo {
             path,
-            aliases,
+            aliases: g.paths,
             width: g.width,
             type_str: g.type_str,
             kind: g.kind,
-            alias_scopes,
+            scopes: g.scopes,
             decl_order: g.decl_order,
             backend_sid: g.backend_sid,
         });

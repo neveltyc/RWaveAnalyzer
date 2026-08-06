@@ -100,7 +100,7 @@ typedef enum {
 
 typedef struct {
     const char*    full_path;     /* hierarchical, dot-separated */
-    const char*    scope_path;    /* enclosing scope only; prefix of full_path */
+    const char*    scope_path;    /* enclosing scope only */
     uint32_t       width;         /* bits; 1 for scalar/real/string/event */
     const char*    type_str;      /* "wire", "reg", "real", "event", ... */
     RwaveValueKind kind;
@@ -150,23 +150,6 @@ typedef struct {
 /* The plugin's sole exported symbol. */
 const RwaveBackend* rwave_backend(const char** err_out);
 ```
-
-### Paths and scopes
-
-`scope_path` carries more weight than "extra metadata": rwave derives each
-signal's **leaf name** from it, as the remainder of `full_path` after the scope
-and one separator byte. Splitting `full_path` on its last separator is not an
-option, because a name can contain one — a VCD escaped identifier such as
-`\foo.bar` is a single name. So `scope_path` must be computed from the
-hierarchy the plugin walked, must be a prefix of `full_path`, and must be
-empty for a top-level variable rather than guessed at. A plugin that gets this
-wrong misnames signals under `--filter` and misplaces them under `--depth`.
-
-`.` is the expected separator; `/` is also accepted, since the built-in FSDB
-backend emits hierarchies in either form. `--scope` and `--depth` split
-`scope_path` on both. A scope whose own *name* contains a separator will
-therefore be read as two levels — a known limitation, and one that does not
-affect leaf names, which are never obtained by splitting.
 
 ### Memory ownership
 

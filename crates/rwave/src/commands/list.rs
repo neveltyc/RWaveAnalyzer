@@ -6,7 +6,6 @@
 use crate::cli::Args;
 use crate::json::{Json, Obj};
 use crate::model::{Sid, Wave};
-use crate::select::Selection;
 use super::common::*;
 
 /// One `list` row: an alias path with its signal's width/type and domain id.
@@ -21,25 +20,19 @@ struct ListEntry {
 /// renderers. Returns `(entries, shown, truncated)`.
 fn list_entries(wave: &Wave, args: &Args) -> Result<(Vec<ListEntry>, usize, bool), String> {
     let limit = limit_of(args);
-    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
-    let all = sel.is_all();
+    let sel = match_filter(wave, &args.filter)?;
 
-    // One row per alias path, then sort by path. A selected signal shows every
-    // alias the selection did not rule out: `--scope` and `--exclude` hide the
-    // rows they cover, since printing a path the user asked to drop would make
-    // those options look ignored, while `--filter` hides none — it says which
-    // signals are wanted, and their other paths are worth seeing.
+    // Build entries: one per alias path, then sort by path.
     let mut entries: Vec<ListEntry> = Vec::new();
     for (sid, info) in wave.signals().iter().enumerate() {
-        if !all && !sel.keeps_signal(info) {
-            continue;
-        }
-        for (path, scope) in info.alias_pairs() {
-            if !all && !sel.displays_alias(path, scope) {
+        if let Some(ref s) = sel {
+            if !s.contains(&sid) {
                 continue;
             }
+        }
+        for path in &info.aliases {
             entries.push(ListEntry {
-                path: path.to_string(),
+                path: path.clone(),
                 width: info.width,
                 type_str: info.type_str,
                 sid,
@@ -70,8 +63,7 @@ pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String>
     let obj = Obj::new()
         .push("total", Json::Int(total as i64))
         .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc));
-    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "signals")
+        .push("truncated", Json::Bool(trunc))
         .push("signals", Json::Array(sig_arr))
         .build();
     Ok(obj)
