@@ -95,8 +95,12 @@ pub(super) fn match_filter(wave: &Wave, filter: &Option<String>) -> Result<Optio
     }
     let mut sids: Vec<Sid> = Vec::new();
     for (sid, info) in wave.signals().iter().enumerate() {
-        // A signal matches if any of its alias paths matches.
-        if info.aliases.iter().any(|p| filters.matches(p)) {
+        // A signal matches if any of its alias paths matches. Each path is
+        // judged with its own leaf, since a pattern may address either.
+        if info
+            .alias_pairs()
+            .any(|(p, sc)| filters.matches_path_leaf(p, crate::model::leaf_of(p, sc)))
+        {
             sids.push(sid);
         }
     }
