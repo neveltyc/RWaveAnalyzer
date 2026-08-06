@@ -508,3 +508,52 @@ fn a_clipped_result_says_so_in_both_output_modes() {
     assert!(!json.contains("\"hint\""), "no hint when nothing was clipped: {json}");
     let _ = std::fs::remove_file(&vcd);
 }
+
+/// Ten signals, of which only two carry a value at t=0; the rest first appear
+/// later. At `--at 0` that is 2 known and 8 undefined — and `--verbose` lists
+/// both groups, so the row count and the known count diverge.
+const SPARSE_VCD: &str = "\
+$timescale 1ns $end
+$scope module tb $end
+$var wire 1 ! s0 $end
+$var wire 1 \" s1 $end
+$var wire 1 # s2 $end
+$var wire 1 $ s3 $end
+$var wire 1 % s4 $end
+$var wire 1 & s5 $end
+$var wire 1 ' s6 $end
+$var wire 1 ( s7 $end
+$var wire 1 ) s8 $end
+$var wire 1 * s9 $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+0\"
+#10
+1#
+1$
+1%
+1&
+1'
+1(
+1)
+1*
+";
+
+#[test]
+fn snapshot_verbose_counts_the_rows_it_actually_clipped() {
+    // --verbose appends the undefined signals to the rows, so the truncation
+    // notice must count those too. Reporting the known count instead produced
+    // the impossible "showing 3 of 2 signals".
+    let vcd = fixture("sparse", SPARSE_VCD);
+    let json = ok_stdout(&vcd, &["snapshot", "--at", "0", "--json", "--verbose", "--limit", "3"]);
+    assert!(json.contains("\"known\":2") && json.contains("\"undefined\":8"), "{json}");
+    assert!(json.contains("\"hint\":\"showing 3 of 10 signals"), "{json}");
+
+    // Without --verbose the rows are the known signals alone, and the notice
+    // counts those.
+    let json = ok_stdout(&vcd, &["snapshot", "--at", "0", "--json", "--limit", "1"]);
+    assert!(json.contains("\"hint\":\"showing 1 of 2 signals"), "{json}");
+    let _ = std::fs::remove_file(&vcd);
+}
