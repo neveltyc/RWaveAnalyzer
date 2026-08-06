@@ -19,6 +19,12 @@
 //! character — notably `[` and `]` in bus ranges such as `data[7:0]` — is
 //! literal. This intentionally differs from shell `fnmatch`.
 
+/// Hierarchy separators. Wellen normalizes VCD/FST/GHW paths to `.`; the
+/// built-in FSDB backend emits either `.` or `/`. Both a pattern's
+/// leaf-versus-path decision and `select`'s scope segmentation key off this one
+/// set, so the two cannot disagree about what counts as a hierarchy.
+pub(crate) const SEPARATORS: [char; 2] = ['.', '/'];
+
 /// Maximum length of a single filter pattern (DoS guard).
 pub(crate) const MAX_FILTER_PATTERN_LEN: usize = 256;
 /// Maximum number of wildcard chars in one pattern (regex-blowup guard).
@@ -99,9 +105,12 @@ impl Filters {
                 )));
             }
             let lower = collapsed.to_lowercase();
-            // A '.' in the pattern is the user reaching for the hierarchy; with
-            // none, they are naming a signal and mean the leaf.
-            let domain = if lower.contains('.') { Domain::Path } else { Domain::Leaf };
+            // A separator in the pattern is the user reaching for the hierarchy;
+            // with none, they are naming a signal and mean the leaf. Both
+            // separators count: the built-in FSDB backend emits '/'-separated
+            // paths, and a pattern like `top/u_dma/*` addresses a hierarchy just
+            // as plainly as its dotted equivalent.
+            let domain = if lower.contains(SEPARATORS) { Domain::Path } else { Domain::Leaf };
             let kind = if lower.contains('*') || lower.contains('?') {
                 PatKind::Glob(compile_glob(&lower))
             } else {
@@ -334,6 +343,27 @@ mod tests {
         let f = Filters::parse_csv("clk").unwrap();
         assert!(m(&f, "top.clk_div"));
         assert!(!m(&f, "top.clk_gen.enable"));
+    }
+
+    #[test]
+    fn a_slash_separated_pattern_addresses_the_path() {
+        // The built-in FSDB backend emits '/'-separated hierarchies. A pattern
+        // written that way is reaching for the hierarchy just as plainly as a
+        // dotted one, so it must not be matched against the leaf name.
+        let path = "top/u_dma/req";
+        let leaf = "req";
+        for pat in ["top/u_dma/*", "u_dma/", "u_dma/req"] {
+            let f = Filters::parse_csv(pat).unwrap();
+            assert!(f.matches_path_leaf(path, leaf), "{pat} should match {path}");
+        }
+        // A different subtree is still excluded.
+        let f = Filters::parse_csv("u_cpu/").unwrap();
+        assert!(!f.matches_path_leaf(path, leaf));
+        // And a bare name still means the leaf, on either separator style.
+        let f = Filters::parse_csv("req").unwrap();
+        assert!(f.matches_path_leaf(path, leaf));
+        let f = Filters::parse_csv("u_dma").unwrap();
+        assert!(!f.matches_path_leaf(path, leaf), "a scope name is not a leaf name");
     }
 
     #[test]
