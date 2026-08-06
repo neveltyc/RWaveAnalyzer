@@ -533,8 +533,18 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     // Each selection flag overrides its own default independently. A line can
     // therefore lift one inherited flag without disturbing the others by
     // passing it empty (`--filter ''`), which reads as "not given".
+    // Did *this line* pass a blank `--scope`, i.e. deliberately clear it?
+    let acc_scope_is_blank = acc.scope.as_deref().is_some_and(|s| s.trim().is_empty());
     let scope = acc.scope.or_else(|| defaults.scope.clone());
-    let depth = acc.depth.or(defaults.depth);
+    // `--depth` is the exception, because it is not independent: it is counted
+    // from the scope root and cannot outlive it. A line that clears the scope
+    // therefore drops an inherited depth with it — otherwise a `--batch` whose
+    // defaults pair the two would leave every line stuck, since clearing the
+    // scope alone makes the inherited depth an error and `--depth ''` is not a
+    // number. A depth the line asked for itself is kept, so `--scope '' --depth
+    // 3` still reports the contradiction the user wrote.
+    let scope_cleared = acc_scope_is_blank && acc.depth.is_none();
+    let depth = if scope_cleared { None } else { acc.depth.or(defaults.depth) };
     let filter = acc.filter.or_else(|| defaults.filter.clone());
     let exclude = acc.exclude.or_else(|| defaults.exclude.clone());
     let at = acc.at.or_else(|| defaults.at.clone());
@@ -920,20 +930,47 @@ mod tests {
         let toks: Vec<String> = ["list", "--scope", "u_tx"].iter().map(|s| s.to_string()).collect();
         assert!(parse_batch_line(&toks, "f.vcd", &defaults).is_ok());
 
-        // Clearing an inherited scope re-exposes the inherited depth.
-        let paired = match p(&["--batch", "x.vcd", "--depth", "2", "--scope", "u_tx"]) {
-            ParseOutcome::Batch(b) => b.defaults,
-            other => panic!("expected Batch, got {}", outcome_kind(&other)),
-        };
-        let toks: Vec<String> = ["list", "--scope", ""].iter().map(|s| s.to_string()).collect();
-        let e = parse_batch_line(&toks, "f.vcd", &paired).unwrap_err();
-        assert!(e.contains("--depth requires --scope"), "{e}");
+        // Clearing an inherited scope takes the inherited depth with it; see
+        // `clearing_the_scope_drops_an_inherited_depth_with_it`.
 
         // A non-positive default is rejected up front, at the --batch line.
         match p(&["--batch", "x.vcd", "--depth", "0"]) {
             ParseOutcome::Error(e) => assert!(e.contains("depth must be positive"), "{e}"),
             other => panic!("expected Error, got {}", outcome_kind(&other)),
         }
+    }
+
+    #[test]
+    fn clearing_the_scope_drops_an_inherited_depth_with_it() {
+        // Depth is counted from the scope root, so it cannot outlive it. With
+        // both set as defaults, a line clearing the scope must get the whole
+        // file back — leaving the depth behind would make the line an error
+        // with no way out, since `--depth ''` is not a number.
+        let defaults = match p(&["--batch", "x.vcd", "--scope", "u_tx", "--depth", "1"]) {
+            ParseOutcome::Batch(b) => b.defaults,
+            other => panic!("expected Batch, got {}", outcome_kind(&other)),
+        };
+        let toks: Vec<String> = ["list", "--scope", ""].iter().map(|s| s.to_string()).collect();
+        let a = parse_batch_line(&toks, "f.vcd", &defaults).expect("clearing scope is allowed");
+        assert_eq!(a.depth, None, "the inherited depth goes with the scope");
+        assert_eq!(a.scope.as_deref(), Some(""));
+
+        // A depth the line asked for itself is kept, so the contradiction the
+        // user actually wrote is still reported.
+        let toks: Vec<String> = ["list", "--scope", "", "--depth", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let e = parse_batch_line(&toks, "f.vcd", &defaults).unwrap_err();
+        assert!(e.contains("--depth requires --scope"), "{e}");
+
+        // Inheritance is otherwise untouched: a plain line, and a line naming
+        // its own scope, both still get the default depth.
+        let a = parse_batch_line(&["list".into()], "f.vcd", &defaults).unwrap();
+        assert_eq!(a.depth, Some(1));
+        let toks: Vec<String> = ["list", "--scope", "u_rx"].iter().map(|s| s.to_string()).collect();
+        let b = parse_batch_line(&toks, "f.vcd", &defaults).unwrap();
+        assert_eq!((b.scope.as_deref(), b.depth), (Some("u_rx"), Some(1)));
     }
 
     #[test]

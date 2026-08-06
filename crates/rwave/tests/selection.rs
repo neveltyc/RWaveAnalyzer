@@ -557,3 +557,31 @@ fn snapshot_verbose_counts_the_rows_it_actually_clipped() {
     assert!(json.contains("\"hint\":\"showing 1 of 2 signals"), "{json}");
     let _ = std::fs::remove_file(&vcd);
 }
+
+#[test]
+fn a_batch_line_can_get_the_whole_file_back_from_a_scope_and_depth_default() {
+    // --depth is counted from the scope root, so clearing the scope clears it
+    // too. Without that, a --batch pairing the two left every line stuck:
+    // `--scope ''` alone kept the depth and errored, and `--depth ''` is not a
+    // number.
+    let vcd = fixture("batchscopeclear", DEEP_VCD);
+    let out = run_batch(
+        &vcd,
+        &["--json", "--scope", "u_m0", "--depth", "1"],
+        "list\nlist --scope ''\nlist --scope '' --depth 3\n",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].contains("\"ok\":true"), "defaults apply: {}", lines[0]);
+    assert!(!lines[0].contains("u_m1"), "scoped to u_m0: {}", lines[0]);
+
+    assert!(lines[1].contains("\"ok\":true"), "clearing scope succeeds: {}", lines[1]);
+    assert!(lines[1].contains("u_m1"), "and reaches the whole file again: {}", lines[1]);
+
+    assert!(lines[2].contains("\"ok\":false"), "{}", lines[2]);
+    assert!(
+        lines[2].contains("--depth requires --scope"),
+        "a depth the line asked for itself is still its own contradiction: {}",
+        lines[2]
+    );
+    let _ = std::fs::remove_file(&vcd);
+}
