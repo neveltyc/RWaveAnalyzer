@@ -4,13 +4,14 @@
 //! Command-line interface: argument model and a small hand-rolled parser.
 //!
 //! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
-//! per-command flags are `--begin`, `--end`, `--filter`, `--at`, `--condition`,
-//! `--show`. `--json`, `--limit`, and `--verbose` may appear either before or
-//! after the subcommand. We avoid a third-party arg parser to keep the static
-//! binary small and the error text under our control.
+//! per-command flags are `--begin`, `--end`, `--scope`, `--depth`, `--filter`,
+//! `--exclude`, `--at`, `--condition`, `--show`. `--json`, `--limit`, and
+//! `--verbose` may appear either before or after the subcommand. We avoid a
+//! third-party arg parser to keep the static binary small and the error text
+//! under our control.
 
 /// Default result limit when neither `--limit` nor `--verbose` is given.
-pub const DEFAULT_LIMIT: usize = 200;
+pub const DEFAULT_LIMIT: usize = 500;
 
 /// Which subcommand to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,14 @@ pub struct Args {
     pub verbose: bool,
     pub begin: Option<String>,
     pub end: Option<String>,
+    /// Hierarchy subtrees to restrict the selection to.
+    pub scope: Option<String>,
+    /// Maximum levels below the matched `--scope` root; requires `--scope`.
+    pub depth: Option<i64>,
     pub filter: Option<String>,
+    /// Subtractive counterpart of `--filter`: same pattern language, applied
+    /// last. Usable on its own to carve noise out of a whole-file query.
+    pub exclude: Option<String>,
     pub at: Option<String>,
     /// Search conditions. Each element is one `--condition` clause (a
     /// comma-separated AND list); repeating `--condition` ORs the clauses
@@ -69,7 +77,10 @@ pub struct Defaults {
     pub verbose: bool,
     pub begin: Option<String>,
     pub end: Option<String>,
+    pub scope: Option<String>,
+    pub depth: Option<i64>,
     pub filter: Option<String>,
+    pub exclude: Option<String>,
     pub at: Option<String>,
     /// Default `--condition` clause group; a batch line with any `--condition`
     /// of its own replaces this whole group (see [`parse_batch_line`]).
@@ -99,43 +110,71 @@ pub enum ParseOutcome {
 }
 
 /// Top-level help text (shown for `--help` / no command).
+///
+/// Written as a raw string: the source layout *is* the output layout, so the
+/// column alignment below cannot drift from what a user sees.
 pub fn help_text() -> String {
     format!(
-        "rwave {ver} — AI-agent-friendly VCD/FST waveform analyzer\n\
-\n\
-Usage: rwave [--json] [--limit N] [--verbose] <command> <file> [options]\n\
-       rwave --batch [--json] <file> [global-opts] < commands.txt\n\
-\n\
-Commands:\n\
-  info      <file>                              File overview (timescale, signals, time span, scopes)\n\
-  list      <file> [--filter K1,K2]             List signals (filter matches any alias path)\n\
-  dump      <file> [--begin T] [--end T] [--filter K1,K2]\n\
-                                                Print value-change events in time order\n\
-  summary   <file> [--begin T] [--end T] [--filter K1,K2]\n\
-                                                Per-signal stats: change count, edges, static detection\n\
-  snapshot  <file> --at T [--filter K1,K2]      Known signal values at a given time point\n\
-  compare   <file> --at T1,T2 [--filter K1,K2]  Diff signal values between two time points\n\
-  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]\n\
-                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;\n\
-                                                a changed(SIG) term fires at SIG's transitions (event mode)\n\
-\n\
-Global options:\n\
-  --json        Output compact structured JSON instead of text\n\
-  --limit N     Max rows/records to emit; default {lim}; 0 = unlimited\n\
-  --verbose     Show extra fields; if --limit is omitted, disables truncation\n\
-  --batch       Load <file> once, then read commands (one per line) from stdin\n\
-  --version     Print version and exit\n\
-  -h, --help    Print this help and exit\n\
-\n\
-Batch mode (--batch): each stdin line is a command minus the leading 'rwave';\n\
-results are emitted in input order. With --json each result is one NDJSON line\n\
-{{\"id\",\"ok\",\"result\"|\"error\"}}; without it, each result is preceded by a\n\
-'#label' header line. A trailing '#label' on an input line sets that result's\n\
-id (otherwise a 1-based sequence number is used); blank lines and lines starting\n\
-with '#' are skipped. [global-opts] become per-command defaults.\n\
-\n\
-Supports both VCD and FST inputs; the format is auto-detected.\n\
-Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.\n",
+        r#"rwave {ver} — AI-agent-friendly VCD/FST waveform analyzer
+
+Usage: rwave [--json] [--limit N] [--verbose] <command> <file> [options]
+       rwave --batch [--json] <file> [global-opts] < commands.txt
+
+Commands:
+  info      <file>                              File overview (timescale, signals, time span, scopes)
+  list      <file> [selection]                  List signals (one row per alias path)
+  dump      <file> [--begin T] [--end T] [selection]
+                                                Print value-change events in time order
+  summary   <file> [--begin T] [--end T] [selection]
+                                                Per-signal stats: change count, edges, static detection
+  snapshot  <file> --at T [selection]           Known signal values at a given time point
+  compare   <file> --at T1,T2 [selection]       Diff signal values between two time points
+  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]
+                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;
+                                                a changed(SIG) term fires at SIG's transitions (event mode)
+
+Selection options (every command above except info):
+  --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
+                    name ('*' and '?' allowed); a path matches as a segment-aligned
+                    suffix of a scope path, so 'u_tx.u_fifo' finds that subtree
+                    wherever it sits.
+  --depth N         Keep signals at most N levels below the matched --scope root; a
+                    signal sitting directly in the scope is depth 1. Requires --scope.
+  --filter K1,K2    Keep signals matching any pattern; omit to keep all.
+  --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
+                    its own.
+
+Patterns are comma-separated and case-insensitive. One with no separator matches
+the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
+instance named after it; one containing a '.' or '/' matches the whole path. Either
+way, no '*' or '?' means substring, and '*'/'?' make it an anchored glob ('[' and
+']' stay literal, for bus ranges). An empty value ('') means "not given".
+
+Selection is decided per alias path: a signal is kept when any one of its paths
+clears every option, and list prints only the paths that did. search resolves its
+--condition and --show names within the same selection, which is often what makes
+an ambiguous name unique; a name spelled as a full path bypasses selection.
+
+Global options:
+  --json        Output compact structured JSON instead of text
+  --limit N     Max rows/records to emit; default {lim}; 0 = unlimited
+  --verbose     Show extra fields; if --limit is omitted, disables truncation
+  --batch       Load <file> once, then read commands (one per line) from stdin
+  --version     Print version and exit
+  -h, --help    Print this help and exit
+
+Batch mode (--batch): each stdin line is a command minus the leading 'rwave';
+results are emitted in input order. With --json each result is one NDJSON line
+{{"id","ok","result"|"error"}}; without it, each result is preceded by a
+'#label' header line. A trailing '#label' on an input line sets that result's
+id (otherwise a 1-based sequence number is used); blank lines and lines starting
+with '#' are skipped. [global-opts] become per-command defaults; each selection
+option overrides its own default, and a line lifts one it does not want with an
+empty value (--filter '').
+
+Supports both VCD and FST inputs; the format is auto-detected.
+Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
+"#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
     )
@@ -146,8 +185,8 @@ Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is ra
 /// help/version request (e.g. `--filter --version` should be "missing value
 /// for --filter", not "print version").
 const VALUE_FLAGS: &[&str] = &[
-    "--limit", "--begin", "--end", "--filter", "--at",
-    "--condition", "--show",
+    "--limit", "--begin", "--end", "--scope", "--depth", "--filter", "--exclude",
+    "--at", "--condition", "--show",
 ];
 
 /// Parse a slice of argv tokens (excluding argv[0]).
@@ -196,7 +235,10 @@ struct Acc {
     verbose: bool,
     begin: Option<String>,
     end: Option<String>,
+    scope: Option<String>,
+    depth: Option<i64>,
     filter: Option<String>,
+    exclude: Option<String>,
     at: Option<String>,
     condition: Vec<String>,
     show: Option<String>,
@@ -236,9 +278,29 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                 i += 1;
                 acc.end = Some(require_value(argv, i, "--end")?);
             }
+            "--scope" => {
+                i += 1;
+                acc.scope = Some(require_value(argv, i, "--scope")?);
+            }
+            "--depth" => {
+                i += 1;
+                let v = argv
+                    .get(i)
+                    .ok_or_else(|| "--depth requires a value".to_string())?;
+                match v.parse::<i64>() {
+                    Ok(n) => acc.depth = Some(n),
+                    Err(_) => {
+                        return Err(format!("argument --depth: invalid int value: '{v}'"));
+                    }
+                }
+            }
             "--filter" => {
                 i += 1;
                 acc.filter = Some(require_value(argv, i, "--filter")?);
+            }
+            "--exclude" => {
+                i += 1;
+                acc.exclude = Some(require_value(argv, i, "--exclude")?);
             }
             "--at" => {
                 i += 1;
@@ -320,6 +382,25 @@ fn check_limit(limit: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate `--depth`, which is measured *from* the `--scope` root and so has
+/// no meaning without one. Called after the batch merge, so a line inheriting a
+/// default `--depth` without ever naming a scope fails on that line — and a
+/// line clearing an inherited scope with `--scope ''` fails the same way, since
+/// a blank value means "not given" everywhere in the selection flags.
+fn check_depth(depth: Option<i64>, scope: &Option<String>) -> Result<(), String> {
+    let n = match depth {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+    if n <= 0 {
+        return Err(format!("depth must be positive; got {n}"));
+    }
+    if !scope.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        return Err("--depth requires --scope (depth is counted from the scope root)".into());
+    }
+    Ok(())
+}
+
 /// Inner parse returning a `Result<_, String>` so the `?` operator can
 /// short-circuit on errors (mapped to `ParseOutcome::Error` by the caller).
 /// On success it yields a `Run`, `Batch`, or `Print` outcome.
@@ -354,6 +435,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
     let file = acc.positionals.into_iter().next().unwrap();
     check_required(&command, &acc.at, &acc.condition)?;
     check_limit(acc.limit)?;
+    check_depth(acc.depth, &acc.scope)?;
     Ok(ParseOutcome::Run(Args {
         command,
         file,
@@ -362,7 +444,10 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         verbose: acc.verbose,
         begin: acc.begin,
         end: acc.end,
+        scope: acc.scope,
+        depth: acc.depth,
         filter: acc.filter,
+        exclude: acc.exclude,
         at: acc.at,
         condition: acc.condition,
         show: acc.show,
@@ -391,6 +476,14 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
     }
     let file = acc.positionals.into_iter().next().unwrap();
     check_limit(acc.limit)?;
+    // Only the value is checked here, not the `--depth` / `--scope` pairing: a
+    // default `--depth` is legitimate when the lines supply their own scopes.
+    // The pairing is enforced per line, on the merged options.
+    if let Some(n) = acc.depth {
+        if n <= 0 {
+            return Err(format!("depth must be positive; got {n}"));
+        }
+    }
     Ok(ParseOutcome::Batch(BatchInvocation {
         file,
         json: acc.json,
@@ -399,7 +492,10 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             verbose: acc.verbose,
             begin: acc.begin,
             end: acc.end,
+            scope: acc.scope,
+            depth: acc.depth,
             filter: acc.filter,
+            exclude: acc.exclude,
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
@@ -434,7 +530,23 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     let verbose = acc.verbose || defaults.verbose;
     let begin = acc.begin.or_else(|| defaults.begin.clone());
     let end = acc.end.or_else(|| defaults.end.clone());
+    // Each selection flag overrides its own default independently. A line can
+    // therefore lift one inherited flag without disturbing the others by
+    // passing it empty (`--filter ''`), which reads as "not given".
+    // Did *this line* pass a blank `--scope`, i.e. deliberately clear it?
+    let acc_scope_is_blank = acc.scope.as_deref().is_some_and(|s| s.trim().is_empty());
+    let scope = acc.scope.or_else(|| defaults.scope.clone());
+    // `--depth` is the exception, because it is not independent: it is counted
+    // from the scope root and cannot outlive it. A line that clears the scope
+    // therefore drops an inherited depth with it — otherwise a `--batch` whose
+    // defaults pair the two would leave every line stuck, since clearing the
+    // scope alone makes the inherited depth an error and `--depth ''` is not a
+    // number. A depth the line asked for itself is kept, so `--scope '' --depth
+    // 3` still reports the contradiction the user wrote.
+    let scope_cleared = acc_scope_is_blank && acc.depth.is_none();
+    let depth = if scope_cleared { None } else { acc.depth.or(defaults.depth) };
     let filter = acc.filter.or_else(|| defaults.filter.clone());
+    let exclude = acc.exclude.or_else(|| defaults.exclude.clone());
     let at = acc.at.or_else(|| defaults.at.clone());
     // A line carrying any `--condition` of its own replaces the entire default
     // clause group; with none, the default group is inherited wholesale.
@@ -446,6 +558,7 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     let show = acc.show.or_else(|| defaults.show.clone());
     check_required(&command, &at, &condition)?;
     check_limit(limit)?;
+    check_depth(depth, &scope)?;
     Ok(Args {
         command,
         file: file.to_string(),
@@ -454,7 +567,10 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         verbose,
         begin,
         end,
+        scope,
+        depth,
         filter,
+        exclude,
         at,
         condition,
         show,
@@ -660,10 +776,71 @@ mod tests {
             ParseOutcome::Run(_) | ParseOutcome::Error(_) => {}
             other => panic!("unexpected outcome: {}", outcome_kind(&other)),
         }
+        // Every value flag must be in VALUE_FLAGS, the selection ones included.
+        for flag in ["--scope", "--depth", "--exclude"] {
+            match p(&["list", "x.vcd", flag, "--version"]) {
+                ParseOutcome::Run(_) | ParseOutcome::Error(_) => {}
+                other => panic!("{flag} hijacked by --version: {}", outcome_kind(&other)),
+            }
+        }
         // A genuine --version anywhere still works.
         match p(&["--filter", "clk", "--version", "info", "x.vcd"]) {
             ParseOutcome::Print(s) => assert!(s.contains(crate::VERSION)),
             _ => panic!("expected version print"),
+        }
+    }
+
+    #[test]
+    fn selection_flags_parse() {
+        match p(&[
+            "list", "x.vcd", "--scope", "u_tx", "--depth", "2", "--filter", "err", "--exclude",
+            "clk",
+        ]) {
+            ParseOutcome::Run(a) => {
+                assert_eq!(a.scope.as_deref(), Some("u_tx"));
+                assert_eq!(a.depth, Some(2));
+                assert_eq!(a.filter.as_deref(), Some("err"));
+                assert_eq!(a.exclude.as_deref(), Some("clk"));
+            }
+            other => panic!("expected Run, got {}", outcome_kind(&other)),
+        }
+        // --exclude stands alone.
+        match p(&["summary", "x.vcd", "--exclude", "*_sync_*"]) {
+            ParseOutcome::Run(a) => {
+                assert!(a.filter.is_none());
+                assert_eq!(a.exclude.as_deref(), Some("*_sync_*"));
+            }
+            other => panic!("expected Run, got {}", outcome_kind(&other)),
+        }
+        for flag in ["--scope", "--exclude", "--depth"] {
+            match p(&["list", "x.vcd", flag]) {
+                ParseOutcome::Error(e) => assert!(e.contains(flag), "{e}"),
+                other => panic!("expected Error, got {}", outcome_kind(&other)),
+            }
+        }
+    }
+
+    #[test]
+    fn depth_is_positive_and_needs_a_scope() {
+        // Depth counts from the scope root, so it means nothing without one.
+        match p(&["list", "x.vcd", "--depth", "2"]) {
+            ParseOutcome::Error(e) => assert!(e.contains("--depth requires --scope"), "{e}"),
+            other => panic!("expected Error, got {}", outcome_kind(&other)),
+        }
+        // A blank scope is "not given" — it must not satisfy the pairing.
+        match p(&["list", "x.vcd", "--depth", "2", "--scope", "  "]) {
+            ParseOutcome::Error(e) => assert!(e.contains("--depth requires --scope"), "{e}"),
+            other => panic!("expected Error, got {}", outcome_kind(&other)),
+        }
+        for bad in ["0", "-3"] {
+            match p(&["list", "x.vcd", "--scope", "u_tx", "--depth", bad]) {
+                ParseOutcome::Error(e) => assert!(e.contains("depth must be positive"), "{e}"),
+                other => panic!("expected Error, got {}", outcome_kind(&other)),
+            }
+        }
+        match p(&["list", "x.vcd", "--scope", "u_tx", "--depth", "x"]) {
+            ParseOutcome::Error(e) => assert!(e.contains("invalid int value"), "{e}"),
+            other => panic!("expected Error, got {}", outcome_kind(&other)),
         }
     }
 
@@ -707,6 +884,93 @@ mod tests {
             }
             other => panic!("expected Batch, got {}", outcome_kind(&other)),
         }
+    }
+
+    #[test]
+    fn batch_selection_defaults_merge_per_flag() {
+        let defaults = match p(&[
+            "--batch", "x.vcd", "--scope", "u_tx", "--depth", "2", "--filter", "err", "--exclude",
+            "clk",
+        ]) {
+            ParseOutcome::Batch(b) => b.defaults,
+            other => panic!("expected Batch, got {}", outcome_kind(&other)),
+        };
+        // A bare line inherits every default.
+        let a = parse_batch_line(&["list".into()], "f.vcd", &defaults).unwrap();
+        assert_eq!(a.scope.as_deref(), Some("u_tx"));
+        assert_eq!(a.depth, Some(2));
+        assert_eq!(a.filter.as_deref(), Some("err"));
+        assert_eq!(a.exclude.as_deref(), Some("clk"));
+
+        // Overriding one leaves the others alone.
+        let toks: Vec<String> = ["list", "--scope", "u_rx"].iter().map(|s| s.to_string()).collect();
+        let b = parse_batch_line(&toks, "f.vcd", &defaults).unwrap();
+        assert_eq!(b.scope.as_deref(), Some("u_rx"));
+        assert_eq!(b.filter.as_deref(), Some("err"));
+
+        // An empty value lifts an inherited default without touching the rest —
+        // the escape hatch for a line that wants the whole file back.
+        let toks: Vec<String> = ["list", "--filter", ""].iter().map(|s| s.to_string()).collect();
+        let c = parse_batch_line(&toks, "f.vcd", &defaults).unwrap();
+        assert_eq!(c.filter.as_deref(), Some(""));
+        assert_eq!(c.exclude.as_deref(), Some("clk"));
+    }
+
+    #[test]
+    fn batch_depth_pairing_is_enforced_per_line() {
+        // A default --depth is legal on its own: lines may bring their own
+        // scopes. Only a line that ends up scope-less is an error.
+        let defaults = match p(&["--batch", "x.vcd", "--depth", "2"]) {
+            ParseOutcome::Batch(b) => b.defaults,
+            other => panic!("expected Batch, got {}", outcome_kind(&other)),
+        };
+        assert_eq!(defaults.depth, Some(2));
+        let e = parse_batch_line(&["list".into()], "f.vcd", &defaults).unwrap_err();
+        assert!(e.contains("--depth requires --scope"), "{e}");
+        let toks: Vec<String> = ["list", "--scope", "u_tx"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_batch_line(&toks, "f.vcd", &defaults).is_ok());
+
+        // Clearing an inherited scope takes the inherited depth with it; see
+        // `clearing_the_scope_drops_an_inherited_depth_with_it`.
+
+        // A non-positive default is rejected up front, at the --batch line.
+        match p(&["--batch", "x.vcd", "--depth", "0"]) {
+            ParseOutcome::Error(e) => assert!(e.contains("depth must be positive"), "{e}"),
+            other => panic!("expected Error, got {}", outcome_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn clearing_the_scope_drops_an_inherited_depth_with_it() {
+        // Depth is counted from the scope root, so it cannot outlive it. With
+        // both set as defaults, a line clearing the scope must get the whole
+        // file back — leaving the depth behind would make the line an error
+        // with no way out, since `--depth ''` is not a number.
+        let defaults = match p(&["--batch", "x.vcd", "--scope", "u_tx", "--depth", "1"]) {
+            ParseOutcome::Batch(b) => b.defaults,
+            other => panic!("expected Batch, got {}", outcome_kind(&other)),
+        };
+        let toks: Vec<String> = ["list", "--scope", ""].iter().map(|s| s.to_string()).collect();
+        let a = parse_batch_line(&toks, "f.vcd", &defaults).expect("clearing scope is allowed");
+        assert_eq!(a.depth, None, "the inherited depth goes with the scope");
+        assert_eq!(a.scope.as_deref(), Some(""));
+
+        // A depth the line asked for itself is kept, so the contradiction the
+        // user actually wrote is still reported.
+        let toks: Vec<String> = ["list", "--scope", "", "--depth", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let e = parse_batch_line(&toks, "f.vcd", &defaults).unwrap_err();
+        assert!(e.contains("--depth requires --scope"), "{e}");
+
+        // Inheritance is otherwise untouched: a plain line, and a line naming
+        // its own scope, both still get the default depth.
+        let a = parse_batch_line(&["list".into()], "f.vcd", &defaults).unwrap();
+        assert_eq!(a.depth, Some(1));
+        let toks: Vec<String> = ["list", "--scope", "u_rx"].iter().map(|s| s.to_string()).collect();
+        let b = parse_batch_line(&toks, "f.vcd", &defaults).unwrap();
+        assert_eq!((b.scope.as_deref(), b.depth), (Some("u_rx"), Some(1)));
     }
 
     #[test]
