@@ -67,6 +67,12 @@ rwave compare sim.fst --at 17.5us,17.7us --filter bus
 
 # Which signals are active versus static?
 rwave summary sim.fst --filter alu
+
+# Just this block, and not its submodules
+rwave list sim.fst --scope u_tx.u_fifo --depth 1
+
+# Everything but the CDC synchronizers
+rwave summary sim.fst --exclude '*_sync_*.*'
 ```
 
 Add `--json` to any command for compact, machine-readable output.
@@ -153,17 +159,17 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | Command | What it does |
 |:--|:--|
 | `info`     | Timescale, signal and type counts, time span, and scopes — the file at a glance |
-| `list`     | Enumerate signals with path, width, and type (`--filter` matches any alias) |
+| `list`     | Enumerate signals with path, width, and type (one row per alias path) |
 | `dump`     | Print every value change in a time window, in time order |
 | `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges |
 | `snapshot` | All known signal values at one time point (`--at T`) |
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 
-Every command accepts a `--begin`/`--end` time window and a `--filter`. Times
-take the unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example
-`17.5us`); a bare integer is interpreted as raw ticks. Filters are
-comma-separated and match by substring or `*`-glob. The global flags are `--json`
+Every command accepts a `--begin`/`--end` time window and the four selection
+options described in [Selecting signals](#selecting-signals). Times take the
+unit suffixes `fs`, `ps`, `ns`, `us`, `ms`, and `s` (for example `17.5us`); a
+bare integer is interpreted as raw ticks. The global flags are `--json`
 for structured output, `--limit N` to cap the number of rows (the default is
 200, and `0` means unlimited), and `--verbose` for extra fields. A search
 condition is a comma-separated AND-list of `SIG=VAL`, `SIG!=VAL`, or
@@ -176,6 +182,73 @@ clause per channel to find when any handshakes; every clause must contain a
 `changed()` term or none may. There is no in-string OR (`|`/parentheses); OR
 is only the repeated flag. Run `rwave <command> --help` for the complete
 reference.
+
+## Selecting signals
+
+A dump has more signals than any one question needs. Four options narrow it,
+and they compose as a pipeline over each signal path in turn:
+
+| | |
+|:--|:--|
+| `--scope P1,P2`  | which subtree to look in |
+| `--depth N`      | how far below that subtree's root to go (requires `--scope`) |
+| `--filter K1,K2` | which names to keep |
+| `--exclude K1,K2`| what to drop, applied last |
+
+```sh
+# One block, not its submodules.
+rwave list sim.fst --scope u_tx.u_fifo --depth 1
+
+# A status bit, without the CDC synchronizer named after it.
+rwave summary sim.fst --filter tx_fifo_push_err
+
+# Everything except the clock trees.
+rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
+```
+
+**Patterns match a name, or a path.** A pattern with no `.` matches the
+signal's **leaf name**; one containing a `.` matches its **whole hierarchical
+path**. This matters because RTL names scopes after signals: a CDC
+synchronizer instance is conventionally `u_sync_<sig>`, so a whole-path match
+for `tx_fifo_push_err` returns the status bit *and* every net inside the
+synchronizer — clocks and pipeline flops whose change counts can run five
+orders of magnitude higher. Matching the leaf asks for the signal itself. To
+address the hierarchy instead, include a dot: `--filter 'u_dma.'` keeps
+everything under `u_dma`, and `--filter 'top.u_dma.*'` does the same anchored
+from the root. Either way, a pattern with no `*`/`?` matches by substring, one
+with them is an anchored glob, `[` and `]` are literal (for bus ranges), and
+matching is case-insensitive. Comma-separated patterns are ORed.
+
+**`--scope` matches segment by segment**, so `u_fifo` never selects
+`u_fifo_ctrl`. A value with no `.` names one instance and takes its
+descendants with it; `*` and `?` are allowed (`--scope 'u_ch?'`). A dotted
+value matches as a segment-aligned suffix, so `u_tx.u_fifo` finds that subtree
+wherever it sits in the tree, and a path written out from the root works too.
+
+**`--depth` counts from the matched scope**, with a signal sitting directly in
+it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of
+its submodules'". It requires `--scope`, since there is nothing to count from
+otherwise.
+
+**Selection is decided per path, not per signal.** A signal is kept when any
+one of its paths clears every option. That is what makes `--exclude` safe on a
+net visible at several points in the hierarchy: a status bit wired into a
+synchronizer has a path inside it and a path outside, so excluding the
+synchronizer hides the inner path and keeps the signal, while the
+synchronizer's own nets — which have no path outside — drop out. `list` prints
+only the paths that survived `--scope`, `--depth`, and `--exclude`; `--filter`
+hides no paths, since a wanted signal's other paths are worth seeing.
+
+**`search` has no row filter** — its `--condition` and `--show` names *are* the
+selection — so the options narrow how those names are **resolved**. Against a
+design with four counters, `--condition cnt=1` is an ambiguity error and
+`--scope u_m0.u_a` makes it a unique hit. A name spelled out as a full path
+bypasses selection entirely, so an `--exclude` can never put a named signal out
+of reach.
+
+An option that matches nothing is an empty result, not an error, and an empty
+value (`--filter ''`) reads as "not given" — which is how a `--batch` line lifts
+a default it does not want.
 
 ## JSON output
 
@@ -215,7 +288,11 @@ Each input line is an ordinary command with the leading `rwave` and the file
 omitted — both are already fixed by the `--batch` invocation. Blank lines and
 lines beginning with `#` are skipped; a trailing `#label` names that line's
 result. Any `[global-opts]` on the `--batch` command line (`--limit`,
-`--verbose`, …) become defaults that an individual line can override.
+`--verbose`, the selection options, …) become defaults that an individual line
+can override. A `--batch`-wide `--exclude` is a good way to keep one class of
+noise out of every query in a plan; each option overrides its own default
+independently, so a line that wants one of them lifted passes it empty
+(`--filter ''`) without disturbing the rest.
 
 Results come back in input order, one per command. With `--json` each is a
 single NDJSON object; without it, each is a `#label` header followed by that

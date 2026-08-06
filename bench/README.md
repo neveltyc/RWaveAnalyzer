@@ -24,7 +24,9 @@ recreated on first run.
 ## What's measured
 
 Every command is **scoped via `--filter` or `--condition`** to one module —
-this mirrors realistic agent use. Unfiltered whole-file commands on this
+this mirrors realistic agent use. The selection options cost one pass over the
+signal table plus one lower-casing of each path and leaf, shared across all
+four, so narrowing is cheap next to the trace decode it avoids. Unfiltered whole-file commands on this
 trace consume **7–8 GB peak RSS** and run for 50+ seconds; they're
 deliberately *not* in the bench because they don't fit standard 7 GB CI
 runners. If you want to verify those numbers locally:
