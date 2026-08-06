@@ -114,6 +114,70 @@ cfcode=$?
 
 rm -f /tmp/_sv.$$ /tmp/_sf.$$
 
+echo "== selection (--scope / --depth / --filter / --exclude) =="
+# hier_deep is three levels deep with repeated instance names, so it exercises
+# every axis: root -> u_m0,u_m1 -> u_a,u_b.
+HD="$STIM/hier_deep"
+rowcount() { grep -cE '^  [a-z]' ; }
+
+# VCD/FST parity under selection: the options must narrow both formats the same
+# way, since they read the hierarchy through different backends.
+for sel in "--scope u_m0" "--scope u_m0.u_a" "--scope u_m0 --depth 1" \
+           "--filter cnt --exclude u_m1." "--json list --scope u_m1 --depth 1"; do
+  case "$sel" in
+    --json*) v=$($RW $sel "$HD.vcd" 2>&1); f=$($RW $sel "$HD.fst" 2>&1) ;;
+    *)       v=$($RW list "$HD.vcd" $sel 2>&1); f=$($RW list "$HD.fst" $sel 2>&1) ;;
+  esac
+  v=$(printf '%s' "$v" | norm "$HD.vcd"); f=$(printf '%s' "$f" | norm "$HD.fst")
+  if [[ "$v" == "$f" ]]; then ok; else bad "selection VCD/FST parity :: $sel"; fi
+done
+
+# --scope selects the subtree and its descendants; --depth cuts at the root.
+n=$($RW list "$HD.vcd" --scope u_m0 | rowcount)
+[[ "$n" -eq 10 ]] && ok || bad "--scope u_m0 rows (got $n, want 10)"
+n=$($RW list "$HD.vcd" --scope u_m0 --depth 1 | rowcount)
+[[ "$n" -eq 4 ]] && ok || bad "--scope u_m0 --depth 1 rows (got $n, want 4)"
+# Segment-aligned: a dotted value is a suffix of the scope path.
+n=$($RW list "$HD.vcd" --scope u_m0.u_a | rowcount)
+[[ "$n" -eq 3 ]] && ok || bad "--scope u_m0.u_a rows (got $n, want 3)"
+
+# A dot-free --filter matches leaf names, so a scope name selects nothing.
+n=$($RW list "$HD.vcd" --filter u_m0 | rowcount)
+[[ "$n" -eq 0 ]] && ok || bad "--filter on a scope name matches no leaf (got $n)"
+n=$($RW list "$HD.vcd" --filter u_m0. | rowcount)
+[[ "$n" -gt 0 ]] && ok || bad "dotted --filter still matches the path"
+
+# Escaped identifiers keep their dots: the leaf of `tb.\foo.bar` is `\foo.bar`,
+# so the name matches and the scope does not. Splitting on the last separator
+# would answer "bar" and lose half the name.
+EF=verify/fixtures/escaped_trace.vcd
+n=$($RW list "$EF" --filter bar | rowcount)
+[[ "$n" -eq 1 ]] && ok || bad "escaped identifier matched by its leaf (got $n)"
+n=$($RW list "$EF" --filter tb | rowcount)
+[[ "$n" -eq 0 ]] && ok || bad "escaped identifier not matched by its scope (got $n)"
+
+# --depth is measured from the --scope root, so it is a usage error without one.
+$RW list "$HD.vcd" --depth 1 >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "--depth without --scope exits 2"
+$RW list "$HD.vcd" --scope u_m0 --depth 0 >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "--depth 0 exits 2"
+
+# search resolves names within the selection; a full path bypasses it.
+amb=$($RW search "$HD.vcd" --condition 'cnt=1' 2>&1); ambcode=$?
+[[ "$ambcode" -eq 1 && "$amb" == *"--scope"* ]] \
+  && ok || bad "ambiguous condition name points at --scope (exit=$ambcode)"
+if $RW search "$HD.vcd" --condition 'cnt=1' --scope u_m0.u_a >/dev/null 2>&1; then
+  ok
+else
+  bad "--scope resolves an ambiguous condition name"
+fi
+if $RW search "$HD.vcd" --condition 'hier_deep.u_m0.u_a.cnt[3:0]=1' \
+     --exclude cnt >/dev/null 2>&1; then
+  ok
+else
+  bad "a full path bypasses --exclude"
+fi
+
 echo "== batch mode =="
 BF="$STIM/handshake_proto.vcd"
 # Consistency (core): a batch `result` is byte-identical to the equivalent
