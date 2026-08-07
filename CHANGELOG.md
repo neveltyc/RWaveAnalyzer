@@ -8,80 +8,53 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [0.1.7] — 2026-08-06
 
-Signal selection grows from one option into four that compose, and the one that
-already existed changes meaning.
-
-| option | does |
-|---|---|
-| `--scope P1,P2` | restrict to hierarchy subtrees |
-| `--depth N` | at most N levels below the `--scope` root (requires `--scope`) |
-| `--filter K1,K2` | keep matching signals |
-| `--exclude K1,K2` | drop matching signals, applied last |
-
-```sh
-rwave list sim.fst --scope u_tx.u_fifo --depth 1   # one block, not its submodules
-rwave summary sim.fst --exclude '*_sync_*.*'       # everything but the synchronizers
-```
+Signal selection grows from one option into four that compose: `--scope` picks a
+subtree, `--depth` bounds how far below its root to go, `--filter` picks names,
+`--exclude` drops them. Behind that, `--filter` changes meaning. It matched a
+substring of the whole hierarchical path, so a bare signal name also matched
+every *scope* named after it — and RTL names scopes after signals as a matter of
+course, a CDC synchronizer instance being conventionally `u_sync_<sig>`, so
+asking for one status bit returned it plus every net inside the synchronizer
+named for it. A pattern with no separator now matches the leaf name; one
+containing a `.` or `/` matches the path.
 
 ### Added
 - **`--scope`, `--depth`, and `--exclude`** — on every command but `info`, and as
-  `--batch` defaults.
-- **`--scope` matches segment by segment**, never by substring, so `u_fifo` cannot
-  select `u_fifo_ctrl`. A bare name selects one instance (`*`/`?` allowed) and
-  takes its descendants with it; a dotted value matches as a segment-aligned
-  suffix, so `u_tx.u_fifo` finds that subtree wherever it sits.
-- **`--depth` is counted from the matched scope**, a signal directly in it at
-  depth 1. It requires `--scope`, there being nothing to count from otherwise.
-- **`--exclude` shares `--filter`'s pattern language**, is applied last, and works
-  on its own.
+  `--batch` defaults. `--scope` matches segment by segment, never by substring, so
+  `u_fifo` cannot select `u_fifo_ctrl`: a bare name selects one instance (`*` and
+  `?` allowed) with its descendants, a dotted value matches as a segment-aligned
+  suffix. `--depth` is counted from the matched scope, a signal directly in it at
+  depth 1, and requires `--scope`. `--exclude` shares `--filter`'s pattern
+  language, is applied last, and works on its own.
 - **Selection is decided per alias path**: a signal is kept when any one of its
-  paths clears every option. That is what makes exclusion safe on a net visible
-  at several points in the hierarchy — excluding a synchronizer hides the path
-  inside it and keeps the status bit wired through it, while the synchronizer's
-  own nets, having no path outside, drop out.
-- `list` prints only the paths that survived `--scope`, `--depth`, and
-  `--exclude`; `--filter` hides no paths, since a wanted signal's other paths are
-  worth seeing.
-- An option matching nothing is an empty result, not an error, and an empty value
-  (`--filter ''`) reads as "not given" — which is how a `--batch` line lifts an
+  paths clears every option. That is what makes exclusion safe on a net visible at
+  several points in the hierarchy — excluding a synchronizer hides the path inside
+  it and keeps the status bit wired through it, while the synchronizer's own nets,
+  having no path outside, drop out. `list` prints only the paths that survived
+  `--scope`, `--depth`, and `--exclude`; `--filter` hides none. An empty value
+  (`--filter ''`) reads as "not given", which is how a `--batch` line lifts an
   inherited default.
 
 ### Changed
-- **BREAKING: a `--filter` pattern without a separator now matches the leaf name.**
-  It used to match a substring of the whole path, so a bare signal name also
-  matched every *scope* named after it — and RTL names scopes after signals as a
-  matter of course (`u_sync_<sig>`). Asking for one status bit returned it plus
-  every net inside the synchronizer named for it, whose change counts run five
-  orders of magnitude higher, and no positive pattern could say "this name, as a
-  name".
-  - Keep whole-path matching by putting a `.` or `/` in the pattern —
-    `--filter 'u_dma.'`, or `--filter 'top.u_dma.*'` from the root. Both count as
-    separators, since the built-in FSDB backend emits either.
-  - Dropping a *subtree* now means naming a path — `--exclude 'u_sync_status.'`,
-    not `--exclude u_sync_status`.
-  - Plain names are unaffected: `clk` and `*_valid` mean what they always did.
-  - Everything else about patterns is unchanged: comma-OR, case-insensitivity,
-    substring versus anchored glob, literal `[`/`]` in bus ranges. Leaf names come
-    from each signal's scope, never from splitting a path on its last separator,
-    so a VCD escaped identifier survives whole (`\foo.bar` in scope `tb` is
-    matched by `bar`, not by `tb`).
+- **BREAKING: a `--filter` pattern without a separator now matches the leaf
+  name.** To keep whole-path matching, put a `.` or `/` in the pattern:
+  `--filter 'u_dma.'`. Dropping a *subtree* likewise means naming a path —
+  `--exclude 'u_sync_status.'`, not `--exclude u_sync_status`. Plain names are
+  unaffected: `clk` and `*_valid` mean what they always did. Leaf names come from
+  each signal's scope, never from splitting a path on its last separator, so a VCD
+  escaped identifier survives whole (`\foo.bar` in scope `tb` is matched by `bar`,
+  not by `tb`).
 - **`search` resolves `--condition` and `--show` names within the selection.** It
   has no row filter — those names *are* its selection — so the options narrow the
-  lookup instead, which is usually what turns `matches N signals` into a unique
-  hit. A name spelled as a full path bypasses selection entirely, so a broad
-  `--exclude` can never put a named signal out of reach.
-  - Note for existing `--batch` plans: a top-line `--filter` used to be ignored by
-    `search` lines and now narrows them; pass `--filter ''` on a line to lift it.
-  - Both failure messages now report when a selection was in force and which
-    options made it up, and the ambiguity message points at `--scope`/`--exclude`
-    rather than only at `list`.
-- **The default `--limit` is 500, up from 200,** and a clipped result says so much
-  more plainly: the text notice stands off by a blank line, leads with
-  `TRUNCATED`, and names both ways out (`--limit N`, `--limit 0`). Under `--json`
-  a clipped result gains a `hint` field spelling out the re-run, since
-  `truncated: true` among a dozen keys is easy to skim past. It appears only when
-  something was clipped, so complete output is unchanged and no existing key moved
-  or changed meaning.
+  lookup, which is usually what turns `matches N signals` into a unique hit; a
+  full path bypasses selection entirely. Note for existing `--batch` plans: a
+  top-line `--filter` used to be ignored by `search` lines and now narrows them;
+  pass `--filter ''` on a line to lift it.
+- **The default `--limit` is 500, up from 200,** and a clipped result says so
+  plainly: the text notice stands off by a blank line, leads with `TRUNCATED`, and
+  names both `--limit N` and `--limit 0`. Under `--json` it gains a `hint` field,
+  since `truncated: true` among a dozen keys is easy to skim past; it appears only
+  when something was clipped, so no existing key changed.
 
 ## [0.1.6] — 2026-08-05
 
