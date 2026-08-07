@@ -104,9 +104,9 @@ fn batch_result_is_byte_identical_to_single_json() {
     // One representative invocation per command (covering all seven).
     let cmds: &[&[&str]] = &[
         &["info"],
-        &["list", "--filter", "tb"],
+        &["list", "--filter", "tb."],
         &["dump", "--begin", "0", "--end", "25ns", "--filter", "data"],
-        &["summary", "--filter", "tb"],
+        &["summary", "--filter", "tb."],
         &["snapshot", "--at", "15ns"],
         &["compare", "--at", "10ns,20ns"],
         &["search", "--condition", "valid=1,ready=1", "--show", "data"],
@@ -159,7 +159,7 @@ fn batch_error_isolation_keeps_running_exit_zero() {
 info
 snapshot --at not_a_time
 search --condition no_such_signal=1
-list --filter tb
+list --filter tb.
 ";
     let (out, code) = run(&["--batch", "--json", file], input);
     assert_eq!(code, 0, "batch with failing commands must still exit 0");
@@ -212,7 +212,7 @@ fn batch_ids_labels_comments_and_sequence() {
 # a comment, skipped
 
 info
-list --filter tb   #sigs
+list --filter tb.   #sigs
 info
 ";
     let (out, code) = run(&["--batch", "--json", file], input);
@@ -232,7 +232,7 @@ fn batch_crlf_line_endings() {
     write_vcd(&vcd);
     let file = vcd.to_str().unwrap();
 
-    let (out, code) = run(&["--batch", "--json", file], "info\r\nlist --filter tb\r\n");
+    let (out, code) = run(&["--batch", "--json", file], "info\r\nlist --filter tb.\r\n");
     assert_eq!(code, 0);
     assert_eq!(out.lines().count(), 2);
 
@@ -281,13 +281,13 @@ fn batch_global_defaults_apply_and_override() {
     let file = vcd.to_str().unwrap();
 
     // A global --limit 1 caps every command; a per-line --limit 0 overrides it.
-    let input = "dump --filter tb\ndump --filter tb --limit 0\n";
+    let input = "dump --filter tb.\ndump --filter tb. --limit 0\n";
     let (out, code) = run(&["--batch", "--json", file, "--limit", "1"], input);
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     // Equivalent single commands, built with the merged options, must match.
-    let capped = single_json(file, &["dump", "--filter", "tb", "--limit", "1"]);
-    let uncapped = single_json(file, &["dump", "--filter", "tb", "--limit", "0"]);
+    let capped = single_json(file, &["dump", "--filter", "tb.", "--limit", "1"]);
+    let uncapped = single_json(file, &["dump", "--filter", "tb.", "--limit", "0"]);
     let exp0 = format!("{{\"id\":\"1\",\"ok\":true,\"result\":{}}}", capped.trim_end());
     let exp1 = format!("{{\"id\":\"2\",\"ok\":true,\"result\":{}}}", uncapped.trim_end());
     assert_eq!(lines[0], exp0, "global --limit applied");

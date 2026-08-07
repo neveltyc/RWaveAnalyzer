@@ -6,6 +6,77 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-08-06
+
+Signal selection grows from one option into four that compose: `--scope` picks
+a subtree, `--depth` bounds how far below its root to go, `--filter` picks
+names, `--exclude` drops them. Behind that, the option that already existed
+changes meaning. `--filter` matched a substring of the whole hierarchical path,
+so a bare signal name also matched every *scope* named after it — and RTL names
+scopes after signals as a matter of course, a CDC synchronizer instance being
+conventionally `u_sync_<sig>`. Asking for one status bit returned it plus every
+net inside the synchronizer named for it, clocks and pipeline flops whose
+change counts run five orders of magnitude higher, and no positive pattern
+could say "this name, as a name". Now a pattern without a dot matches the leaf
+name and one with a dot matches the path, so both questions are askable.
+
+### Added
+- **`--scope`, `--depth`, and `--exclude`, on every command and as `--batch`
+  defaults.** `--scope` matches segment by segment, never by substring, so
+  `u_fifo` cannot select `u_fifo_ctrl`: a value without a dot names one
+  instance (`*` and `?` allowed) and takes its descendants with it, while a
+  dotted value matches as a segment-aligned suffix, so `u_tx.u_fifo` finds that
+  subtree wherever it sits and a path written from the root matches as its own
+  suffix. `--depth` is counted from the matched scope with a signal directly in
+  it at depth 1, and requires `--scope`, there being nothing to count from
+  otherwise. `--exclude` takes the same pattern language as `--filter`, is
+  applied last, and works on its own.
+
+  Selection is decided per **alias path**: a signal is kept when any one of its
+  paths clears every option. That is what makes exclusion safe on a net visible
+  at several points in the hierarchy — a status bit wired into a synchronizer
+  has a path inside it and a path outside, so excluding the synchronizer hides
+  the inner path and keeps the signal, while the synchronizer's own nets, which
+  have no path outside, drop out. `list` prints only the paths that survived
+  `--scope`, `--depth`, and `--exclude`; `--filter` hides no paths, since a
+  wanted signal's other paths are worth seeing. An option matching nothing is
+  an empty result, not an error, and an empty value (`--filter ''`) reads as
+  "not given" — which is how a `--batch` line lifts an inherited default.
+
+### Changed
+- **BREAKING: a `--filter` pattern without a separator now matches the leaf
+  name.** To keep whole-path matching, put one in the pattern: `--filter
+  'u_dma.'`, or `--filter 'top.u_dma.*'` anchored from the root. Both `.` and
+  `/` count as separators, since the built-in FSDB backend emits either, so a
+  `/`-shaped hierarchy is addressed the same way. Most invocations are
+  unaffected — `clk` and `*_valid` mean what they always did. What changes is
+  the pattern that only ever worked by accident: a bare name pulling in a
+  subtree through a scope of the same name. One consequence to know: naming a
+  subtree to *drop* it now means naming a path, so `--exclude 'u_sync_status.'`
+  or `--exclude '*_sync_*.*'`, not `--exclude u_sync_status`. Everything else
+  about patterns is unchanged: comma-OR, case-insensitivity, substring versus
+  anchored glob, and literal `[`/`]` in bus ranges. Leaf names are derived from
+  each signal's scope, never by splitting a path on its last separator, so a
+  VCD escaped identifier survives whole (`\foo.bar` in scope `tb` is matched by
+  `bar`, not by `tb`).
+- **`search` resolves `--condition` and `--show` names within the selection.**
+  It has no row filter — those names *are* its selection — so the options
+  narrow the lookup instead, which is usually what turns `matches N signals`
+  into a unique hit. A name spelled as a full path bypasses selection entirely,
+  so a broad `--exclude` can never put a named signal out of reach. Note for
+  existing `--batch` plans: a top-line `--filter` used to be ignored by
+  `search` lines and now narrows them; pass `--filter ''` on a line to lift it.
+  Both failure messages now report when a selection was in force and which
+  options made it up, and the ambiguity message points at `--scope`/`--exclude`
+  rather than only at `list`.
+- **The default `--limit` is 500, up from 200,** and a clipped result says so
+  much more plainly. The text notice stands off by a blank line, leads with
+  `TRUNCATED`, and names both ways out (`--limit N`, `--limit 0`); under
+  `--json` a clipped result gains a `hint` field spelling out the re-run, since
+  `truncated: true` among a dozen keys is easy to skim past. The field appears
+  only when something was clipped, so complete output is unchanged and no
+  existing key moved or changed meaning.
+
 ## [0.1.6] — 2026-08-05
 
 `search`'s event mode moves out of a flag and into the condition itself:

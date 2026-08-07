@@ -10,10 +10,10 @@
 
 use crate::backend::RawValue;
 use crate::cli::{Args, DEFAULT_LIMIT};
-use crate::filter::Filters;
 use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
-use crate::json::Json;
-use crate::model::{Sid, Wave};
+use crate::json::{Json, Obj};
+use crate::model::{Sid, SignalInfo, Wave};
+use crate::select::Selection;
 
 /// Above this many selected signals, per-signal-independent commands
 /// (snapshot, compare, summary) decode in memory-bounded batches rather than
@@ -58,12 +58,47 @@ pub(super) fn clip_len(total: usize, limit: usize) -> (usize, bool) {
     }
 }
 
+/// The text-mode truncation notice. Preceded by a blank line so it separates
+/// from the rows above instead of reading as one more of them — a clipped
+/// result that looks complete is the expensive kind of mistake.
 pub(super) fn trunc_line(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total} {noun} shown. (use --limit 0 to see all)")
+    format!(
+        "\n>> TRUNCATED: showing {shown} of {total} {noun}. \
+         Raise the cap with --limit N, or --limit 0 for all."
+    )
 }
 
+/// As [`trunc_line`], where the total is only known to be a lower bound
+/// (streaming commands stop reading once the limit is met).
 pub(super) fn trunc_line_lb(shown: usize, total: usize, noun: &str) -> String {
-    format!("... truncated: {shown}/{total}+ {noun} shown. (use --limit 0 to see all)")
+    format!(
+        "\n>> TRUNCATED: showing {shown} of {total}+ {noun}. \
+         Raise the cap with --limit N, or --limit 0 for all."
+    )
+}
+
+/// Append a `hint` field to a clipped `--json` result, and nothing to a
+/// complete one. `truncated: true` alone is easy to skim past; a sentence
+/// naming the flag that lifts the cap is not.
+pub(super) fn push_trunc_hint(
+    obj: Obj,
+    trunc: bool,
+    shown: usize,
+    total: usize,
+    exact: bool,
+    noun: &str,
+) -> Obj {
+    if !trunc {
+        return obj;
+    }
+    let plus = if exact { "" } else { "+" };
+    obj.push(
+        "hint",
+        Json::str(format!(
+            "showing {shown} of {total}{plus} {noun}; \
+             re-run with --limit N (or --limit 0 for all) to see the rest"
+        )),
+    )
 }
 
 pub(super) fn count_label(total: usize, truncated: bool) -> String {
@@ -82,25 +117,26 @@ pub(super) fn total_json_fields(total: usize, truncated: bool) -> Vec<(String, J
     ]
 }
 
-/// Resolve a `--filter` value into an optional set of selected sids. `None`
-/// means "no filter" (all signals selected).
-pub(super) fn match_filter(wave: &Wave, filter: &Option<String>) -> Result<Option<Vec<Sid>>, String> {
-    let raw = match filter {
-        Some(f) => f,
-        None => return Ok(None),
-    };
-    let filters = Filters::parse_csv(raw).map_err(|e| e.0)?;
-    if filters.is_empty() {
+/// Every sid whose signal satisfies `pred`, in ascending order. The one place
+/// the signal table is scanned; selection and `search`'s name resolution both
+/// come through here so they cannot drift apart.
+pub(crate) fn sids_where(wave: &Wave, pred: impl Fn(&SignalInfo) -> bool) -> Vec<Sid> {
+    wave.signals()
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| pred(info))
+        .map(|(sid, _)| sid)
+        .collect()
+}
+
+/// Resolve the selection options into an optional set of selected sids. `None`
+/// means "no selection given" (all signals).
+pub(super) fn match_selection(wave: &Wave, args: &Args) -> Result<Option<Vec<Sid>>, String> {
+    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
+    if sel.is_all() {
         return Ok(None);
     }
-    let mut sids: Vec<Sid> = Vec::new();
-    for (sid, info) in wave.signals().iter().enumerate() {
-        // A signal matches if any of its alias paths matches.
-        if info.aliases.iter().any(|p| filters.matches(p)) {
-            sids.push(sid);
-        }
-    }
-    Ok(Some(sids))
+    Ok(Some(sids_where(wave, |info| sel.keeps_signal(info))))
 }
 
 /// The set of selected sids as an explicit sorted vec (all signals if `None`).

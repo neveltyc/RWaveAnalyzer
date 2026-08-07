@@ -33,7 +33,7 @@ fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let t_at = parse_time(at_raw, ts).map_err(|e: TimeParseError| e.0)?;
-    let sel = match_filter(wave, &args.filter)?;
+    let sel = match_selection(wave, args)?;
     let selected = selected_sids(wave, &sel);
 
     // Large/unfiltered selections decode in batches to bound memory; small
@@ -129,7 +129,10 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
         .push("known", Json::Int(d.known_count as i64))
         .push("undefined", Json::Int(d.undef_len as i64))
         .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc))
+        .push("truncated", Json::Bool(trunc));
+    // `total`, not `known_count`: under --verbose the rows also carry the
+    // undefined signals, so the known count is not what was clipped.
+    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "signals")
         .push("signals", Json::Array(sig_arr))
         .build();
     Ok(obj)
