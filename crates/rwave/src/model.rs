@@ -410,8 +410,8 @@ impl Wave {
 
     /// Whether the backend can decode a time window meaningfully faster than a
     /// full history (i.e. it can seek by time); when false, callers behave
-    /// exactly as before. Currently only the built-in FSDB (NPI) backend
-    /// reports true.
+    /// exactly as before. FST and the built-in FSDB (NPI) and WLF backends
+    /// report true; VCD and GHW cannot seek.
     ///
     /// Only `snapshot` and `compare` consult this to prefer the windowed
     /// collector. `dump` reaches it only via `collect_events_bounded`, i.e.
@@ -1104,6 +1104,11 @@ mod windowed_equiv_tests {
         /// `(backend_sid, ascending (tick, value) changes)` per signal.
         data: Vec<(usize, Vec<(i64, RawValue)>)>,
         windowed: bool,
+        /// Serve windows the way the WLF backend does: the carried value is
+        /// tagged `from - 1` (libwlf cannot report its true change tick),
+        /// while a change exactly at `from` keeps its own tick. Consumers
+        /// must not care — they read the seed's value, never its time.
+        wlf_seed_shape: bool,
     }
 
     impl MockBackend {
@@ -1125,10 +1130,26 @@ mod windowed_equiv_tests {
 
         /// Seed (last change `<= from`) followed by every change in
         /// `(from, to]` — the exact contract `load_traces_windowed` documents.
+        /// With `wlf_seed_shape`, the same window in the shape the WLF
+        /// backend emits: carried value at `from - 1`, at-`from` change at
+        /// `from`.
         fn window_trace(&self, bsid: usize, from: i64, to: Option<i64>) -> SignalTrace {
             let ch = self.changes(bsid);
             let mut times = Vec::new();
             let mut values = Vec::new();
+            if self.wlf_seed_shape {
+                if let Some((_, v)) = ch.iter().rev().find(|(t, _)| *t < from) {
+                    times.push(from - 1);
+                    values.push(v.clone());
+                }
+                for (t, v) in ch {
+                    if *t >= from && to.is_none_or(|hi| *t <= hi) {
+                        times.push(*t);
+                        values.push(v.clone());
+                    }
+                }
+                return SignalTrace { times, values };
+            }
             if let Some((t, v)) = ch.iter().rev().find(|(t, _)| *t <= from) {
                 times.push(*t);
                 values.push(v.clone());
@@ -1242,6 +1263,15 @@ mod windowed_equiv_tests {
         Wave::from_backend(Box::new(MockBackend {
             data: dataset(),
             windowed,
+            wlf_seed_shape: false,
+        }))
+    }
+
+    fn mk_wlf_shape() -> Wave {
+        Wave::from_backend(Box::new(MockBackend {
+            data: dataset(),
+            windowed: true,
+            wlf_seed_shape: true,
         }))
     }
 
@@ -1286,6 +1316,62 @@ mod windowed_equiv_tests {
         for (t0, t1) in windows {
             let mut full = mk(false);
             let mut win = mk(true);
+            let (fe, ft, ftr) = full.collect_events_bounded(t0, t1, None, 0, 2);
+            let (we, wt, wtr) = win.collect_events_bounded(t0, t1, None, 0, 2);
+            let fv: Vec<(i64, Sid, RawValue)> =
+                fe.iter().map(|e| (e.tick, e.sid, e.value.clone())).collect();
+            let wv: Vec<(i64, Sid, RawValue)> =
+                we.iter().map(|e| (e.tick, e.sid, e.value.clone())).collect();
+            assert_eq!(fv, wv, "dump events mismatch for [{t0}, {t1:?}]");
+            assert_eq!(ft, wt, "dump total mismatch for [{t0}, {t1:?}]");
+            assert_eq!(ftr, wtr, "dump truncated mismatch for [{t0}, {t1:?}]");
+        }
+    }
+
+    // The three consumer equivalences again, against the WLF seed shape
+    // (carried value at `from - 1` instead of its true tick). Pins the
+    // "consumers read the seed's value, not its time" contract the WLF
+    // backend documents: values, definedness, and dump's in-window event
+    // sets must all be indistinguishable from true-tick seeds.
+
+    #[test]
+    fn snapshot_wlf_seed_shape_matches_full() {
+        let mut full = mk(false);
+        full.ensure_all_loaded();
+        let mut win = mk_wlf_shape();
+        for t in [-1, 0, 2, 3, 5, 6, 8, 12, 15, 17, 18, 20, 25, 100] {
+            let a = full.snapshot(t, None);
+            let b = win.snapshot_streaming(t, None, 2);
+            assert_eq!(a, b, "snapshot mismatch at t={t}");
+        }
+    }
+
+    #[test]
+    fn compare_pair_wlf_seed_shape_matches_full() {
+        let mut full = mk(false);
+        full.ensure_all_loaded();
+        let mut win = mk_wlf_shape();
+        for (ta, tb) in [(-1, 0), (0, 12), (3, 15), (5, 20), (8, 25), (0, 100)] {
+            let (fa, fb) = full.snapshot_pair(ta, tb, None);
+            let (wa, wb) = win.snapshot_pair_streaming(ta, tb, None, 2);
+            assert_eq!(fa, wa, "compare-a mismatch at ta={ta}");
+            assert_eq!(fb, wb, "compare-b mismatch at tb={tb}");
+        }
+    }
+
+    #[test]
+    fn dump_wlf_seed_shape_matches_full() {
+        let windows: [(i64, Option<i64>); 6] = [
+            (0, Some(100)),
+            (0, Some(10)),
+            (5, Some(15)),
+            (12, Some(20)),
+            (18, None),
+            (21, Some(24)),
+        ];
+        for (t0, t1) in windows {
+            let mut full = mk(false);
+            let mut win = mk_wlf_shape();
             let (fe, ft, ftr) = full.collect_events_bounded(t0, t1, None, 0, 2);
             let (we, wt, wtr) = win.collect_events_bounded(t0, t1, None, 0, 2);
             let fv: Vec<(i64, Sid, RawValue)> =

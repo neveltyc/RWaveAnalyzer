@@ -672,17 +672,21 @@ unsafe extern "C" fn emit_trampoline(
     fold_change(&mut ctx.output[idx], kind, time_tick, raw);
 }
 
-/// Fold one emitted change into a trace, normalizing it to the shape the
-/// wellen decode guarantees: at most one entry per tick and no consecutive
-/// equal values.
+/// Fold one emitted change into a trace: at most one entry per tick and no
+/// consecutive equal values. The duplicate suppression matches the wellen
+/// decode; the per-tick collapse is stricter — wellen keeps same-tick
+/// distinct values (a VCD glitch stays visible), while here the last write
+/// per tick wins and a tick whose net value equals the previous entry's is
+/// no change at all.
 ///
-/// Plugins may fire several callbacks for one instant — libwlf reports wide
-/// vectors one 32-bit word at a time (each callback carrying the full,
-/// partially-updated vector) and NPI can deliver same-tick glitch VCs — so
-/// within a tick the last write wins, and a tick whose net value equals the
-/// previous entry's is no change at all. Without this, a 256-bit bus counted
-/// 8 "changes" per real transition in `summary` and printed 8 rows (7 of
-/// them transient partial values) per instant in `dump`.
+/// The stricter rule is deliberate: the vendor libraries behind this
+/// trampoline report transport granularity, not user-visible writes — libwlf
+/// delivers a wide vector one 32-bit word per callback (each carrying the
+/// full, partially-updated vector) and NPI can deliver same-tick glitch VCs
+/// — and the vendors' own tools display the collapsed net value. Without
+/// this, a 256-bit bus counted 8 "changes" per real transition in `summary`
+/// and printed 8 rows (7 of them transient partial values) per instant in
+/// `dump`.
 ///
 /// Events are exempt: every occurrence is meaningful, none carry values.
 fn fold_change(trace: &mut SignalTrace, kind: ValueKind, tick: i64, raw: RawValue) {

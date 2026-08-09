@@ -57,13 +57,15 @@ it last changed (its reverse search needs a live vsim session).
   where in the file the window sits.
 
 ### Fixed
-- **Plugin traces are normalized to the wellen shape**: one entry per tick
-  (last write wins) and no consecutive duplicates, events exempt. libwlf
-  reports a wide vector one 32-bit word per callback, so a 256-bit bus counted
-  8 `summary` changes per real transition and `dump` printed the 7 transient
-  partial values; libwlf's end-of-scan ENDLOG marker also appended a fake
-  trailing change to every signal. All three artifacts are gone; FSDB same-tick
-  glitch VCs collapse the same way.
+- **Plugin traces are folded to one net entry per tick** (last write wins),
+  with consecutive duplicates suppressed as in the wellen decode; events
+  exempt. The per-tick collapse is stricter than wellen — the vendor
+  libraries report transport granularity, not user-visible writes: libwlf
+  delivers a wide vector one 32-bit word per callback, so a 256-bit bus
+  counted 8 `summary` changes per real transition and `dump` printed the 7
+  transient partial values; libwlf's end-of-scan ENDLOG marker also appended
+  a fake trailing change to every signal. All three artifacts are gone; FSDB
+  same-tick glitch VCs collapse to their net value the same way.
 - WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
   `-nowlfcollapse` keep their end-tick delta events (no effect on default
   delta-collapsed files).
