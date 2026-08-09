@@ -170,7 +170,14 @@ impl Design {
             if cur != h && self.instances.contains(&cur) {
                 let mut p = parts.clone();
                 p.reverse();
+                // Which separator a module uses for a nested name is not
+                // consistent: the interface `b` reaches its member as `b/vld`
+                // in one module and `b.data` in another. Offer both rather
+                // than pick.
                 out.push((cur, p.join("/")));
+                if p.len() > 1 {
+                    out.push((cur, p.join(".")));
+                }
             }
             parts.push(&c.name);
             cur = c.parent;
@@ -413,7 +420,11 @@ fn hop_of(
     }
     let signals = signals
         .into_iter()
-        .filter(|n| m.declared.contains(n))
+        // A name this module declares is real; so is one reaching into another
+        // scope, whose declaration lives there — an interface member is
+        // declared in the interface, not in the module using it. What is left
+        // is a `vopt` temporary.
+        .filter(|n| m.declared.contains(n) || n.contains(['.', '/']))
         .map(|n| join(&scope, &n))
         .collect();
 
