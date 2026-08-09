@@ -186,10 +186,21 @@ $RW tree "$HF" >/dev/null 2>&1 && ok || bad "tree runs on vcd"
 # hier_deep.u_m0.u_a is only reachable by synthesizing path prefixes.
 $RW --json tree "$HF" --depth 3 2>/dev/null | grep -q '"path":"hier_deep.u_m0.u_a"' \
   && ok || bad "tree synthesizes intermediate scopes"
-# --depth is bounded, and bounded from the root.
+# --depth means the same as it does for list: N levels below the matched root,
+# tree counting scopes where list counts signals. Pinned exactly, because an
+# off-by-one here still satisfies "deeper shows more".
 d1=$($RW --json tree "$HF" 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
-d3=$($RW --json tree "$HF" --depth 3 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
-[[ "$d1" -lt "$d3" ]] && ok || bad "tree --depth widens the result ($d1 vs $d3)"
+[[ "$d1" -eq 3 ]] && ok || bad "tree default depth 1 = root + children (got $d1, want 3)"
+d2=$($RW --json tree "$HF" --depth 2 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
+[[ "$d2" -eq 7 ]] && ok || bad "tree --depth 2 reaches the grandchildren (got $d2, want 7)"
+# A leading-separator hierarchy (Questa/VHDL style, which the FSDB backend
+# passes through verbatim) must not collapse: its top level is a real scope,
+# not a child of an empty-named one.
+SL=/tmp/_rwave_slash.$$.vcd
+printf '$date x $end\n$timescale 1ps $end\n$scope module /top $end\n$var wire 1 ! clk $end\n$upscope $end\n$enddefinitions $end\n#0\n0!\n' > "$SL"
+$RW --json tree "$SL" 2>/dev/null | grep -q '"path":"/top"' \
+  && ok || bad "tree handles a leading-separator hierarchy"
+rm -f "$SL"
 # Unlike every other command, tree accepts --depth without --scope.
 $RW tree "$HF" --depth 2 >/dev/null 2>&1 && ok || bad "tree allows --depth without --scope"
 # ...and that exemption must not leak to the others.

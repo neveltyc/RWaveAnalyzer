@@ -18,7 +18,7 @@ bash verify/run.sh
 ```
 
 Expected: `RESULT: PASS=N FAIL=0`. The exact `N` is stable per stimulus
-set (currently 168 for `run.sh`).
+set (currently 170 for `run.sh`).
 
 ## Stimulus sets
 
