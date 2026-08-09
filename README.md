@@ -169,9 +169,8 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `trace`    | *(experimental)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only |
 
 Every command except `info`, `tree`, and `trace` accepts the four selection
-options described in [Selecting signals](#selecting-signals); `tree` reads
-`--scope` and `--depth` from that set (and takes its `SCOPE` positional as
-`--scope`), but not `--filter` or `--exclude`. The commands that read a span of time
+options described in [Selecting signals](#selecting-signals); `tree` takes
+`--scope` and `--depth` only. The commands that read a span of time
 — `dump`, `summary`, and `search` — also take a `--begin`/`--end` window;
 `snapshot` and `compare` take instants instead (`--at`), and `list` and `info`
 describe the file rather than a time. Times take the unit suffixes `fs`, `ps`,
@@ -237,9 +236,8 @@ the tree, and a path written out from the root works too.
 **`--depth` counts from the matched scope**, with a signal sitting directly in
 it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of
 its submodules'". It requires `--scope`, since there is nothing to count from
-otherwise. `tree` applies the same rule to scopes rather than signals, so
-`tree --depth 1` lists a scope's own children, and it is the one command that
-accepts `--depth` on its own, counting from the root.
+otherwise — except for `tree`, which counts scopes rather than signals and
+accepts `--depth` alone, counting from the root.
 
 **Selection is decided per path, not per signal.** A signal is kept when any
 one of its paths clears every option. That is what makes `--exclude` safe on a
@@ -394,36 +392,22 @@ rwave trace sim.fsdb tb.dut.u_core.u_alu.res
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 ```
 
-Connectivity is not in the waveform. It comes from Verdi's elaborated design
-database, built with `vcs -kdb -debug_access+all` or with `vericom -kdb` plus
-`elabcom -elab kdb`.
+Connectivity comes from Verdi's elaborated design database, built with
+`vcs -kdb -debug_access+all` or with `vericom -kdb` plus `elabcom -elab kdb`.
+You do not normally say where it is: VCS records the path in the FSDB header.
+Pass `--kdb <simv.daidir>` only when rwave reports that path unreachable, which
+happens when a dump is copied away from its build.
 
-**Normally you do not say where it is.** VCS records the `simv.daidir` path in
-the FSDB header and rwave reads it from the file, so the commands above take no
-`--kdb`. Use `--kdb <simv.daidir>` only when rwave reports that path unreachable:
+`trace` requires an `.fsdb` opened by the built-in Verdi NPI backend, so setting
+`RWAVE_PLUGIN_FSDB` turns it off. Other formats report it as unsupported.
 
-```
-Error: the design library recorded in this waveform is not accessible:
-       /proj/run/simv.daidir. Pass --kdb <simv.daidir>.
-```
-
-rwave does not scan for a design library next to the waveform. A neighbouring
-build is not evidence that it is the right build, and using the wrong one
-answers from a different design without ever failing.
-
-Because the design database is what supplies connectivity, `trace` works only
-for an FSDB opened through the **built-in Verdi NPI backend** — the reader that
-`RWAVE_PLUGIN_FSDB` selects has no connectivity API at all, so setting that
-variable turns `trace` off. Every other format reports the same clean
-"unsupported" rather than a partial answer.
-
-With `--at T`, each endpoint carries its value at T, read from the waveform
-rwave already has open. Endpoints in the design but not dumped show a null value
-and are counted in `unresolved_in_wave`.
-
-Clock, reset, and other control dependencies are omitted by default and included
-with `--verbose`. The filtering happens inside NPI, so it never mistakes
-`first_valid` or `burst_len` for a reset.
+| Option | Effect |
+|:--|:--|
+| `--load` | what reads the signal, instead of what drives it |
+| `--at T` | annotate each endpoint with its value at T |
+| `--control` | include clock, reset, and enclosing `if`/`case` dependencies |
+| `--kdb DIR` | design database, when the recorded path is unreachable |
+| `--top NAME` | design top module, when it differs from the waveform's |
 
 ### Environment variables
 

@@ -245,6 +245,17 @@ for f in "--top x" "--kdb x" "--driver" "--load"; do
 done
 $RW summary "$HF" --of clk >/dev/null 2>&1
 [[ $? -eq 2 ]] && ok || bad "summary rejects --of (tree-only)"
+$RW list "$HF" --control >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "list rejects --control (trace-only)"
+# --of walks up, --scope/--depth walk down; asking for both is a contradiction,
+# and must be caught on the merged values too, not only on one command line.
+$RW tree "$HF" u_m0 --of hier_deep.clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --of together with a scope"
+$RW tree "$HF" --of hier_deep.clk --depth 2 >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --of together with --depth"
+bo=$(printf 'tree u_m0\n' | $RW --batch "$HF" --of hier_deep.clk --json 2>/dev/null)
+printf '%s' "$bo" | grep -q '"ok":false' \
+  && ok || bad "batch re-checks --of against the merged scope"
 # ...and the new commands only take what they actually use.
 $RW tree "$HF" --filter clk >/dev/null 2>&1
 [[ $? -eq 2 ]] && ok || bad "tree rejects --filter"
