@@ -5,7 +5,8 @@ directly. That database is undocumented, so a misread column gives a wrong
 answer rather than an error. QuestaSim can answer the same questions from the
 same file, so `diff.py` asks both and compares — this is the check that the
 reader is right, and it is worth more than any assertion written from the
-outside.
+outside. It has earned that: every decoding rule in the reader that was wrong
+was wrong plausibly, and each was found here rather than by reading the schema.
 
 Needs a machine with QuestaSim and `python3`. `verify/run.sh` cannot cover any
 of it.
@@ -37,9 +38,24 @@ the dataset usable afterwards. The `.dbg` must keep the `.wlf`'s basename.
 python3 verify/questa/diff.py --wlf run.wlf --rwave ./rwave
 ```
 
-Expected: `RESULT: N signal(s) checked, 0 disagreement(s)`. Every disagreement
-prints both sides. `--limit N` checks a prefix of the signal list while
-iterating.
+Expected: `RESULT: N signal(s) checked, 0 missing, M answered beyond vsim`.
+A missing answer is a failure and prints both sides. `--limit N` checks a prefix
+of the signal list while iterating.
+
+## Answers vsim does not give
+
+`M` is not a defect count. vsim declines to answer several questions it is
+asked, and rwave, reading the database rather than a rendered view, answers
+them. Three classes have been checked against the RTL:
+
+| class | why vsim is silent | checked against |
+|:--|:--|:--|
+| a variable rather than a net — picorv32's `set_mem_do_rdata` | `find drivers -possible` covers nets; on a variable it reports an internal error and marks the result *PARTIAL* | `picorv32.v:1199`, a `reg` set at 1407 and 1898 and read at 1958 |
+| a clocked memory as a load of its clock — `cpuregs`, `_ram` | `readers` enumerates statements, not declared objects | `picorv32.v:203`, `reg [31:0] cpuregs [0:regfile_size-1]` |
+| a port or interface member driven from an enclosing scope | `find drivers -possible` does not follow a port, which is the whole point of the feature | `dut.sv:102`, the `initial` block that drives `b.data`; `tinyriscv.v:361`, `.raddr_o(clint_raddr_o)` |
+
+The count is printed rather than hidden: a fourth class would be a new claim,
+and it should be looked at rather than assumed to belong to one of these.
 
 Run it on more than the fixture — a wrong column reading often only shows up on
 real RTL:

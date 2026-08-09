@@ -33,29 +33,28 @@ because libwlf cannot report when it last changed.
 ### Added
 - `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
 - `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`.
-  `--control` adds the enclosing `if`/`case`/clock-edge dependencies; NPI filters
-  them at the source, so `first_valid` is never mistaken for a reset.
+  `--control` adds the enclosing `if`/`case`/clock-edge dependencies; both design
+  databases record them, so `first_valid` is never mistaken for a reset by a name
+  match.
 - `trace` reads the design library location from the FSDB header, so the normal
   case needs no argument. `--kdb` overrides it, and is taken literally. There is
   no directory scan: a neighbouring build is not evidence that it is the right
   build, so an unresolvable location is refused rather than guessed at.
 - `$RWAVE_NPI_L1_LIB`, for a Verdi install whose `libnpiL1.so` does not sit next
   to `libNPI.so`.
-- **`trace` on a `.wlf`, answered by QuestaSim.** The `.dbg` that `vopt -debugdb`
-  writes has no published format and no API — its only reader is linked inside
-  the `vish` executable, which is not a loadable object — so rwave runs
-  `vsim -c -view` and asks in Tcl. `vsim` is looked for beside `$RWAVE_WLF_LIB`
-  and then on `PATH`, and nowhere else. Drivers carry `file:line` and the source
-  line itself; loads name the reading process and its scope but no location,
-  because after simulation Questa reports `line: -1` for readers and has no
-  `find loads`. `--kdb`, `--top`, and `--control` describe a Verdi database and
-  are refused on a WLF rather than quietly ignored.
-- **One `vsim` per rwave process, so `--batch` is the way to ask a lot.** The
-  session starts on the first `trace` and is shut down on exit; six queries in a
-  batch stream took 2.1 s against 12.2 s as six separate commands. It is not a
-  daemon on purpose: a live session holds two Questa licences, and keeping them
-  after the command finished would take them from someone else.
-- `$RWAVE_VSIM_TIMEOUT_MS`, for a design whose debug database is slow to load.
+- **`trace` on a `.wlf`, read from Questa's debug database.** The `.dbg` that
+  `vopt -debugdb` writes is SQLite behind a replaced 16-byte header, and it holds
+  more than QuestaSim's post-simulation commands will print: which statements
+  read a signal and which write it, each with a source location, and the
+  conditions that gate them. rwave reads it in process — no `vsim`, no licence,
+  a query in milliseconds — so drivers *and* loads carry `file:line`, the source
+  statement, and their operands, and `--control` is answered rather than refused.
+  The file is only ever read; its header is corrected in memory. Each database
+  states its own schema version, and an unrecognised one is refused rather than
+  read as though the layout had held.
+- `$RWAVE_QUESTA_VSIM`, which answers the same questions by driving `vsim`
+  instead. That route came first and is kept for comparison; it is slower, needs
+  a licence, and reports neither load locations nor control dependencies.
 
 ### Changed
 - **Options are scoped to the command that defines them.** `--kdb`, `--top`,
@@ -108,6 +107,24 @@ because libwlf cannot report when it last changed.
 - A file rwave cannot open now reports the FSDB format version from its header,
   because a Verdi older than the dump is otherwise indistinguishable from a
   licence or environment problem.
+
+- The Questa reader is checked by differential against QuestaSim itself rather
+  than by assertion: `verify/questa/diff.py` asks vsim the same questions, in
+  every form it will answer in, and compares. Every decoding rule that was wrong
+  was wrong plausibly and was found there — a path naming several contexts, a
+  statement's line versus its primitive's, `signal_tbl` not being the only record
+  of what touches a signal. Across 1134 signals of three designs (a shaped
+  fixture, picorv32, a tinyriscv SoC) there is now nothing vsim reports that
+  rwave does not.
+- `rusqlite` is pinned exactly and bundled, the first C in the tree. All four
+  release targets build it, including the musl-static arm64 one under
+  `crt-static`, `panic = "abort"` and LTO, and linux-amd64 still tops out at
+  `GLIBC_2.17`. Default features are off, which keeps rusqlite's wasm branch out
+  of the dependency graph and the licence file.
+- The licence generator gained a section for C compiled into the binary. SQLite
+  states its terms inside `sqlite3.c` rather than in a `LICENSE` file, so the
+  file-name scan cannot see them; emitting the note from the generator keeps
+  regeneration idempotent instead of inviting a hand edit CI would overwrite.
 
 ### Compatibility
 - Plugin ABI unchanged (still version 1); no vtable field added or reordered.

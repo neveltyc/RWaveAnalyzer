@@ -121,8 +121,8 @@ fields you'll usually parse out.
 | `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.raw_kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
 
 `tree` works on every format. `trace` needs a design database beside the
-waveform: `.fsdb` with Verdi's KDB, or `.wlf` with Questa's `.dbg` (and `vsim`
-reachable). Elsewhere it exits 1. That is a capability limit, not a transient
+waveform: `.fsdb` with Verdi's KDB, or `.wlf` with Questa's `.dbg`. Elsewhere it
+exits 1. That is a capability limit, not a transient
 failure, so do not retry it on another file format.
 
 `trace` rules:
@@ -130,10 +130,9 @@ failure, so do not retry it on another file format.
 - Never pass `--kdb` unless rwave asks for it. The design library is read from
   the FSDB header; if that fails, use only a path the user supplies. On a `.wlf`
   it is refused outright — Questa finds its own `.dbg` by basename.
-- On a `.wlf`: `--control` is refused (Questa records no gating dependencies) and
-  `--load` gives the reading processes without `file:line`, which is all Questa
-  keeps after simulation. Batch many traces in one `--batch` run: each rwave
-  process starts one `vsim` and holds two Questa licences until it exits.
+- A `.wlf` needs Questa's `.dbg` beside it and the library it was optimised in
+  (`work/` by default) reachable; rwave reads the database itself, so there is no
+  `vsim` and no licence involved. Drivers and loads both carry `file:line`.
 - Read `status` before trusting the list: `resolved`, `boundary_only` (the
   driver is outside the traced hierarchy), `no_driver_found`.
 - Clock, reset, and enclosing `if`/`case` are excluded unless you pass

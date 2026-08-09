@@ -166,7 +166,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 | `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
-| `trace`    | *(experimental)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only |
+| `trace`    | *(experimental)* Who drives a signal, or what it drives, with `file:line` — needs a design database beside the waveform: an FSDB with Verdi's KDB, or a WLF with Questa's `.dbg` |
 
 Every command except `info`, `tree`, and `trace` accepts the four selection
 options described in [Selecting signals](#selecting-signals); `tree` takes
@@ -339,8 +339,7 @@ The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
 at runtime and does not ship it.
 
 **`trace` on a WLF** needs Questa's post-simulation debug database, which the
-waveform does not contain. Build one alongside the `.wlf`, then run rwave from
-that directory:
+waveform does not contain. Build one alongside the `.wlf`:
 
 ```sh
 vopt +acc top -o top_opt -debugdb
@@ -348,17 +347,21 @@ vsim -postsimdataflow -debugdb=run.dbg -wlf run.wlf top_opt -do 'add log -r /*; 
 rwave trace run.wlf top.u_core.res
 ```
 
-rwave finds `run.dbg` by Questa's own rule (same basename, else `vsim.dbg`) and
-answers by running `vsim -c -view` for as long as the rwave process lives, so
-`vsim` must be on `PATH` or beside `$RWAVE_WLF_LIB`. That session holds two
-Questa licences until rwave exits — use `--batch` for many queries, which
-reuses one session instead of paying ~2 s and a licence checkout per call.
+rwave reads that database directly — it is SQLite behind a replaced 16-byte
+header — so no Questa process is started, no licence is taken, and a query costs
+milliseconds. The `.dbg` must keep the waveform's basename, and the library it
+was optimised in (`work/` by default) must be reachable, since the per-module
+databases live under `_dbcontainer` inside it. The file is only ever read.
 
-Drivers come back with `file:line` and the source statement. Loads are
-topological only — which processes read the signal, and where they live, but no
-source location: after simulation Questa reports `line: -1` for readers and has
-no `find loads` command, so there is nothing to read. `--kdb`, `--top`, and
-`--control` are Verdi concepts and are refused here rather than ignored.
+Drivers and loads both come back with `file:line`, the source statement, and the
+signals each endpoint touches, so `--at` annotates either direction. `--control`
+adds the gating conditions. `--kdb` and `--top` name parts of a Verdi design
+library and are refused here rather than ignored.
+
+Setting `RWAVE_QUESTA_VSIM=1` answers by driving `vsim -c -view` instead. That
+route came first and is kept for comparison; it is slower, needs a licence, and
+cannot report load locations or control dependencies, because Questa's
+post-simulation commands do not print them.
 
 ### FSDB
 
@@ -439,7 +442,8 @@ happens when a dump is copied away from its build.
 | `RWAVE_FSDB_LIB`   | Absolute path to `libNPI.so`. Enables built-in FSDB reading (NPI, needs Verdi-Ultra license). |
 | `RWAVE_PLUGIN_FSDB` | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
 | `RWAVE_NPI_L1_LIB` | Absolute path to `libnpiL1.so` (Verdi's NPI connectivity library), if it is not next to `libNPI.so`. Used by `trace`. |
-| `RWAVE_VSIM_TIMEOUT_MS` | How long to wait for one `vsim` answer during `trace` on a WLF. Default 60000; raise it for a design whose debug database is slow to load. |
+| `RWAVE_QUESTA_VSIM` | Answer `trace` on a WLF by driving `vsim` rather than by reading the debug database. Slower, needs a licence, and reports less; kept for comparison. |
+| `RWAVE_VSIM_TIMEOUT_MS` | How long to wait for one `vsim` answer, under `RWAVE_QUESTA_VSIM` only. Default 60000. |
 
 For other formats or a custom backend implementation, rwave loads any shared
 library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see

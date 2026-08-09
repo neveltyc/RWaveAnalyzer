@@ -10,12 +10,14 @@ Needs a machine with QuestaSim. Build the design first (see README.md), then:
 
     python3 verify/questa/diff.py --wlf run.wlf --rwave ./rwave
 
-Compares, per signal:
-  drivers  rwave's (file:line) set   vs  `find drivers -possible -tcl`
-  loads    rwave's endpoint set      vs  `readers`
+Compares, per signal, against every form vsim will answer in: the `-tcl` and
+transcript forms of `find drivers -possible`, and the `drivers` and `readers`
+commands, which cross hierarchy where the first two decline to.
 
-Exit 0 when every signal agrees, 1 otherwise, with both sides printed for each
-disagreement.
+Exit 0 when vsim reports nothing rwave misses. Answers rwave gives that vsim
+does not are counted separately and reported, not failed: three classes of them
+have been checked against the RTL and are rwave being right where vsim declines
+to answer. See README.md.
 """
 
 import argparse
@@ -125,6 +127,18 @@ def norm_proc(name):
     return "#%s#%s#%s" % (TAG.get(tag, tag), paren, rest) if paren else "#%s#%s" % (TAG.get(tag, tag), rest)
 
 
+def is_statement(name):
+    """Whether an endpoint names a statement rather than a declared object.
+
+    vsim's `drivers`/`readers` enumerate statements, which it spells `#p#47`,
+    `#a#26`, `#i#102`. A clocked memory is a load of its clock and is reported
+    by rwave as the object it is — `cpuregs`, with the line it is declared on —
+    which those commands never list. Comparing the two on that endpoint would
+    measure the difference in what each enumerates, not a disagreement.
+    """
+    return name.rsplit("/", 1)[-1].startswith("#")
+
+
 def norm_endpoint(path):
     """`/tb/#ALWAYS#67` -> `/tb/#p#67`, so both sides spell a process the same."""
     scope, _, leaf = path.rpartition("/")
@@ -174,7 +188,7 @@ def main():
         cmds.append("readers {%s}" % s)
     truth = vsim_batch(args.vsim, args.wlf, cmds)
 
-    bad, extra = 0, 0
+    bad, extra, unverifiable = 0, 0, 0
     for i, s in enumerate(sigs):
         want_drv = tcl_rows(truth.get(4 * i, [])) | table_rows(truth.get(4 * i + 1, []))
         want_drv_ep = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 2, []), "Driver")}
@@ -210,10 +224,16 @@ def main():
         wrong = [
             k for k in want_by_place if k in got_by_place and not (got_by_place[k] & want_by_place[k])
         ]
-        if missing or wrong:
+        if not want_drv and not want_drv_ep and got_drv:
+            unverifiable += 1
+        elif missing or wrong:
             print("\n%s drivers differ\n  vsim : %s\n  rwave: %s" % (s, sorted(want_drv), sorted(got_drv)))
             bad += 1
-        got_drv_ep = {to_questa(h["scope"]) + "/" + h["raw_kind"] for h in got["drivers"]}
+        got_drv_ep = {
+            to_questa(h["scope"]) + "/" + h["raw_kind"]
+            for h in got["drivers"]
+            if is_statement(h["raw_kind"])
+        }
         if want_drv_ep - got_drv_ep:
             print(
                 "\n%s drivers missing (by endpoint)\n  vsim : %s\n  rwave: %s"
@@ -233,7 +253,14 @@ def main():
                 print("\n%s\n  rwave failed: %s\n  vsim loads: %s" % (s, err, sorted(want_ld)))
                 bad += 1
             continue
-        got_ld = {to_questa(h["scope"]) + "/" + h["raw_kind"] for h in got["loads"]}
+        got_ld = {
+            to_questa(h["scope"]) + "/" + h["raw_kind"]
+            for h in got["loads"]
+            if is_statement(h["raw_kind"])
+        }
+        if not want_ld and got_ld:
+            unverifiable += 1
+            continue
         if want_ld - got_ld:
             print("\n%s loads missing\n  vsim : %s\n  rwave: %s" % (s, sorted(want_ld), sorted(got_ld)))
             bad += 1
@@ -250,8 +277,8 @@ def main():
             print("\n%s: rwave reports loads vsim does not: %s" % (s, sorted(got_ld - want_ld)))
 
     print(
-        "\n== RESULT: %d signal(s) checked, %d missing, %d with extra findings =="
-        % (len(sigs), bad, extra)
+        "\n== RESULT: %d signal(s) checked, %d missing, %d answered beyond vsim =="
+        % (len(sigs), bad, extra + unverifiable)
     )
     return 1 if bad else 0
 
