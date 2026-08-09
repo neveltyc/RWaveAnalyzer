@@ -23,7 +23,6 @@ struct OwnedVarDecl {
 pub struct FsdbBackend {
     /// `npiFsdbFileHandle`.
     session: NpiHandle,
-    #[allow(dead_code)]
     path: String,
 
     secs_per_tick:     f64,
@@ -35,6 +34,11 @@ pub struct FsdbBackend {
     time_range_ok:     bool,
 
     decl_cache: Option<Vec<OwnedVarDecl>>,
+
+    /// Which elaborated design database (if any) this session has loaded, for
+    /// `trace`. Empty until the first design query; the waveform path never
+    /// touches it. See `design.rs`.
+    pub(super) design: super::design::DesignSession,
 }
 
 impl FsdbBackend {
@@ -72,8 +76,12 @@ impl FsdbBackend {
             time_hi:           hi as i64,
             time_range_ok:     ok,
             decl_cache:        None,
+            design:            Default::default(),
         })
     }
+
+    /// The file this session was opened from.
+    pub fn path(&self) -> &str { &self.path }
 
     pub fn timescale(&self) -> (f64, &CStr) { (self.secs_per_tick, self.timescale_display.as_c_str()) }
     pub fn date_cstr(&self) -> &CStr        { self.date_cstr.as_c_str() }
