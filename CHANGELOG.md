@@ -6,6 +6,57 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+Two new commands for questions a waveform alone could not answer: where am I in
+the hierarchy, and who drives this signal.
+
+`tree` browses the hierarchy on every format. It builds its own scope index
+rather than reusing the flat scope list, because that list only records scopes
+that directly hold a signal — a module containing nothing but sub-modules was
+invisible. `tree --of SIGNAL` prints a signal's whole ancestor chain top-down,
+which is the one-shot way back up from a deep leaf.
+
+`trace` reports drivers and loads with the driving statement's source text and
+`file:line`, and with `--at T` annotates each endpoint with its value then. It
+is experimental and works only for an FSDB opened through the built-in Verdi
+NPI backend, since connectivity comes from an elaborated design database (KDB)
+and not from the waveform.
+
+### Added
+- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`.
+- `trace <file> SIGNAL [--load] [--at T] [--kdb DIR] [--top NAME]`.
+- `$RWAVE_NPI_L1_LIB`, for a Verdi install where `libnpiL1.so` is not next to
+  `libNPI.so`.
+- `trace` reads the design library location from the FSDB header, so the normal
+  case needs no argument; `--kdb` overrides it. There is no directory scan: a
+  neighbouring build is not evidence that it is the right build, so an
+  unresolvable location is refused rather than guessed at.
+
+### Changed
+- `--depth` may be given without `--scope` for `tree` only, measured from the
+  root. Every other command still requires the pairing, unchanged.
+- `trace` and `tree` accept a second positional argument. Other commands reject
+  extra positionals with the same message as before.
+
+### Internal
+- Design connectivity is a Rust trait (`DesignQuery`) reached through a
+  defaulted `WaveformBackend::design_query`, **not** a C vtable slot. Appending
+  slots is what makes a newer host read past the end of an older plugin's
+  vtable, so the ABI stays frozen and external plugins are unaffected.
+- `libNPI.so` is loaded after an `RTLD_GLOBAL` preload of `librt`: it references
+  `shm_unlink` without declaring the dependency, and cold-loading it fails
+  outright on glibc < 2.34. `libnpiL1.so` likewise declares no dependency on
+  `libNPI.so` while calling into it, so libNPI is promoted to the global scope
+  before L1 loads. Both were confirmed against the shipped libraries.
+- `tree` materializes a parent→children map once instead of rescanning the
+  scope set per node; the walk was quadratic, which on a 56k-scope design meant
+  tens of seconds that `--limit` could not bound (the total has to be known
+  before it can be clipped).
+- The NPI dump parser lives outside the linux-x86_64 gate, so its tests run on
+  every platform rather than only where the vendor library can be loaded.
+
+### Compatibility
+- Plugin ABI unchanged (still version 1); no vtable field added or reordered.
+
 ## [0.1.7] — 2026-08-06
 
 Signal selection grows from one option into four that compose: `--scope` picks a

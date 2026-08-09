@@ -62,11 +62,15 @@ User wants to know...
 │   └─ snapshot       all known signal values at one time point
 ├─ "What changed between T1 and T2?"
 │   └─ compare        diff of signal values at two time points
-└─ "When does condition C hold?" / "Find handshakes"
-    └─ search         condition-based, three sub-modes:
-        ├─ interval   time ranges where condition is true (no --show, no changed())
-        ├─ segment    intervals + observed values         (with --show)
-        └─ event      fires when signals transition       (changed(SIG) in condition)
+├─ "When does condition C hold?" / "Find handshakes"
+│   └─ search         condition-based, three sub-modes:
+│       ├─ interval   time ranges where condition is true (no --show, no changed())
+│       ├─ segment    intervals + observed values         (with --show)
+│       └─ event      fires when signals transition       (changed(SIG) in condition)
+├─ "Where am I?" / "What's under tb.dut?"
+│   └─ tree           hierarchy; --of SIGNAL gives its full ancestor chain
+└─ "Who drives this signal?" / "What reads it?"
+    └─ trace          drivers/loads with file:line; FSDB + built-in NPI only
 ```
 
 `search`'s JSON top-level key depends on the mode: `intervals` /
@@ -112,6 +116,18 @@ fields you'll usually parse out.
 | `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
 | `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
 | `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
+| `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `roots[]`, `root_signals`, `scopes[]`/`chain[]` with `.path`, `.name`, `.level`, `.signals`, `.children` |
+| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
+
+`trace` works only on `.fsdb` via the built-in NPI backend; elsewhere it exits 1.
+That is a capability limit, not a transient failure, so do not retry.
+
+- Never pass `--kdb` unless rwave asks for it. The design library is read from
+  the FSDB header; if that fails, use only a path the user supplies.
+- Check `status` before trusting the list: `resolved`, `boundary_only` (driver
+  outside the traced hierarchy), `testbench_driven` (not visible to an RTL
+  trace), `no_driver_found`.
+- Clock/reset and enclosing `if`/`case` are excluded unless you pass `--verbose`.
 
 For `dump`, **always pass `--begin/--end` and a selection** — running it
 unbounded on a large dump streams the whole file.
