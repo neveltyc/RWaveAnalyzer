@@ -115,11 +115,14 @@ TAG = {"ALWAYS": "p", "ASSIGN": "a", "INITIAL": "i", "IMPLICIT-WIRE": "w"}
 
 
 def norm_proc(name):
-    m = re.match(r"#([A-Z-]+)(\(.*\))?#(\d+)$", name)
+    # The suffix is not always a bare line number: a process spanning two lines
+    # is `#ALWAYS#251,260`, and a generate-replicated one carries a second
+    # `#2`. Only the tag is rewritten; whatever follows it is left alone.
+    m = re.match(r"#([A-Z-]+)(\(.*\))?#(.+)$", name)
     if not m:
         return name
-    tag, paren, num = m.group(1), m.group(2) or "", m.group(3)
-    return "#%s#%s#%s" % (TAG.get(tag, tag), paren, num) if paren else "#%s#%s" % (TAG.get(tag, tag), num)
+    tag, paren, rest = m.group(1), m.group(2) or "", m.group(3)
+    return "#%s#%s#%s" % (TAG.get(tag, tag), paren, rest) if paren else "#%s#%s" % (TAG.get(tag, tag), rest)
 
 
 def norm_endpoint(path):
@@ -164,13 +167,18 @@ def main():
     for s in sigs:
         cmds.append("echo [find drivers -possible -tcl {%s}]" % s)
         cmds.append("find drivers -possible -transcript {%s}" % s)
+        # `drivers` crosses hierarchy where `find drivers -possible` declines to
+        # answer for a port at all, so it is the oracle for exactly the cases
+        # the other one leaves blank.
+        cmds.append("drivers {%s}" % s)
         cmds.append("readers {%s}" % s)
     truth = vsim_batch(args.vsim, args.wlf, cmds)
 
     bad, extra = 0, 0
     for i, s in enumerate(sigs):
-        want_drv = tcl_rows(truth.get(3 * i, [])) | table_rows(truth.get(3 * i + 1, []))
-        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(3 * i + 2, []), "Reader")}
+        want_drv = tcl_rows(truth.get(4 * i, [])) | table_rows(truth.get(4 * i + 1, []))
+        want_drv_ep = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 2, []), "Driver")}
+        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 3, []), "Reader")}
         rw_sig = s.lstrip("/").replace("/", ".")
 
         got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=False)
@@ -205,7 +213,14 @@ def main():
         if missing or wrong:
             print("\n%s drivers differ\n  vsim : %s\n  rwave: %s" % (s, sorted(want_drv), sorted(got_drv)))
             bad += 1
-        elif got_by_place.keys() - want_by_place.keys():
+        got_drv_ep = {to_questa(h["scope"]) + "/" + h["raw_kind"] for h in got["drivers"]}
+        if want_drv_ep - got_drv_ep:
+            print(
+                "\n%s drivers missing (by endpoint)\n  vsim : %s\n  rwave: %s"
+                % (s, sorted(want_drv_ep), sorted(got_drv_ep))
+            )
+            bad += 1
+        elif got_by_place.keys() - want_by_place.keys() and not got_drv_ep & want_drv_ep:
             # Extra answers are reported but not failed: reading the database
             # finds statements vsim's own view leaves out, and each needs a look
             # rather than an automatic verdict.
