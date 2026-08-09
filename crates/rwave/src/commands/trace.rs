@@ -55,12 +55,13 @@ fn unsupported_message(wave: &Wave) -> String {
     } else {
         tag.to_string()
     };
-    let overridden = std::env::var_os("RWAVE_PLUGIN_FSDB").is_some();
     let mut s = format!(
         "trace requires an FSDB opened through the built-in Verdi NPI backend; \
          '{fmt}' has no design data."
     );
-    if overridden {
+    // Only worth saying for an .fsdb: unsetting it does not give a VCD design
+    // data, so on any other format it is advice that cannot help.
+    if fmt == "fsdb" && std::env::var_os("RWAVE_PLUGIN_FSDB").is_some() {
         s.push_str("\nUnset RWAVE_PLUGIN_FSDB, which replaces that backend.");
     }
     s
@@ -81,9 +82,9 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     let dir = if args.load { Direction::Load } else { Direction::Driver };
     // Control dependencies (clock edges, enclosing if/case) are suppressed at
     // the source unless asked for. NPI has a first-class option for this, so we
-    // never have to guess from names — a substring test for "rst" would eat
+    // never have to guess from names: a substring test for "rst" would eat
     // `first_valid` and `burst_len` along with the resets.
-    let control = args.verbose;
+    let control = args.control;
 
     // Parse --at before anything expensive: loading a design checks out a
     // licence, and a mistyped time should not cost that.
@@ -145,11 +146,11 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
             // `wanted` holds up to a few hundred names and an FSDB design can
             // carry a million signals, each probe otherwise re-lowercasing
             // every alias it walks past.
-            let index = lowercase_path_index(wave, &wanted);
+            let index = endpoint_index(wave, &wanted);
             let mut sids = Vec::new();
             let mut pairs = Vec::new();
             for name in &wanted {
-                match index.get(&name.to_lowercase()) {
+                match index.get(name) {
                     Some(&sid) => {
                         sids.push(sid);
                         pairs.push((name.clone(), sid));
@@ -248,21 +249,52 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
     Ok(o.push(noun, Json::Array(rows)).build())
 }
 
-/// Map the lowercased alias paths rwave carries to their sids, keeping only the
-/// names asked for. Built once per `--at` query.
-fn lowercase_path_index(
+/// Map each wanted endpoint name to a sid. Built once per `--at` query, since
+/// probing the signal table per name is quadratic on a design with a million
+/// signals.
+fn endpoint_index(
     wave: &Wave,
     wanted: &[String],
 ) -> std::collections::HashMap<String, crate::model::Sid> {
-    let want: std::collections::HashSet<String> =
-        wanted.iter().map(|w| w.to_lowercase()).collect();
-    let mut out = std::collections::HashMap::with_capacity(wanted.len());
+    use std::collections::{HashMap, HashSet};
+    let exact_want: HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    let lower_want: HashSet<String> = wanted.iter().map(|w| w.to_lowercase()).collect();
+
+    let mut exact: HashMap<String, crate::model::Sid> = HashMap::with_capacity(wanted.len());
+    // Case-insensitive candidates, kept only while unambiguous. SystemVerilog
+    // identifiers are case-sensitive, so `req` and `REQ` can both exist; folding
+    // case and taking the first hit would show one signal's value under the
+    // other's name. These names come from NPI verbatim, so an exact match is
+    // the normal outcome and folding is only a fallback for a backend that
+    // spells hierarchies differently.
+    let mut folded: HashMap<String, Option<crate::model::Sid>> = HashMap::new();
+
     for sid in 0..wave.signal_count() {
         for (path, _) in wave.signal(sid).alias_pairs() {
-            let lower = path.to_lowercase();
-            if want.contains(&lower) {
-                out.entry(lower).or_insert(sid);
+            if exact_want.contains(path) {
+                exact.entry(path.to_string()).or_insert(sid);
             }
+            let lower = path.to_lowercase();
+            if lower_want.contains(&lower) {
+                folded
+                    .entry(lower)
+                    .and_modify(|slot| {
+                        if *slot != Some(sid) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(sid));
+            }
+        }
+    }
+
+    let mut out = exact;
+    for name in wanted {
+        if out.contains_key(name) {
+            continue;
+        }
+        if let Some(Some(sid)) = folded.get(&name.to_lowercase()) {
+            out.insert(name.clone(), *sid);
         }
     }
     out
@@ -354,14 +386,8 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
 
         // Only the two statuses that can accompany a non-empty list; an empty
         // one returned above, and `Resolved` is what the list already shows.
-        if let Some(note) = match d.status {
-            TraceStatus::TestbenchDriven => {
-                Some("driven from testbench code; not visible to an RTL trace")
-            }
-            TraceStatus::BoundaryOnly => Some("driver is outside the traced hierarchy"),
-            _ => None,
-        } {
-            println!("{note}");
+        if d.status == TraceStatus::BoundaryOnly {
+            println!("driver is outside the traced hierarchy");
         }
     }
     if d.unresolved_in_wave > 0 {

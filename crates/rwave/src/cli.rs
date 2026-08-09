@@ -6,7 +6,7 @@
 //! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
 //! per-command flags are `--begin`, `--end`, `--scope`, `--depth`, `--filter`,
 //! `--exclude`, `--at`, `--condition`, `--show`, `--kdb`, `--top`, `--of`,
-//! and the boolean `--driver`/`--load`. `--json`, `--limit`, and `--verbose` may appear either before or
+//! and the booleans `--driver`/`--load`/`--control`. `--json`, `--limit`, and `--verbose` may appear either before or
 //! after the subcommand. We avoid a third-party arg parser to keep the static
 //! binary small and the error text under our control.
 
@@ -83,6 +83,11 @@ pub struct Args {
     /// Drivers are the default because that is the question being asked almost
     /// every time.
     pub load: bool,
+    /// `trace --control`: include the enclosing `if`/`case`/clock-edge
+    /// dependencies. A flag of its own rather than a use of `--verbose`,
+    /// because it changes what is asked of the design, not how much of the
+    /// answer is shown.
+    pub control: bool,
     /// Path to the Verdi knowledge database (`kdb.elab++` or a `simv.daidir`).
     pub kdb: Option<String>,
     /// Design top-level name hint, when the waveform root and the KDB top differ.
@@ -114,6 +119,7 @@ pub struct Defaults {
     /// itself; a bool could not express that, and a line's `--driver` would
     /// have no way to override a session-wide `--load`.
     pub load: Option<bool>,
+    pub control: bool,
     pub kdb: Option<String>,
     pub top: Option<String>,
     pub of: Option<String>,
@@ -165,7 +171,7 @@ Commands:
                                                 a changed(SIG) term fires at SIG's transitions (event mode)
   tree      <file> [SCOPE] [--depth N] [--of SIGNAL]
                                                 Browse the hierarchy: child scopes of SCOPE, or --of's full ancestor chain
-  trace     <file> SIGNAL [--load] [--at T] [--top NAME] [--kdb DIR]
+  trace     <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]
                                                 Experimental: what drives SIGNAL (--load: what reads it), with file:line.
                                                 Needs an FSDB opened through the built-in Verdi NPI backend. The design
                                                 library is read from the FSDB itself; --kdb is only for when it has moved.
@@ -287,6 +293,7 @@ struct Acc {
     show: Option<String>,
     driver: bool,
     load: bool,
+    control: bool,
     kdb: Option<String>,
     top: Option<String>,
     of: Option<String>,
@@ -304,6 +311,7 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
         let tok = &argv[i];
         match tok.as_str() {
             "--json" => acc.json = true,
+            "--control" => acc.control = true,
             "--driver" => {
                 if acc.load {
                     return Err("--driver and --load are opposites; give one".into());
@@ -496,6 +504,9 @@ fn check_command_flags(
         if acc.load {
             return only("--load", "trace");
         }
+        if acc.control {
+            return only("--control", "trace");
+        }
         if acc.kdb.is_some() {
             return only("--kdb", "trace");
         }
@@ -506,11 +517,7 @@ fn check_command_flags(
     if !is_tree && acc.of.is_some() {
         return only("--of", "tree");
     }
-    // `--of` walks up from a signal and `--scope` walks down from a scope; a
-    // command carrying both has asked for two different listings.
-    if is_tree && acc.of.is_some() && (acc.scope.is_some() || has_target) {
-        return Err("--of and a scope are alternatives; give one".into());
-    }
+    let _ = has_target;
     // The new commands are new, so restricting what they accept cannot break
     // anything that already works.
     let given = |v: &Option<String>| v.is_some();
@@ -548,6 +555,36 @@ fn check_command_flags(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// `--of` walks up from a signal; `--scope` and `--depth` walk down from a
+/// scope. A `tree` carrying both has asked for two different listings, so the
+/// contradiction is refused rather than resolved by precedence.
+///
+/// Checked on the values that will actually be used, which for a `--batch` line
+/// means after the defaults merge: a session-wide `--of` combined with a line's
+/// own scope is the same contradiction, arriving by a different route.
+fn check_of_conflict(
+    command: &Command,
+    of: &Option<String>,
+    scope: &Option<String>,
+    depth: Option<i64>,
+    target: &Option<String>,
+) -> Result<(), String> {
+    if !matches!(command, Command::Tree) {
+        return Ok(());
+    }
+    let given = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if !given(of) {
+        return Ok(());
+    }
+    if given(scope) || given(target) {
+        return Err("--of and a scope are alternatives; give one".into());
+    }
+    if depth.is_some() {
+        return Err("--depth does not apply to --of, which walks up to the root".into());
     }
     Ok(())
 }
@@ -631,6 +668,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
     let file = it.next().unwrap();
     let target = it.next();
     check_required(&command, &acc.at, &acc.condition, &target)?;
+    check_of_conflict(&command, &acc.of, &acc.scope, acc.depth, &target)?;
     check_limit(acc.limit)?;
     check_depth(&command, acc.depth, &acc.scope)?;
     Ok(ParseOutcome::Run(Args {
@@ -650,6 +688,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         show: acc.show,
         target,
         load,
+        control: acc.control,
         kdb: acc.kdb,
         top: acc.top,
         of: acc.of,
@@ -703,6 +742,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             condition: acc.condition,
             show: acc.show,
             load,
+            control: acc.control,
             kdb: acc.kdb,
             top: acc.top,
             of: acc.of,
@@ -779,10 +819,14 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         acc.condition
     };
     let show = acc.show.or_else(|| defaults.show.clone());
+    let control = acc.control || defaults.control;
     let kdb = acc.kdb.or_else(|| defaults.kdb.clone());
     let top = acc.top.or_else(|| defaults.top.clone());
     let of = acc.of.or_else(|| defaults.of.clone());
     check_required(&command, &at, &condition, &target)?;
+    // On the merged values: a session-wide --of meeting a line's own scope is
+    // the same contradiction as writing both on one command line.
+    check_of_conflict(&command, &of, &scope, depth, &target)?;
     check_limit(limit)?;
     check_depth(&command, depth, &scope)?;
     Ok(Args {
@@ -802,6 +846,7 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         show,
         target,
         load,
+        control,
         kdb,
         top,
         of,
