@@ -62,6 +62,16 @@ struct Module {
     signals: HashMap<String, (Vec<i64>, Vec<i64>)>,
     shapes: HashMap<i64, schema::Shape>,
     files: Vec<String>,
+    /// Statement name (`#p#1402`) -> its shape. `rw_process_tbl` names
+    /// statements; `shape_tbl` holds them.
+    by_name: HashMap<String, i64>,
+    /// Signal name -> the statements that read it, and that write it. A second
+    /// view of the same fact, because a signal can carry no shape of its own
+    /// and still be read.
+    touched: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// Statement name -> where it is, for the statements whose shape records no
+    /// line of its own.
+    proc_loc: HashMap<String, (i64, Option<u32>)>,
 }
 
 impl Design {
@@ -180,9 +190,28 @@ impl Design {
                 e.0.extend(s.readers);
                 e.1.extend(s.writers);
             }
-            let shapes = schema::shapes(&db, duid)?.into_iter().map(|s| (s.id, s)).collect();
+            let shapes: HashMap<i64, schema::Shape> =
+                schema::shapes(&db, duid)?.into_iter().map(|s| (s.id, s)).collect();
             let files = schema::files(&db)?;
-            self.modules.insert(duid, Module { signals, shapes, files });
+            let by_name: HashMap<String, i64> = shapes
+                .values()
+                .filter(|s| !s.spec2.is_empty())
+                .map(|s| (s.spec2.clone(), s.id))
+                .collect();
+            let known: std::collections::HashSet<String> = signals.keys().cloned().collect();
+            let mut touched: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+            let mut proc_loc = HashMap::new();
+            for p in schema::processes(&db, duid, &|n| known.contains(n))? {
+                proc_loc.insert(p.name.clone(), (p.file, p.line));
+                for r in p.reads {
+                    touched.entry(r).or_default().0.push(p.name.clone());
+                }
+                for w in p.writes {
+                    touched.entry(w).or_default().1.push(p.name.clone());
+                }
+            }
+            self.modules
+                .insert(duid, Module { signals, shapes, files, by_name, touched, proc_loc });
         }
         Ok(&self.modules[&duid])
     }
@@ -249,11 +278,33 @@ impl Design {
 
                 let shape_ids = {
                     let m = self.module(duid)?;
-                    let Some((readers, writers)) = m.signals.get(&local) else { continue };
-                    match dir {
-                        Direction::Driver => writers.clone(),
-                        Direction::Load => readers.clone(),
+                    let mut ids = match m.signals.get(&local) {
+                        Some((readers, writers)) => match dir {
+                            Direction::Driver => writers.clone(),
+                            Direction::Load => readers.clone(),
+                        },
+                        None => Vec::new(),
+                    };
+                    // The statement view catches what the shape lists leave
+                    // out: a signal with no shape recorded against it is still
+                    // read by whatever statement names it.
+                    if let Some((reads, writes)) = m.touched.get(&local) {
+                        let names = match dir {
+                            Direction::Driver => writes,
+                            Direction::Load => reads,
+                        };
+                        for n in names {
+                            if let Some(&id) = m.by_name.get(n)
+                                && !ids.contains(&id)
+                            {
+                                ids.push(id);
+                            }
+                        }
                     }
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    ids
                 };
                 for sid in shape_ids {
                     let m = &self.modules[&duid];
@@ -261,11 +312,19 @@ impl Design {
                     let Some(stmt) = statement_of(m, sid) else { continue };
                     // The primitive says which lines the value comes from; the
                     // statement above it says what kind of construct it is.
-                    let lines: Vec<Option<u32>> = if shape.lines.is_empty() {
-                        stmt.lines.iter().copied().map(Some).chain(std::iter::once(None)).take(1).collect()
-                    } else {
+                    let mut lines: Vec<Option<u32>> = if !shape.lines.is_empty() {
                         shape.lines.iter().copied().map(Some).collect()
+                    } else if !stmt.lines.is_empty() {
+                        stmt.lines.iter().copied().map(Some).collect()
+                    } else {
+                        // Neither shape records one: the statement table does,
+                        // as an integer. A hop with a file and no line prints an
+                        // empty location, which is worse than looking it up.
+                        m.proc_loc.get(&stmt.spec2).and_then(|(_, l)| *l).map(Some).into_iter().collect()
                     };
+                    if lines.is_empty() {
+                        lines.push(None);
+                    }
                     for line in lines {
                         if !seen.insert((duid, stmt.id, inst_path.clone(), line)) {
                             continue;
@@ -350,7 +409,9 @@ fn hop_of(
         scope,
         file,
         line,
-        boundary: crossed,
+        // A port hop is a boundary by construction, whether or not the walk
+        // to it crossed one.
+        boundary: crossed || prim.kind == "INST" || s.kind == "INST",
         signals,
     }
 }
@@ -376,7 +437,9 @@ fn kind_of(shape_kind: &str, name: &str) -> HopKind {
     }
     match shape_kind {
         "PROCESS" | "FLOP" => HopKind::Procedural,
-        "MODULE" => HopKind::Port,
+        // An instance and a module boundary are both ports: the value comes
+        // from the other side of one.
+        "INST" | "MODULE" => HopKind::Port,
         _ => HopKind::Gate,
     }
 }
@@ -475,6 +538,9 @@ mod tests {
         };
         let m = Module {
             signals: HashMap::new(),
+            by_name: HashMap::new(),
+            touched: HashMap::new(),
+            proc_loc: HashMap::new(),
             files: vec!["dut.sv".into()],
             shapes: HashMap::from([
                 (1, mk(1, 0, "MODULE", "alu")),
@@ -502,6 +568,9 @@ mod tests {
         };
         let m = Module {
             signals: HashMap::new(),
+            by_name: HashMap::new(),
+            touched: HashMap::new(),
+            proc_loc: HashMap::new(),
             files: vec![],
             shapes: HashMap::from([(1, mk(1, 2)), (2, mk(2, 1))]),
         };

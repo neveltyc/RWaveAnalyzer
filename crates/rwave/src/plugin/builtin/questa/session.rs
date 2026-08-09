@@ -438,7 +438,15 @@ exit 3
 "#;
         let mut s = fake(script, quick()).unwrap();
         let e = s.request("readers {/top/res}").unwrap_err();
-        assert!(e.contains("vsim exited"), "{e}");
+        // A child that has already gone surfaces either as EOF on the read or
+        // as a broken pipe on the write, depending on which happens first.
+        // Both name the death; neither is a timeout, which is the distinction
+        // that matters — a timeout would send the reader looking for a slow
+        // query instead of a dead process.
+        assert!(
+            e.contains("vsim exited") || e.contains("could not send a command"),
+            "{e}"
+        );
         assert!(!e.contains("did not answer"), "{e}");
     }
 

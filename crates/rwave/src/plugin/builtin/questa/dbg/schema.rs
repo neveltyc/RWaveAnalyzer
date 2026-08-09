@@ -216,6 +216,81 @@ pub fn shapes(db: &Db, duid: i64) -> Result<Vec<Shape>, String> {
     )
 }
 
+/// A statement as `rw_process_tbl` records it: what it reads and writes, by
+/// name rather than by shape.
+///
+/// This is a second, independent view of the same thing `signal_tbl` gives, and
+/// it is not redundant: a signal can have no shape recorded against it and
+/// still be read here, which is the case `readers` answers and the shape lists
+/// do not.
+pub struct Process {
+    pub name: String,
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
+    /// Where the statement is. Recorded here as an integer, unlike
+    /// `shape_tbl`, and the only location for a statement whose shape lists
+    /// none.
+    pub file: i64,
+    pub line: Option<u32>,
+}
+
+/// Each entry carries a one-character tag, so a name is recovered by checking
+/// the token against the module's own signal names before and after dropping
+/// the first character. Guessing what the tag means would be a decode; this is
+/// a lookup.
+fn names(list: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in list.split_whitespace() {
+        let name = if known(tok) {
+            tok
+        } else if tok.len() > 1 && known(&tok[1..]) {
+            &tok[1..]
+        } else {
+            continue;
+        };
+        if !out.iter().any(|x| x == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+pub fn processes(
+    db: &Db,
+    duid: i64,
+    known: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Process>, String> {
+    rows(
+        db,
+        &format!(
+            "SELECT name, readers, writers, file, line FROM rw_process_tbl WHERE duid = {duid}"
+        ),
+        |r| {
+            let t = |i: usize, r: &Row<'_>| -> rusqlite::Result<String> {
+                Ok(r.get::<_, Option<String>>(i)?.unwrap_or_default())
+            };
+            Ok((
+                t(0, r)?,
+                t(1, r)?,
+                t(2, r)?,
+                r.get::<_, Option<i64>>(3)?.unwrap_or_default(),
+                r.get::<_, Option<i64>>(4)?.filter(|l| *l > 0).map(|l| l as u32),
+            ))
+        },
+    )
+    .map(|v| {
+        v.into_iter()
+            .map(|(name, rd, wr, file, line)| Process {
+                name,
+                reads: names(&rd, known),
+                writes: names(&wr, known),
+                file,
+                line,
+            })
+            .collect()
+    })
+}
+
 /// Source file names, indexed by the `file` column of a shape (1-based).
 pub fn files(db: &Db) -> Result<Vec<String>, String> {
     rows(db, "SELECT file_name FROM rw_file_tbl ORDER BY rowid", |r| {
@@ -332,6 +407,18 @@ mod tests {
         // After the backslash a Verilog name may hold anything, so it is taken
         // as-is rather than filtered character by character.
         assert_eq!(operands("\\foo.bar[3] clk"), vec!["\\foo.bar[3]", "clk"]);
+    }
+
+    #[test]
+    fn process_entries_are_recovered_by_lookup_not_by_decoding_the_tag() {
+        // Verbatim from an always_ff row: every name carries a one-character
+        // tag, and `sum` would otherwise be lost as `tsum`.
+        let known = |n: &str| ["clk", "rst_n", "en", "sum", "top_a"].contains(&n);
+        assert_eq!(names("tclk trst_n trst_n ten tsum", &known), vec!["clk", "rst_n", "en", "sum"]);
+        // A name that itself starts with the tag letter is found before the
+        // tag is stripped, which is why this is a lookup and not a decode.
+        assert_eq!(names("top_a", &known), vec!["top_a"]);
+        assert_eq!(names("tnot_a_signal", &known), Vec::<String>::new());
     }
 
     #[test]
