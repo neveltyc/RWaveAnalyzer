@@ -18,7 +18,7 @@ bash verify/run.sh
 ```
 
 Expected: `RESULT: PASS=N FAIL=0`. The exact `N` is stable per stimulus
-set (currently 170 for `run.sh`).
+set (currently 174 for `run.sh`).
 
 ## Stimulus sets
 
@@ -47,3 +47,9 @@ Requires `iverilog`, `vvp`, `vcd2fst`. The script normalizes `$date` and
 4. Run `scripts/gen-stimulus.sh` to populate `verify/stimulus/<name>.{vcd,fst}`.
 5. Run `verify/run.sh` to confirm parity. Commit the new `.v` plus the
    generated waveform pair.
+
+## Manual NPI checks
+
+`trace` needs a Verdi install, a licence, and a design database, so it cannot be
+covered here. `npi/` holds a fixture and the checks to run by hand on a machine
+that has them.

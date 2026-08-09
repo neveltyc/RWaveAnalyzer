@@ -132,27 +132,6 @@ pub struct LibNpi {
     /// The file `_library` was opened from. See [`loaded_path`].
     path: PathBuf,
 
-    /// `npi_load_design(int argc, char** argv)` — loads an elaborated design
-    /// database so the connectivity APIs have something to answer from. Bound
-    /// here because it lives in libNPI.so alongside the reader; it is used only
-    /// by the design-query path (see `design.rs`), which the waveform path
-    /// never touches. Returns 1 on success.
-    pub load_design: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
-
-    /// `npi_handle_by_name(const char* name, npiHandle scope)` — resolves a
-    /// full hierarchical name in the *design* (not the waveform). Used to tell
-    /// "this signal is not in the design database" apart from "it is, and has
-    /// no drivers", which the trace output alone cannot distinguish.
-    pub handle_by_name: unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle,
-    /// `npi_release_handle(npiHandle)`.
-    pub release_handle: unsafe extern "C" fn(NpiHandle) -> c_int,
-
-    /// `npi_waveform_info(const char* fileName, npiWaveformInfo&)` — header
-    /// metadata read straight from the file, without opening a session. Its
-    /// `simvDaidirPath` is how the waveform tells us which design library it
-    /// came from.
-    pub waveform_info: unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int,
-
     // lifecycle
     pub fsdb_open: unsafe extern "C" fn(*const c_char) -> NpiHandle,
     pub fsdb_close: unsafe extern "C" fn(NpiHandle) -> c_int,
@@ -191,7 +170,81 @@ pub struct LibNpi {
 unsafe impl Send for LibNpi {}
 unsafe impl Sync for LibNpi {}
 
+/// The design-side NPI entry points, resolved separately from the reader.
+///
+/// Kept out of [`LibNpi`] on purpose. `fsdb::vtable()` calls
+/// [`ensure_loaded`] before any FSDB command opens a file, so a symbol
+/// resolved there is a hard requirement for `info`, `list`, `dump` and the
+/// rest. These are needed only by `trace`, and an older Verdi that lacks one
+/// must still be able to read waveforms: Verdi 2018 has the first three and
+/// not `npi_waveform_info`, so binding them eagerly took the whole FSDB
+/// backend down on that install.
+pub struct LibNpiDesign {
+    pub load_design: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
+    /// Resolves a full hierarchical name in the *design*, which is how "not in
+    /// the design database" is told apart from "no drivers".
+    pub handle_by_name: unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle,
+    pub release_handle: unsafe extern "C" fn(NpiHandle) -> c_int,
+    /// Header metadata read straight from a file, without opening a session.
+    /// `None` on a Verdi predating the call; `trace` then needs `--kdb`
+    /// instead of finding the design library on its own.
+    pub waveform_info: Option<unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int>,
+}
+
+unsafe impl Send for LibNpiDesign {}
+unsafe impl Sync for LibNpiDesign {}
+
 static LIBNPI: OnceLock<Result<LibNpi, String>> = OnceLock::new();
+static LIBNPI_DESIGN: OnceLock<Result<LibNpiDesign, String>> = OnceLock::new();
+
+/// Resolve the design-side symbols, once. `Err` means this Verdi cannot answer
+/// connectivity queries; the waveform path is unaffected either way.
+pub fn design_syms() -> Result<&'static LibNpiDesign, String> {
+    ensure_loaded()?;
+    match LIBNPI_DESIGN.get_or_init(load_design_syms) {
+        Ok(d) => Ok(d),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+fn load_design_syms() -> Result<LibNpiDesign, String> {
+    let lib = &npi()._library;
+    macro_rules! need {
+        ($mangled:expr, $sig:ty) => {{
+            let s: libloading::Symbol<$sig> = unsafe { lib.get($mangled) }.map_err(|_| {
+                bridge_err(ERR_PREFIX, format!(
+                    "this Verdi's libNPI.so has no {}, so it cannot answer design queries; \
+                     trace needs a newer Verdi",
+                    String::from_utf8_lossy(&$mangled[..$mangled.len() - 1])
+                ))
+            })?;
+            *s
+        }};
+    }
+    let load_design = need!(
+        b"_Z15npi_load_designiPPc\0",
+        unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int
+    );
+    let handle_by_name = need!(
+        b"_Z18npi_handle_by_namePKcPv\0",
+        unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle
+    );
+    let release_handle = need!(
+        b"_Z18npi_release_handlePv\0",
+        unsafe extern "C" fn(NpiHandle) -> c_int
+    );
+    // Optional: absent before roughly Verdi 2019, and only costs the caller the
+    // convenience of not having to pass --kdb.
+    let waveform_info = unsafe {
+        lib.get::<unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int>(
+            b"_Z17npi_waveform_infoPKcR15npiWaveformInfo\0",
+        )
+    }
+    .ok()
+    .map(|s| *s);
+
+    Ok(LibNpiDesign { load_design, handle_by_name, release_handle, waveform_info })
+}
 
 pub fn ensure_loaded() -> Result<(), String> {
     match LIBNPI.get_or_init(load_npi_once) {
@@ -278,28 +331,8 @@ fn load_npi_once() -> Result<LibNpi, String> {
         unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int
     );
 
-    let load_design = sym!(
-        lib,
-        b"_Z15npi_load_designiPPc\0",
-        unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int
-    );
 
-    let handle_by_name = sym!(
-        lib,
-        b"_Z18npi_handle_by_namePKcPv\0",
-        unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle
-    );
-    let release_handle = sym!(
-        lib,
-        b"_Z18npi_release_handlePv\0",
-        unsafe extern "C" fn(NpiHandle) -> c_int
-    );
 
-    let waveform_info = sym!(
-        lib,
-        b"_Z17npi_waveform_infoPKcR15npiWaveformInfo\0",
-        unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int
-    );
 
     let fsdb_open = sym!(lib, b"_Z13npi_fsdb_openPKc\0", unsafe extern "C" fn(*const c_char) -> NpiHandle);
     let fsdb_close = sym!(lib, b"_Z14npi_fsdb_closePv\0", unsafe extern "C" fn(NpiHandle) -> c_int);
@@ -355,10 +388,6 @@ fn load_npi_once() -> Result<LibNpi, String> {
     Ok(LibNpi {
         _library: lib,
         path,
-        load_design,
-        handle_by_name,
-        release_handle,
-        waveform_info,
         fsdb_open,
         fsdb_close,
         is_fsdb,

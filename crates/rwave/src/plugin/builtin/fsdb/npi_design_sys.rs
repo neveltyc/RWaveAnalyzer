@@ -20,7 +20,7 @@
 //!
 //! The text those functions emit is parsed in `design.rs`.
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -195,23 +195,24 @@ fn locate_l1() -> PathBuf {
 
 /// Run `f` with a `FILE*` that writes into memory, and return what it wrote.
 ///
-/// L1's dump entry points report through C stdio, so this is the capture. The
-/// buffer is fixed-size: a driver list is small (Verdi's own default trace
-/// options bound it), and a truncated tail is preferable to an unbounded
-/// allocation driven by library output.
+/// `open_memstream` grows its own allocation, so there is no capture ceiling to
+/// tune. A fixed buffer would have one, and it would bind exactly where it must
+/// not: a clock or reset can have tens of thousands of loads, and `--limit`
+/// cannot help because the whole dump has to be parsed before there is a total
+/// to clip.
 pub fn capture_dump<F>(f: F) -> Result<String, String>
 where
     F: FnOnce(*mut c_void) -> c_int,
 {
     unsafe extern "C" {
-        fn fmemopen(buf: *mut c_void, size: usize, mode: *const c_char) -> *mut c_void;
+        fn open_memstream(ptr: *mut *mut c_char, size: *mut usize) -> *mut c_void;
         fn fclose(stream: *mut c_void) -> c_int;
         fn fflush(stream: *mut c_void) -> c_int;
+        fn free(ptr: *mut c_void);
     }
 
-    /// Closes the stream even if `f` unwinds. Without this, an unwind would
-    /// free `buf` while glibc still held an open stream pointing into it, and
-    /// the flush at process exit would write into freed memory.
+    /// Closes the stream even if `f` unwinds. Until `fclose` the buffer pointer
+    /// is not valid to read, and the allocation would leak.
     struct FileGuard(*mut c_void);
     impl Drop for FileGuard {
         fn drop(&mut self) {
@@ -221,45 +222,40 @@ where
             }
         }
     }
+    /// Frees the stream's allocation on every path out.
+    struct BufGuard(*mut c_char);
+    impl Drop for BufGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { free(self.0 as *mut c_void) };
+            }
+        }
+    }
 
-    const CAP: usize = 1 << 20;
-    let mut buf = vec![0u8; CAP];
-    let mode = CString::new("w").expect("static");
-    // Hand stdio CAP-1 so the final byte stays the NUL from the zeroed
-    // allocation and the scan below always terminates in bounds.
-    let file = unsafe { fmemopen(buf.as_mut_ptr() as *mut c_void, CAP - 1, mode.as_ptr()) };
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let file = unsafe { open_memstream(&mut buf, &mut len) };
     if file.is_null() {
-        return Err(bridge_err(
-            ERR_PREFIX,
-            "could not allocate a capture buffer",
-        ));
+        return Err(bridge_err(ERR_PREFIX, "could not allocate a capture buffer"));
     }
     let rc = {
         let _guard = FileGuard(file);
         f(file)
     };
+    // Valid only now that the stream is closed.
+    let _owned = BufGuard(buf);
     // The count is the number of groups written; negative is an NPI-side
     // failure. Letting that through would surface as "no driver found", which
     // is a different fact.
     if rc < 0 {
         return Err(bridge_err(ERR_PREFIX, format!("NPI trace failed (rc={rc})")));
     }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    // A full buffer means the library had more to say. Reporting a truncated
-    // dump as complete would silently drop drivers and parse the severed last
-    // record into a bogus one.
-    //
-    // The threshold is CAP-2, not CAP-1, because glibc reserves the final byte
-    // of the region it was given for a terminator: on overflow it writes
-    // `buffer[size-1] = 0`, which with size = CAP-1 lands at CAP-2. A CAP-1
-    // threshold is unreachable there. Verified against glibc 2.31.
-    if end >= CAP - 2 {
-        return Err(bridge_err(
-            ERR_PREFIX,
-            "NPI trace output exceeded the capture buffer",
-        ));
+    if buf.is_null() || len == 0 {
+        return Ok(String::new());
     }
-    Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
+    // SAFETY: after fclose, `buf` points at `len` bytes written by the stream.
+    let bytes = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
+    Ok(String::from_utf8_lossy(bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -284,14 +280,14 @@ mod tests {
         assert_eq!(fill(1024).unwrap().len(), 1024);
     }
 
+    /// A high-fanout net's load dump runs to megabytes. It has to come back
+    /// whole: silently cutting it would drop loads and parse the severed line
+    /// into a bogus one, and `--limit` cannot prevent it because the total is
+    /// only known after the parse.
     #[test]
-    fn an_overlong_dump_is_refused_rather_than_silently_cut() {
-        // The detection threshold depends on where libc puts its terminator:
-        // glibc reserves the last byte of the region it was given, so a
-        // CAP-1 threshold never fires and a truncated dump would be reported
-        // as a complete driver list.
-        let err = fill((1 << 20) + 4096).unwrap_err();
-        assert!(err.contains("exceeded the capture buffer"), "got {err}");
+    fn a_multi_megabyte_dump_comes_back_whole() {
+        let n = 8 << 20;
+        assert_eq!(fill(n).unwrap().len(), n);
     }
 
     #[test]

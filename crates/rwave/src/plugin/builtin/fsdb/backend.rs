@@ -41,6 +41,41 @@ pub struct FsdbBackend {
     pub(super) design: super::design::DesignSession,
 }
 
+/// The FSDB format version recorded in the file header, as `(major, minor)`.
+///
+/// Bytes 66 and 67, verified against six files spanning three format versions
+/// (5.0, 5.7, 6.1) written by Verdi 2018 and 2023: each matches the version NPI
+/// itself reports for the same file. Read directly because the case it explains
+/// is a Verdi too old to open the file at all, where no NPI call can answer.
+/// Only ever used to word a failure, never to decide anything.
+fn header_version(path: &str) -> Option<(u8, u8)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 68];
+    f.read_exact(&mut head).ok()?;
+    let (major, minor) = (head[66], head[67]);
+    // Guard against reading a file that is not an FSDB, or a layout change.
+    (1..=99).contains(&major).then_some((major, minor))
+}
+
+/// What to say when `npi_fsdb_open` refuses a file.
+///
+/// A Verdi older than the dump is a real and otherwise baffling cause: NPI
+/// prints its own `*WARN*` about it on stderr, but the version is worth
+/// stating outright rather than leaving among licence and environment guesses.
+fn open_failure(path: &str) -> String {
+    match header_version(path) {
+        Some((major, minor)) => format!(
+            "cannot read {path} (FSDB version {major}.{minor}). Verdi must be at least as \
+             new as the file; otherwise check the Verdi-Ultra license and environment."
+        ),
+        None => format!(
+            "cannot read {path}. Check the Verdi-Ultra license, RWAVE_FSDB_LIB, and that \
+             the Verdi environment is sourced."
+        ),
+    }
+}
+
 impl FsdbBackend {
     pub fn open(path: &str) -> Result<Self, String> {
         let n = npi();
@@ -48,11 +83,7 @@ impl FsdbBackend {
 
         let session = unsafe { (n.fsdb_open)(path_c.as_ptr()) };
         if session.is_null() {
-            return Err(bridge_err(ERR_PREFIX, format!(
-                "npi_fsdb_open returned NULL for {path} \
-                 (check the Verdi-Ultra license, RWAVE_FSDB_LIB, and that \
-                 the Verdi environment is sourced)"
-            )));
+            return Err(bridge_err(ERR_PREFIX, open_failure(path)));
         }
 
         let version = read_cstr(unsafe { (n.file_property_str)(file_prop::VERSION, session) });
