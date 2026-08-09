@@ -291,6 +291,18 @@ pub fn processes(
     })
 }
 
+/// The names the source actually declares, with where it declares them.
+///
+/// `signal_tbl` also holds the temporaries `vopt` invents to carry intermediate
+/// values; those have no declaration, which is what separates them from the
+/// signals someone wrote. Matching on their spelling would be a guess about a
+/// naming convention — this is the record itself.
+pub fn declared(db: &Db) -> Result<Vec<String>, String> {
+    rows(db, "SELECT name FROM decl_tbl", |r| {
+        Ok(r.get::<_, Option<String>>(0)?.unwrap_or_default())
+    })
+}
+
 /// Source file names, indexed by the `file` column of a shape (1-based).
 pub fn files(db: &Db) -> Result<Vec<String>, String> {
     rows(db, "SELECT file_name FROM rw_file_tbl ORDER BY rowid", |r| {
@@ -382,8 +394,10 @@ mod tests {
     #[test]
     fn a_control_keeps_its_signal_not_its_edge_marker() {
         assert_eq!(operands("P:clk"), vec!["clk"]);
-        assert_eq!(operands("R:dbgTemp0_5"), vec!["dbgTemp0_5"]);
         assert_eq!(operands("rst_n en"), vec!["rst_n", "en"]);
+        // The tag is stripped whatever follows it; that the temporary behind
+        // this one is then dropped is a separate rule, checked below.
+        assert_eq!(operands("N:rst_n"), vec!["rst_n"]);
     }
 
     #[test]

@@ -67,6 +67,22 @@ def vsim_batch(vsim, wlf, commands):
     return chunks
 
 
+def table_rows(lines):
+    """(scope, file:line) from the `-transcript` table.
+
+    Read alongside the `-tcl` form, not instead of it: on a variable vsim
+    reports an internal error, marks the result *PARTIAL*, and still prints a
+    row that the `-tcl` form returns nothing for. Taking only one form counts
+    that as an answer rwave invented.
+    """
+    out = set()
+    for line in lines:
+        f = [c.strip() for c in line.split("|")]
+        if len(f) == 4 and f[1].startswith("/") and ":" in f[3] and "-" not in f[0]:
+            out.add((f[1], f[3]))
+    return out
+
+
 def tcl_rows(lines):
     """(scope, file:line) from `find drivers -possible -tcl` output."""
     out = set()
@@ -134,7 +150,9 @@ def main():
     sigs = []
     for line in names.get(0, []):
         sigs += [s for s in line.split() if s.startswith("/")]
-    sigs = sorted(set(sigs))
+    # vopt's own temporaries are in the design database but are not signals
+    # anyone traces, and neither backend should be judged on them.
+    sigs = sorted({s for s in sigs if "dbgTemp" not in s.rsplit("/", 1)[-1]})
     if args.limit:
         sigs = sigs[: args.limit]
     print("signals to check: %d" % len(sigs))
@@ -145,13 +163,14 @@ def main():
     cmds = []
     for s in sigs:
         cmds.append("echo [find drivers -possible -tcl {%s}]" % s)
+        cmds.append("find drivers -possible -transcript {%s}" % s)
         cmds.append("readers {%s}" % s)
     truth = vsim_batch(args.vsim, args.wlf, cmds)
 
     bad, extra = 0, 0
     for i, s in enumerate(sigs):
-        want_drv = tcl_rows(truth.get(2 * i, []))
-        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(2 * i + 1, []), "Reader")}
+        want_drv = tcl_rows(truth.get(3 * i, [])) | table_rows(truth.get(3 * i + 1, []))
+        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(3 * i + 2, []), "Reader")}
         rw_sig = s.lstrip("/").replace("/", ".")
 
         got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=False)

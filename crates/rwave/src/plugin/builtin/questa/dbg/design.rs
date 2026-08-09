@@ -72,6 +72,10 @@ struct Module {
     /// Statement name -> where it is, for the statements whose shape records no
     /// line of its own.
     proc_loc: HashMap<String, (i64, Option<u32>)>,
+    /// The names the source declares. Anything else in this module is a `vopt`
+    /// temporary: real to the netlist, absent from the RTL and from the
+    /// waveform, and not something to hand back as an endpoint.
+    declared: std::collections::HashSet<String>,
 }
 
 impl Design {
@@ -210,8 +214,11 @@ impl Design {
                     touched.entry(w).or_default().1.push(p.name.clone());
                 }
             }
-            self.modules
-                .insert(duid, Module { signals, shapes, files, by_name, touched, proc_loc });
+            let declared = schema::declared(&db)?.into_iter().collect();
+            self.modules.insert(
+                duid,
+                Module { signals, shapes, files, by_name, touched, proc_loc, declared },
+            );
         }
         Ok(&self.modules[&duid])
     }
@@ -334,6 +341,13 @@ impl Design {
                 }
             }
         }
+        // A port hop says only "the value comes from the other side of this
+        // boundary". That is worth reporting when it is all there is — which is
+        // what `boundary_only` means — and is noise once the statement itself
+        // has been found, since the reader already has the answer it names.
+        if hops.iter().any(|h| h.kind != HopKind::Port) {
+            hops.retain(|h| h.kind != HopKind::Port);
+        }
         hops.sort_by(|a, b| (a.scope.clone(), a.line).cmp(&(b.scope.clone(), b.line)));
         for (i, h) in hops.iter_mut().enumerate() {
             h.group = i + 1;
@@ -397,7 +411,11 @@ fn hop_of(
             }
         }
     }
-    let signals = signals.into_iter().map(|n| join(&scope, &n)).collect();
+    let signals = signals
+        .into_iter()
+        .filter(|n| m.declared.contains(n))
+        .map(|n| join(&scope, &n))
+        .collect();
 
     Hop {
         group: 0,
@@ -541,6 +559,7 @@ mod tests {
             by_name: HashMap::new(),
             touched: HashMap::new(),
             proc_loc: HashMap::new(),
+            declared: std::collections::HashSet::new(),
             files: vec!["dut.sv".into()],
             shapes: HashMap::from([
                 (1, mk(1, 0, "MODULE", "alu")),
@@ -571,6 +590,7 @@ mod tests {
             by_name: HashMap::new(),
             touched: HashMap::new(),
             proc_loc: HashMap::new(),
+            declared: std::collections::HashSet::new(),
             files: vec![],
             shapes: HashMap::from([(1, mk(1, 2)), (2, mk(2, 1))]),
         };
