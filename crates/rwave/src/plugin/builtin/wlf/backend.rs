@@ -220,10 +220,11 @@ impl WlfBackend {
     /// mid-file start walks only the window's time steps (measured on Questa
     /// 10.7c: a 200 ns window anywhere in a 20 M-step capture costs ~1–2 ms
     /// vs ~600 ms for the full scan), and at scan start every registered
-    /// signal fires a `STARTLOG` callback carrying its value entering the
-    /// window — the seed comes free. Signals whose logging starts after the
-    /// window fire nothing at all and stay absent, exactly matching the
-    /// windowed contract.
+    /// signal already being logged there fires a `STARTLOG` callback carrying
+    /// its value entering the window — the seed comes free. A signal whose
+    /// logging starts inside the window fires its STARTLOG mid-scan at its
+    /// true tick; one whose logging starts after the window fires nothing at
+    /// all and stays absent, exactly matching the windowed contract.
     ///
     /// The one deviation from the FST/FSDB backends: libwlf does not report
     /// *when* the carried value was last changed (its reverse-search API is
@@ -349,8 +350,13 @@ impl WlfBackend {
         });
         let shared_ptr: *mut SharedScanCtx = &mut *shared;
 
-        // Per-signal scan data. Box so each has a stable address.
-        let mut sig_datas: Vec<Box<PerSignalScanData>> = Vec::with_capacity(sids.len());
+        // Per-signal scan data, heap-allocated and handed to libwlf as raw
+        // cbData pointers. Ownership goes through Box::into_raw (reclaimed
+        // after the scan) rather than a Vec<Box<..>>: moving a Box — a Vec
+        // push, a realloc — invalidates raw pointers derived from it under
+        // Rust's aliasing rules, and libwlf holds these pointers for the
+        // whole scan.
+        let mut sig_datas: Vec<*mut PerSignalScanData> = Vec::with_capacity(sids.len());
 
         let scan_result = (|| -> Result<(), String> {
             for &sid in sids {
@@ -373,13 +379,12 @@ impl WlfBackend {
                     _ => radix::DEFAULT,
                 };
 
-                let mut data = Box::new(PerSignalScanData {
+                let data_ptr = Box::into_raw(Box::new(PerSignalScanData {
                     backend_sid: sid,
                     value_id: val_id,
                     radix: radix_val,
                     shared: shared_ptr,
-                });
-                let data_ptr: *mut PerSignalScanData = &mut *data;
+                }));
 
                 let mut cb_ptr: *mut c_void = std::ptr::null_mut();
                 // SAFETY: all pointer args valid; signal_event_cb has C ABI.
@@ -395,13 +400,16 @@ impl WlfBackend {
                     )
                 };
                 if rc != 0 {
-                    // SAFETY: val_id was created by wlfValueCreate.
+                    // SAFETY: val_id was created by wlfValueCreate; data_ptr
+                    // came from Box::into_raw just above and was never shared
+                    // (registration failed), so reclaiming it here is sound.
                     unsafe { (lib.wlf_value_destroy)(val_id) };
+                    drop(unsafe { Box::from_raw(data_ptr) });
                     return Err(bridge_err(ERR_PREFIX, format!(
                         "wlfAppendSignalEventCB rc={rc} for sid {sid}"
                     )));
                 }
-                sig_datas.push(data);
+                sig_datas.push(data_ptr);
             }
 
             if sig_datas.is_empty() {
@@ -438,14 +446,21 @@ impl WlfBackend {
             Ok(())
         })();
 
-        // Cleanup: destroy each WlfValueId, then the pack. Boxes drop
-        // automatically with the function frame.
-        for data in &sig_datas {
-            // SAFETY: value_id created via wlfValueCreate above.
-            unsafe { (lib.wlf_value_destroy)(data.value_id) };
+        // Cleanup: destroy each WlfValueId, then the pack, then reclaim the
+        // scan-data boxes — libwlf may still dereference cbData during pack
+        // teardown, so the boxes must outlive wlfPackDestroy.
+        for &p in &sig_datas {
+            // SAFETY: p came from Box::into_raw above; value_id was created
+            // via wlfValueCreate.
+            unsafe { (lib.wlf_value_destroy)((*p).value_id) };
         }
         // SAFETY: pack created via wlfPackCreate above.
         unsafe { (lib.wlf_pack_destroy)(pack) };
+        for &p in &sig_datas {
+            // SAFETY: each p was leaked via Box::into_raw exactly once and is
+            // reclaimed exactly once here, after its last libwlf use.
+            drop(unsafe { Box::from_raw(p) });
+        }
 
         scan_result
     }
@@ -474,9 +489,10 @@ struct SharedScanCtx {
     #[allow(dead_code)] // delta is tracked for future delta-mode support
     cur_delta: c_int,
     /// Tick to stamp on carried-value STARTLOG callbacks that arrive before
-    /// the first time-advance CB: `from - 1` for a windowed scan (so the
-    /// seed sorts before, and is never confused with, a change at `from`),
-    /// 0 for a full scan.
+    /// the first time-advance CB: one tick before a mid-file window's start
+    /// (so the seed sorts before, and is never confused with, a change at
+    /// `from`); 0 when the scan starts at 0 — full scans and zero-anchored
+    /// windows, where the initial value genuinely is the t=0 state.
     seed_tag: i64,
     /// Set by the first time-advance CB. Until then the scan is delivering
     /// its start-of-window state (STARTLOG stuffing + changes exactly at
@@ -740,8 +756,11 @@ fn drain_iter(iter: *mut c_void) -> Vec<*mut c_void> {
 /// the end anchors at the final instant (the stuffed values there answer any
 /// later query); `to` at or beyond the end — including the i64::MAX sentinel —
 /// becomes the end itself; a degenerate `to < from` must not shrink the scan
-/// below its start.
+/// below its start. A negative `end` (a corrupt or empty file where
+/// `wlfFileEndTime` failed) floors at 0 — `Ord::clamp` would panic on an
+/// inverted range, and this is called under an `extern "C"` frame.
 fn clamp_window(from: i64, to: i64, end: i64) -> (i64, i64) {
+    let end = end.max(0);
     let from = from.clamp(0, end);
     (from, to.min(end).max(from))
 }
@@ -856,6 +875,13 @@ mod tests {
     #[test]
     fn clamp_window_degenerate_to_below_from() {
         assert_eq!(clamp_window(300, 200, 1000), (300, 300));
+    }
+
+    #[test]
+    fn clamp_window_negative_end_collapses_to_zero() {
+        // A corrupt end time must clamp, not panic (Ord::clamp asserts on an
+        // inverted range, and this runs under an extern "C" frame).
+        assert_eq!(clamp_window(100, 200, -7), (0, 0));
     }
 
     #[test]

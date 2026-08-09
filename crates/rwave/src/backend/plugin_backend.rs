@@ -22,7 +22,7 @@
 //! that borrow is `'static` because cache entries are never removed.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::{LazyLock, Mutex};
 
 use libloading::Library;
@@ -545,7 +545,8 @@ impl WaveformBackend for PluginBackend {
         self.run_trace_decode(sids, |ptr, len, emit, ctx| {
             // SAFETY: load_traces validated non-NULL on load; we hand it owned
             // pointers and a ctx whose layout we control.
-            let _rc = unsafe { (vtable.load_traces.unwrap())(handle, ptr, len, emit, ctx) };
+            let rc = unsafe { (vtable.load_traces.unwrap())(handle, ptr, len, emit, ctx) };
+            warn_partial_decode(rc);
         })
     }
 
@@ -610,7 +611,8 @@ impl WaveformBackend for PluginBackend {
         self.run_trace_decode(sids, |ptr, len, emit, ctx| {
             // SAFETY: `windowed` is non-NULL (matched `Some`); same pointer and
             // ctx contract as load_traces, plus the two tick bounds.
-            let _rc = unsafe { windowed(handle, ptr, len, from, to_tick, emit, ctx) };
+            let rc = unsafe { windowed(handle, ptr, len, from, to_tick, emit, ctx) };
+            warn_partial_decode(rc);
         })
     }
 }
@@ -714,6 +716,16 @@ fn values_equal(a: &RawValue, b: &RawValue) -> bool {
     match (a, b) {
         (RawValue::Real(x), RawValue::Real(y)) => x.to_bits() == y.to_bits(),
         _ => a == b,
+    }
+}
+
+/// A nonzero backend return means the decode stopped partway; the traces
+/// collected so far are consumed regardless (the trait has no error channel),
+/// so say so instead of presenting them as complete. The backend has already
+/// printed its own diagnostic.
+fn warn_partial_decode(rc: c_int) {
+    if rc != 0 {
+        eprintln!("rwave: backend trace decode reported rc={rc}; results may be incomplete");
     }
 }
 
