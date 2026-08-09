@@ -110,7 +110,10 @@ pub struct Defaults {
     /// of its own replaces this whole group (see [`parse_batch_line`]).
     pub condition: Vec<String>,
     pub show: Option<String>,
-    pub load: bool,
+    /// Session-wide trace direction. `None` = not given, so a line decides for
+    /// itself; a bool could not express that, and a line's `--driver` would
+    /// have no way to override a session-wide `--load`.
+    pub load: Option<bool>,
     pub kdb: Option<String>,
     pub top: Option<String>,
     pub of: Option<String>,
@@ -180,9 +183,9 @@ tree takes --scope and --depth only):
                     its own.
 
 tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
-depth counts levels below the matched scope root, except that tree counts scopes
-where list counts signals. Unlike elsewhere, tree accepts --depth without a
-scope, measuring from the root. It ignores --filter and --exclude.
+N levels below the matched scope root, tree counting scopes where list counts
+signals. Unlike elsewhere, tree accepts --depth without a scope, measuring from
+the root. It ignores --filter and --exclude.
 
 Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
@@ -447,6 +450,18 @@ fn check_required(
     }
 }
 
+/// The trace direction this invocation spelled out, if any. `--driver` and
+/// `--load` are mutually exclusive, so at most one is set.
+fn dir_override(acc: &Acc) -> Option<bool> {
+    if acc.load {
+        Some(true)
+    } else if acc.driver {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Reject flags that do not belong to the command they were given with.
 ///
 /// Scoping is per command, not global: `--kdb` is `trace`'s business and no
@@ -461,7 +476,13 @@ fn check_required(
 /// original commands still tolerate the original flags they ignore
 /// (`list … --at 5` has always been accepted); tightening that is a change to
 /// shipped behaviour and belongs in its own commit, not this one.
-fn check_command_flags(command: &Command, acc: &Acc) -> Result<(), String> {
+fn check_command_flags(
+    command: &Command,
+    acc: &Acc,
+    // Whether a *target* positional was given. The caller has to say: on the
+    // CLI the first positional is the file, on a batch line there is no file.
+    has_target: bool,
+) -> Result<(), String> {
     let only = |flag: &str, owner: &str| -> Result<(), String> {
         Err(format!("{flag} is only valid for {owner}"))
     };
@@ -484,6 +505,11 @@ fn check_command_flags(command: &Command, acc: &Acc) -> Result<(), String> {
     }
     if !is_tree && acc.of.is_some() {
         return only("--of", "tree");
+    }
+    // `--of` walks up from a signal and `--scope` walks down from a scope; a
+    // command carrying both has asked for two different listings.
+    if is_tree && acc.of.is_some() && (acc.scope.is_some() || has_target) {
+        return Err("--of and a scope are alternatives; give one".into());
     }
     // The new commands are new, so restricting what they accept cannot break
     // anything that already works.
@@ -583,7 +609,8 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         Some(c) => c.clone(),
         None => return Ok(ParseOutcome::Print(help_text())),
     };
-    check_command_flags(&command, &acc)?;
+    check_command_flags(&command, &acc, acc.positionals.len() > 1)?;
+    let load = dir_override(&acc).unwrap_or(false);
     if acc.positionals.is_empty() {
         return Err(format!(
             "the following arguments are required: <file> (for '{}')",
@@ -622,7 +649,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         condition: acc.condition,
         show: acc.show,
         target,
-        load: acc.load,
+        load,
         kdb: acc.kdb,
         top: acc.top,
         of: acc.of,
@@ -649,6 +676,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             acc.positionals[1..].join(" ")
         ));
     }
+    let load = dir_override(&acc);
     let file = acc.positionals.into_iter().next().unwrap();
     check_limit(acc.limit)?;
     // Only the value is checked here, not the `--depth` / `--scope` pairing: a
@@ -674,7 +702,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
-            load: acc.load,
+            load,
             kdb: acc.kdb,
             top: acc.top,
             of: acc.of,
@@ -703,13 +731,20 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     // none, and keep the original message.
     let allowed = if command.takes_target() { 1 } else { 0 };
     if acc.positionals.len() > allowed {
-        return Err(format!(
-            "unexpected argument: {} (the waveform file is given once on the --batch line, \
-             not per command)",
-            acc.positionals[allowed..].join(" ")
-        ));
+        let extra = acc.positionals[allowed..].join(" ");
+        return Err(if allowed == 0 {
+            format!(
+                "unexpected argument: {extra} (the waveform file is given once on the \
+                 --batch line, not per command)"
+            )
+        } else {
+            format!("unexpected extra arguments: {extra}")
+        });
     }
-    check_command_flags(&command, &acc)?;
+    check_command_flags(&command, &acc, !acc.positionals.is_empty())?;
+    // Taken before `acc` is picked apart below. A line that names a direction
+    // wins over a session-wide one; only silence inherits.
+    let load = dir_override(&acc).or(defaults.load).unwrap_or(false);
     let target = acc.positionals.into_iter().next();
     let limit = acc.limit.or(defaults.limit);
     let verbose = acc.verbose || defaults.verbose;
@@ -744,7 +779,6 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         acc.condition
     };
     let show = acc.show.or_else(|| defaults.show.clone());
-    let load = acc.load || defaults.load;
     let kdb = acc.kdb.or_else(|| defaults.kdb.clone());
     let top = acc.top.or_else(|| defaults.top.clone());
     let of = acc.of.or_else(|| defaults.of.clone());
@@ -949,6 +983,50 @@ mod tests {
         match p(&["snapshot", "x.vcd"]) {
             ParseOutcome::Error(e) => assert!(e.contains("--at")),
             _ => panic!(),
+        }
+    }
+
+    /// A batch line naming a direction must beat the session-wide one. `--load`
+    /// is the only merged option that is a bool rather than an Option, so if it
+    /// merged with `||` a line's `--driver` could not undo an inherited
+    /// `--load`, and the line would silently answer the opposite question.
+    #[test]
+    fn a_batch_line_direction_overrides_the_session_default() {
+        let d = Defaults { load: Some(true), ..Default::default() };
+        let line = |toks: &[&str]| {
+            let v: Vec<String> = toks.iter().map(|s| s.to_string()).collect();
+            parse_batch_line(&v, "f.fsdb", &d).expect("parses")
+        };
+        assert!(!line(&["trace", "sig", "--driver"]).load, "the line asked for drivers");
+        assert!(line(&["trace", "sig", "--load"]).load);
+        assert!(line(&["trace", "sig"]).load, "silence inherits the session default");
+
+        let none = Defaults::default();
+        let v: Vec<String> = ["trace", "sig", "--driver"].iter().map(|s| s.to_string()).collect();
+        assert!(!parse_batch_line(&v, "f.fsdb", &none).unwrap().load);
+    }
+
+    /// Options introduced for one command must not become silently-ignored
+    /// noise on the others.
+    #[test]
+    fn command_specific_flags_are_rejected_elsewhere() {
+        for (cmd, flag, val) in [
+            ("list", "--kdb", Some("x")),
+            ("list", "--top", Some("x")),
+            ("summary", "--of", Some("clk")),
+            ("dump", "--driver", None),
+            ("snapshot", "--load", None),
+        ] {
+            let mut argv = vec![cmd.to_string(), "f.vcd".to_string(), flag.to_string()];
+            if let Some(v) = val {
+                argv.push(v.to_string());
+            }
+            match p(&argv.iter().map(String::as_str).collect::<Vec<_>>()) {
+                ParseOutcome::Error(m) => {
+                    assert!(m.contains("only valid for"), "{cmd} {flag}: {m}")
+                }
+                other => panic!("{cmd} {flag} was accepted: {}", outcome_kind(&other)),
+            }
         }
     }
 

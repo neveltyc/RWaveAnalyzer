@@ -85,6 +85,16 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     // `first_valid` and `burst_len` along with the resets.
     let control = args.verbose;
 
+    // Parse --at before anything expensive: loading a design checks out a
+    // licence, and a mistyped time should not cost that.
+    let at_ticks = match args.at.as_deref().filter(|s| !s.trim().is_empty()) {
+        None => None,
+        Some(spec) => {
+            let ts = wave.ts_sec();
+            Some((crate::format::parse_time(spec, ts).map_err(|e| e.0)?, ts))
+        }
+    };
+
     // Capability first. Whether the signal name is ambiguous is irrelevant if
     // this file can never answer the question at all — reporting "matches 7
     // signals" on a VCD would send the user off refining a name that was never
@@ -120,11 +130,9 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     // are actually going to print.
     let mut values = std::collections::HashMap::new();
     let mut unresolved_in_wave = 0usize;
-    let at = match args.at.as_deref().filter(|s| !s.trim().is_empty()) {
+    let at = match at_ticks {
         None => None,
-        Some(spec) => {
-            let ts = wave.ts_sec();
-            let t = crate::format::parse_time(spec, ts).map_err(|e| e.0)?;
+        Some((t, ts)) => {
             let mut wanted: Vec<String> = Vec::new();
             for h in &hops {
                 for s in &h.signals {
@@ -133,11 +141,16 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
                     }
                 }
             }
+            // One pass over the signal table instead of one per endpoint:
+            // `wanted` holds up to a few hundred names and an FSDB design can
+            // carry a million signals, each probe otherwise re-lowercasing
+            // every alias it walks past.
+            let index = lowercase_path_index(wave, &wanted);
             let mut sids = Vec::new();
             let mut pairs = Vec::new();
             for name in &wanted {
-                match sid_for_exact_path(wave, name) {
-                    Some(sid) => {
+                match index.get(&name.to_lowercase()) {
+                    Some(&sid) => {
                         sids.push(sid);
                         pairs.push((name.clone(), sid));
                     }
@@ -235,6 +248,26 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
     Ok(o.push(noun, Json::Array(rows)).build())
 }
 
+/// Map the lowercased alias paths rwave carries to their sids, keeping only the
+/// names asked for. Built once per `--at` query.
+fn lowercase_path_index(
+    wave: &Wave,
+    wanted: &[String],
+) -> std::collections::HashMap<String, crate::model::Sid> {
+    let want: std::collections::HashSet<String> =
+        wanted.iter().map(|w| w.to_lowercase()).collect();
+    let mut out = std::collections::HashMap::with_capacity(wanted.len());
+    for sid in 0..wave.signal_count() {
+        for (path, _) in wave.signal(sid).alias_pairs() {
+            let lower = path.to_lowercase();
+            if want.contains(&lower) {
+                out.entry(lower).or_insert(sid);
+            }
+        }
+    }
+    out
+}
+
 /// `file:line`, basename only — NPI reports the *build host's* absolute path,
 /// which is long and almost never the reader's own checkout.
 fn loc_of(h: &Hop) -> String {
@@ -258,6 +291,10 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let head = if d.total == 1 { format!("1 {noun}") } else { noun };
     println!("{} — {head}", d.signal);
     if d.hops.is_empty() {
+        // The header already said "0 drivers"; a status line would repeat it.
+        if args.verbose {
+            println!("\nkdb: {}", d.kdb);
+        }
         return Ok(());
     }
     println!();
@@ -314,13 +351,18 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
     // says nothing, and echoing back the `--at` they just typed says less.
     if d.status != TraceStatus::Resolved {
         println!();
-        println!("{}", match d.status {
-            TraceStatus::TestbenchDriven =>
-                "driven from testbench code; not visible to an RTL trace",
-            TraceStatus::BoundaryOnly => "driver is outside the traced hierarchy",
-            TraceStatus::NotFound => "no driver found",
-            TraceStatus::Resolved => unreachable!(),
-        });
+
+        // Only the two statuses that can accompany a non-empty list; an empty
+        // one returned above, and `Resolved` is what the list already shows.
+        if let Some(note) = match d.status {
+            TraceStatus::TestbenchDriven => {
+                Some("driven from testbench code; not visible to an RTL trace")
+            }
+            TraceStatus::BoundaryOnly => Some("driver is outside the traced hierarchy"),
+            _ => None,
+        } {
+            println!("{note}");
+        }
     }
     if d.unresolved_in_wave > 0 {
         println!("\n{} endpoint(s) not dumped in this waveform", d.unresolved_in_wave);

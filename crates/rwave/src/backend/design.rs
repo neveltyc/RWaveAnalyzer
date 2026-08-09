@@ -131,7 +131,6 @@ impl Direction {
             Direction::Load => "load",
         }
     }
-
 }
 
 /// Connectivity queries against an elaborated design database.

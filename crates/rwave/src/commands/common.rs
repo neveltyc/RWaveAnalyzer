@@ -265,14 +265,6 @@ pub(super) fn resolve_signal_path(
     }
 }
 
-/// Find the sid whose canonical path or alias equals `path` exactly
-/// (case-insensitive). Used to attach a waveform value to a name that came from
-/// the design database; a miss is normal (the design has signals the dump does
-/// not) and is reported as an absent value, never as an error.
-pub(super) fn sid_for_exact_path(wave: &Wave, path: &str) -> Option<Sid> {
-    let pl = path.to_lowercase();
-    (0..wave.signal_count()).find(|&i| wave.signal(i).has_exact_path_ci(&pl))
-}
 
 /// Parse `--begin`/`--end` into a `(t0, t1)` tick window, validating order.
 pub(super) fn parse_window(args: &Args, ts: f64) -> Result<(i64, Option<i64>), String> {

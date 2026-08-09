@@ -58,8 +58,17 @@ fn last_segment(path: &str) -> &str {
 }
 
 /// The parent scope path, or `None` for a top-level scope.
+///
+/// A separator at index 0 means a leading-separator path such as `/top`, whose
+/// parent is the root and not an empty-named scope. Returning `Some("")` there
+/// would file every top-level scope under a node that does not exist, leaving
+/// the top level empty; `prefixes` guards the same case and the two have to
+/// agree.
 fn parent_of(path: &str) -> Option<&str> {
-    path.rfind(SEPARATORS).map(|i| &path[..i])
+    match path.rfind(SEPARATORS) {
+        Some(0) | None => None,
+        Some(i) => Some(&path[..i]),
+    }
 }
 
 /// The full scope index: every scope that holds a signal, plus every
@@ -97,11 +106,15 @@ impl Index {
                     root_signals += 1;
                     continue;
                 }
-                *scopes.entry(scope.to_string()).or_insert(0) += 1;
                 // Materialize the ancestors so intermediate scopes exist even
-                // when they hold no signals of their own.
-                for p in prefixes(scope) {
-                    scopes.entry(p.to_string()).or_insert(0);
+                // when they hold no signals of their own. Only on first sight
+                // of a scope: the prefixes are the same for every alias in it.
+                let seen = scopes.contains_key(scope);
+                *scopes.entry(scope.to_string()).or_insert(0) += 1;
+                if !seen {
+                    for p in prefixes(scope) {
+                        scopes.entry(p.to_string()).or_insert(0);
+                    }
                 }
             }
         }
@@ -133,7 +146,9 @@ impl Index {
     }
 
     /// Append `path` and its descendants, stopping `max_level` levels below the
-    /// root. `level` is the indent depth of `path` itself.
+    /// root. `level` is the indent depth of `path` itself, so `max_level == 1`
+    /// yields the root and its direct children, matching what `--depth 1` means
+    /// for `list`: one level below the matched scope.
     fn walk(&self, path: &str, level: usize, max_level: usize, out: &mut Vec<Node>) {
         out.push(Node {
             path: path.to_string(),
@@ -142,11 +157,13 @@ impl Index {
             signals: self.signals(path),
             children: self.child_count(path),
         });
-        if level + 1 >= max_level {
+        if level >= max_level {
             return;
         }
-        for c in self.children_of(path).to_vec() {
-            self.walk(&c, level + 1, max_level, out);
+        // `walk` takes &self and children_of hands back a borrow of the same
+        // map, so recursing while iterating is two shared borrows.
+        for c in self.children_of(path) {
+            self.walk(c, level + 1, max_level, out);
         }
     }
 }
@@ -278,8 +295,10 @@ pub(super) fn compute_tree(wave: &mut Wave, args: &Args) -> Result<Json, String>
                 .push("depth", Json::Int(d.depth as i64));
         }
     }
+    if d.of.is_none() {
+        o = o.push("root_signals", Json::Int(d.root_signals as i64));
+    }
     o = o
-        .push("root_signals", Json::Int(d.root_signals as i64))
         .push("total", Json::Int(d.total as i64))
         .push("shown", Json::Int(d.shown as i64))
         .push("truncated", Json::Bool(d.truncated));
