@@ -79,7 +79,13 @@ typedef struct {
 /* Streaming-trace callback. The backend calls this once per change event
  * during load_traces(). value_buf is NUL-terminated; value_len is the
  * length excluding the NUL. rwave copies what it keeps; the buffer is
- * borrowed for the call only. */
+ * borrowed for the call only.
+ *
+ * Emissions must be in nondecreasing time order per signal. Several
+ * emissions may share one tick (e.g. a vendor library reporting a wide
+ * vector word-by-word); rwave keeps the last value per tick and drops
+ * ticks whose net value equals the previous entry (event-kind signals
+ * exempt — every emission is kept). */
 typedef void (*RwaveEmit)(
     void           *ctx,
     uint64_t        backend_sid,
