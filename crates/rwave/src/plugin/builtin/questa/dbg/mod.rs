@@ -9,6 +9,9 @@
 //! control dependencies, each with a source location — which is more than
 //! QuestaSim's own post-simulation commands will print.
 
+pub mod design;
 pub mod open;
+pub mod schema;
 
+pub use design::Design;
 pub use open::{Db, Kind};

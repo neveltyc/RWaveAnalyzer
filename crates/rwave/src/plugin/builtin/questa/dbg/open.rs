@@ -28,24 +28,29 @@ use crate::plugin::builtin::questa::err;
 const QUESTA_MAGIC: &[u8; 16] = b"Modelsim dbg 1 \0";
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
-/// Which of the two database shapes a file is. They differ in more than
-/// content: the version lives in a differently named table, under a different
-/// column name, and is numbered independently.
+/// Which of the three database shapes a file is.
+///
+/// They are versioned differently, and the third is not versioned at all —
+/// which is only apparent from a real database, not from the schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// The one beside the waveform: hierarchy, instances, declarations.
+    /// The one beside the waveform: hierarchy, instances, wiring.
     Top,
-    /// One per design unit, under `<lib>/_dbcontainer/<opt>/`: processes,
-    /// shapes, and the signal-to-shape index.
-    Module,
+    /// `__mti.dbg`: the index saying where each design unit's database is.
+    Index,
+    /// One per design unit: processes, shapes, and the signal-to-shape index.
+    /// Carries no version of its own, so it is checked by structure instead.
+    Unit,
 }
 
 impl Kind {
-    /// `(table, key column, value column, the version this reader knows)`.
-    fn version_probe(self) -> (&'static str, &'static str, &'static str, i64) {
+    /// `(table, key column, value column, the version this reader knows)`, for
+    /// the kinds that state a version.
+    fn version_probe(self) -> Option<(&'static str, &'static str, &'static str, i64)> {
         match self {
-            Kind::Top => ("dbg_config_tbl", "property", "value", 6),
-            Kind::Module => ("dbg_options_tbl", "optionName", "value", 1),
+            Kind::Top => Some(("dbg_config_tbl", "property", "value", 6)),
+            Kind::Index => Some(("dbg_options_tbl", "optionName", "value", 1)),
+            Kind::Unit => None,
         }
     }
 }
@@ -106,7 +111,29 @@ impl Db {
     }
 
     fn check_version(&self, kind: Kind) -> Result<(), String> {
-        let (table, key, val, known) = kind.version_probe();
+        let Some((table, key, val, known)) = kind.version_probe() else {
+            // A per-unit database states no version, so the check is that it
+            // holds the two tables a trace reads. A layout change drastic
+            // enough to drop one of them fails here rather than later, as an
+            // empty answer.
+            for t in ["signal_tbl", "shape_tbl"] {
+                let n: i64 = self
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [t],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if n == 0 {
+                    return Err(err(format!(
+                        "{} has no {t}; it is not a design-unit database.",
+                        self.path.display()
+                    )));
+                }
+            }
+            return Ok(());
+        };
         let got: Option<i64> = self
             .conn
             .query_row(
@@ -162,7 +189,9 @@ mod tests {
     pub(crate) fn write_dbg(path: &Path, kind: Kind, schema: i64, extra: &[&str]) {
         {
             let c = Connection::open(path).unwrap();
-            let (table, key, val, _) = kind.version_probe();
+            let (table, key, val, _) = kind
+                .version_probe()
+                .expect("only the versioned kinds are written by this helper");
             c.execute_batch(&format!(
                 "CREATE TABLE {table} ({key}, {val});
                  INSERT INTO {table} VALUES ('schema', {schema});"
@@ -249,8 +278,8 @@ mod tests {
         let m = d.join("__mti.dbg");
         // A module database is version 1 while a top-level one is 6; checking a
         // module against the top-level table would reject every valid file.
-        write_dbg(&m, Kind::Module, 1, &[]);
-        assert!(Db::open(&m, Kind::Module).is_ok());
+        write_dbg(&m, Kind::Index, 1, &[]);
+        assert!(Db::open(&m, Kind::Index).is_ok());
         assert!(Db::open(&m, Kind::Top).is_err());
     }
 }

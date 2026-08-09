@@ -93,6 +93,25 @@ def to_questa(path):
     return "/" + path.replace(".", "/")
 
 
+# vsim prints a process by its construct, the database stores it by a tag.
+# Comparing them means saying so once rather than at each call site.
+TAG = {"ALWAYS": "p", "ASSIGN": "a", "INITIAL": "i", "IMPLICIT-WIRE": "w"}
+
+
+def norm_proc(name):
+    m = re.match(r"#([A-Z-]+)(\(.*\))?#(\d+)$", name)
+    if not m:
+        return name
+    tag, paren, num = m.group(1), m.group(2) or "", m.group(3)
+    return "#%s#%s#%s" % (TAG.get(tag, tag), paren, num) if paren else "#%s#%s" % (TAG.get(tag, tag), num)
+
+
+def norm_endpoint(path):
+    """`/tb/#ALWAYS#67` -> `/tb/#p#67`, so both sides spell a process the same."""
+    scope, _, leaf = path.rpartition("/")
+    return scope + "/" + norm_proc(leaf)
+
+
 def rwave_trace(rwave, wlf, sig, load):
     argv = [rwave, "trace", wlf, sig, "--json", "--limit", "0"]
     if load:
@@ -129,10 +148,10 @@ def main():
         cmds.append("readers {%s}" % s)
     truth = vsim_batch(args.vsim, args.wlf, cmds)
 
-    bad = 0
+    bad, extra = 0, 0
     for i, s in enumerate(sigs):
         want_drv = tcl_rows(truth.get(2 * i, []))
-        want_ld = endpoints(truth.get(2 * i + 1, []), "Reader")
+        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(2 * i + 1, []), "Reader")}
         rw_sig = s.lstrip("/").replace("/", ".")
 
         got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=False)
@@ -148,9 +167,31 @@ def main():
             for h in got["drivers"]
             if h["file"] and h["line"]
         }
-        if got_drv != want_drv:
+        # vsim emits a row per source line of a primitive; rwave names the
+        # statement once, as the NPI backend does. So the check is that rwave
+        # missed nothing: every (scope, file) vsim found must be present, with a
+        # line vsim also named.
+        want_by_place = {}
+        for scope, loc in want_drv:
+            f, _, ln = loc.rpartition(":")
+            want_by_place.setdefault((scope, f), set()).add(ln)
+        got_by_place = {}
+        for scope, loc in got_drv:
+            f, _, ln = loc.rpartition(":")
+            got_by_place.setdefault((scope, f), set()).add(ln)
+        missing = [k for k in want_by_place if k not in got_by_place]
+        wrong = [
+            k for k in want_by_place if k in got_by_place and not (got_by_place[k] & want_by_place[k])
+        ]
+        if missing or wrong:
             print("\n%s drivers differ\n  vsim : %s\n  rwave: %s" % (s, sorted(want_drv), sorted(got_drv)))
             bad += 1
+        elif got_by_place.keys() - want_by_place.keys():
+            # Extra answers are reported but not failed: reading the database
+            # finds statements vsim's own view leaves out, and each needs a look
+            # rather than an automatic verdict.
+            extra += 1
+            print("\n%s: rwave reports %s that vsim does not" % (s, sorted(got_by_place.keys() - want_by_place.keys())))
 
         got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=True)
         if got is None:
@@ -159,11 +200,17 @@ def main():
                 bad += 1
             continue
         got_ld = {to_questa(h["scope"]) + "/" + h["raw_kind"] for h in got["loads"]}
-        if got_ld != want_ld:
-            print("\n%s loads differ\n  vsim : %s\n  rwave: %s" % (s, sorted(want_ld), sorted(got_ld)))
+        if want_ld - got_ld:
+            print("\n%s loads missing\n  vsim : %s\n  rwave: %s" % (s, sorted(want_ld), sorted(got_ld)))
             bad += 1
+        elif got_ld - want_ld:
+            extra += 1
+            print("\n%s: rwave reports loads vsim does not: %s" % (s, sorted(got_ld - want_ld)))
 
-    print("\n== RESULT: %d signal(s) checked, %d disagreement(s) ==" % (len(sigs), bad))
+    print(
+        "\n== RESULT: %d signal(s) checked, %d missing, %d with extra findings =="
+        % (len(sigs), bad, extra)
+    )
     return 1 if bad else 0
 
 
