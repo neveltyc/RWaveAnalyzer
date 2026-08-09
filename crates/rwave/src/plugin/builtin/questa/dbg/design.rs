@@ -324,6 +324,17 @@ impl Design {
                     let m = &self.modules[&duid];
                     let Some(shape) = m.shapes.get(&sid) else { continue };
                     let Some(stmt) = statement_of(m, sid) else { continue };
+                    // Drop an elaboration artefact only when it also points
+                    // nowhere. A name that is not an identifier but does carry
+                    // a source line is still an answer someone can act on, and
+                    // skipping it loses real findings.
+                    if !stmt.spec2.is_empty()
+                        && !reportable(&stmt.spec2)
+                        && stmt.lines.is_empty()
+                        && shape.lines.is_empty()
+                    {
+                        continue;
+                    }
                     // The primitive says which lines the value comes from; the
                     // statement above it says what kind of construct it is.
                     let mut lines: Vec<Option<u32>> = if !shape.lines.is_empty() {
@@ -450,6 +461,17 @@ fn hop_of(
 fn join(scope: &str, local: &str) -> String {
     let local = local.replace('/', ".");
     if scope.is_empty() { local } else { format!("{scope}.{local}") }
+}
+
+/// Whether a shape names something a reader can act on.
+///
+/// Elaboration produces objects that are not statements and not signals — a
+/// memory becomes `_ram (32 X 4096 )`, which is a description rather than a
+/// name. Spaces and parentheses are not legal in an identifier, escaped or
+/// otherwise, so anything holding them is not something to hand back. Questa's
+/// own `#tag#suffix` statement names are legal by construction and pass.
+fn reportable(name: &str) -> bool {
+    !name.is_empty() && !name.contains([' ', '(', ')', ','])
 }
 
 /// Questa's construct name decides the kind; its shape type is the fallback.
@@ -606,6 +628,18 @@ mod tests {
             shapes: HashMap::from([(1, mk(1, 2)), (2, mk(2, 1))]),
         };
         assert!(statement_of(&m, 1).is_none(), "a malformed tree must not hang");
+    }
+
+    #[test]
+    fn elaboration_artefacts_that_are_not_names_are_not_reported() {
+        // A memory elaborates to a description, not an identifier. Spaces and
+        // parentheses cannot appear in a Verilog name of either kind.
+        assert!(!reportable("_ram (32 X 4096 )"));
+        assert!(!reportable(""));
+        assert!(reportable("#p#1402"));
+        assert!(reportable("#ALWAYS#251"));
+        assert!(reportable("u_alu"));
+        assert!(reportable("\\escaped.name"));
     }
 
     #[test]

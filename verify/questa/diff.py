@@ -238,6 +238,14 @@ def main():
             print("\n%s loads missing\n  vsim : %s\n  rwave: %s" % (s, sorted(want_ld), sorted(got_ld)))
             bad += 1
         elif got_ld - want_ld:
+            # A statement that both writes and reads its own net — the hold
+            # path of `if (en) q <= d` — is a load of it. vsim's `readers` omits
+            # that; NPI reports it, and verify/npi/README.md pins the behaviour.
+            # Matching NPI is the target, so it is not counted against us.
+            # `got` is the load result by now; the driver endpoints were taken
+            # before it was reassigned.
+            if got_ld - want_ld <= got_drv_ep:
+                continue
             extra += 1
             print("\n%s: rwave reports loads vsim does not: %s" % (s, sorted(got_ld - want_ld)))
 
