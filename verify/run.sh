@@ -178,6 +178,84 @@ else
   bad "a full path bypasses --exclude"
 fi
 
+echo "== tree / trace =="
+HF="$STIM/hier_deep.vcd"
+# tree is derived from scope strings, so it works on every format.
+$RW tree "$HF" >/dev/null 2>&1 && ok || bad "tree runs on vcd"
+# Intermediate scopes must appear even when they hold no signals of their own:
+# hier_deep.u_m0.u_a is only reachable by synthesizing path prefixes.
+$RW --json tree "$HF" --depth 3 2>/dev/null | grep -q '"path":"hier_deep.u_m0.u_a"' \
+  && ok || bad "tree synthesizes intermediate scopes"
+# --depth is bounded, and bounded from the root.
+d1=$($RW --json tree "$HF" 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
+d3=$($RW --json tree "$HF" --depth 3 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
+[[ "$d1" -lt "$d3" ]] && ok || bad "tree --depth widens the result ($d1 vs $d3)"
+# Unlike every other command, tree accepts --depth without --scope.
+$RW tree "$HF" --depth 2 >/dev/null 2>&1 && ok || bad "tree allows --depth without --scope"
+# ...and that exemption must not leak to the others.
+$RW list "$HF" --depth 2 >/dev/null 2>&1; [[ $? -eq 2 ]] \
+  && ok || bad "list still requires --scope for --depth"
+# The positional scope and --scope mean the same thing.
+a=$($RW --json tree "$HF" u_m0 --depth 2 2>/dev/null)
+b=$($RW --json tree "$HF" --scope u_m0 --depth 2 2>/dev/null)
+[[ "$a" == "$b" ]] && ok || bad "tree positional scope == --scope"
+# --of answers "what is above me", top-down and rooted at the file top.
+$RW --json tree "$HF" --of hier_deep.u_m1.u_b.cnt 2>/dev/null \
+  | grep -q '"mode":"chain"' && ok || bad "tree --of emits a chain"
+# A bad --of name is a clean error, not a panic or an empty success.
+$RW tree "$HF" --of nope_not_here >/dev/null 2>&1; [[ $? -eq 1 ]] \
+  && ok || bad "tree --of unknown signal exits 1"
+# When a name matches in several places, the rows must be distinguishable —
+# telling those instances apart is the whole point of asking.
+mr=$($RW tree "$HF" u_a --depth 3 2>/dev/null | grep -c 'hier_deep\.u_m[01]\.u_a')
+[[ "$mr" -eq 2 ]] && ok || bad "tree spells multiple roots out in full (got $mr)"
+# JSON reports the matched roots as paths, not as a display string.
+$RW --json tree "$HF" u_a 2>/dev/null \
+  | grep -q '"roots":\["hier_deep.u_m0.u_a","hier_deep.u_m1.u_a"\]' \
+  && ok || bad "tree JSON exposes roots as an array of paths"
+
+# trace needs design connectivity, which no waveform-only backend has. The
+# refusal must be clean (exit 1, explanatory text), never a partial answer.
+terr=$($RW trace "$HF" hier_deep.u_m0.u_a.clk 2>&1); tcode=$?
+[[ "$tcode" -eq 1 ]] && ok || bad "trace on vcd exits 1 (got $tcode)"
+printf '%s' "$terr" | grep -q "built-in Verdi NPI backend" \
+  && ok || bad "trace refusal names the required backend"
+# A missing signal argument is a usage error (exit 2), not a runtime one.
+$RW trace "$HF" >/dev/null 2>&1; [[ $? -eq 2 ]] && ok || bad "trace without a signal exits 2"
+# --driver and --load are opposites, not a last-one-wins toggle.
+$RW trace "$HF" clk --driver --load >/dev/null 2>&1; [[ $? -eq 2 ]] \
+  && ok || bad "trace rejects --driver together with --load"
+
+# Options belong to the command that defines them. A flag introduced for trace
+# or tree must not become silently-ignored noise on the other seven.
+for f in "--top x" "--kdb x" "--driver" "--load"; do
+  $RW list "$HF" $f >/dev/null 2>&1
+  [[ $? -eq 2 ]] && ok || bad "list rejects $f (trace-only)"
+done
+$RW summary "$HF" --of clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "summary rejects --of (tree-only)"
+# ...and the new commands only take what they actually use.
+$RW tree "$HF" --filter clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --filter"
+$RW trace "$HF" clk --scope u_m0 >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "trace rejects --scope"
+# A batch-wide default is for the lines that want it and must not fail the rest.
+bk=$(printf 'info\n' | $RW --batch "$HF" --kdb /some/dir --json 2>/dev/null)
+printf '%s' "$bk" | grep -q '"ok":true' \
+  && ok || bad "a session-wide --kdb does not break other batch lines"
+# The capability limit must be reported before any complaint about the name:
+# refining an ambiguous signal would be wasted effort on a file that can never
+# answer at all.
+printf '%s' "$($RW trace "$HF" clk 2>&1)" | grep -q "built-in Verdi NPI backend" \
+  && ok || bad "trace reports the capability limit before name ambiguity"
+# trace has no depth concept, so --depth must not be silently accepted there.
+$RW trace "$HF" hier_deep.clk --depth 3 >/dev/null 2>&1; [[ $? -eq 2 ]] \
+  && ok || bad "trace rejects --depth like every non-tree command"
+# The tree exemption survives the batch merge: clearing an inherited scope must
+# not drag the inherited depth down with it, since tree measures from the root.
+bt=$(printf "tree --scope ''\n" | $RW --batch "$HF" --scope u_m0 --depth 3 2>/dev/null | sed -n 2p)
+printf '%s' "$bt" | grep -q "depth 3" && ok || bad "batch tree keeps inherited --depth ($bt)"
+
 echo "== batch mode =="
 BF="$STIM/handshake_proto.vcd"
 # Consistency (core): a batch `result` is byte-identical to the equivalent
