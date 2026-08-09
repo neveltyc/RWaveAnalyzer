@@ -829,9 +829,32 @@ impl Wave {
     ) -> (HashMap<Sid, RawValue>, HashMap<Sid, RawValue>) {
         let mut a: HashMap<Sid, RawValue> = HashMap::new();
         let mut b: HashMap<Sid, RawValue> = HashMap::new();
+        // On a seeking backend, two point windows beat one spanning window:
+        // every seeking backend's window cost grows with the span (WLF walks
+        // the window's time steps, FSDB/FST its per-signal changes), so a
+        // far-apart pair — `compare` across a whole run — would re-read
+        // everything between the instants just to throw it away. Two point
+        // queries read only the instants themselves; for near pairs that is
+        // at worst a second ~point-sized scan. Without seeking, the split
+        // would double the full-decode fallback instead, so the one-window
+        // path stays for that case (its seed + in-window changes answer both
+        // instants from the single pass).
+        if self.backend.supports_windowed() && ta != tb {
+            self.for_each_signal_windowed(sids, ta, Some(ta), batch, |sid, tr| {
+                if let Some(pos) = last_at_or_before(&tr.times, ta) {
+                    a.insert(sid, tr.values[pos].clone());
+                }
+            });
+            self.for_each_signal_windowed(sids, tb, Some(tb), batch, |sid, tr| {
+                if let Some(pos) = last_at_or_before(&tr.times, tb) {
+                    b.insert(sid, tr.values[pos].clone());
+                }
+            });
+            return (a, b);
+        }
         // `ta <= tb`, so one window `[ta, tb]` carries both answers: the seed
         // (last change <= ta) resolves `ta`, and the last change <= tb resolves
-        // `tb`. A seeking backend thus reads one bounded slice per signal.
+        // `tb`.
         self.for_each_signal_windowed(sids, ta, Some(tb), batch, |sid, tr| {
             if let Some(pos) = last_at_or_before(&tr.times, ta) {
                 a.insert(sid, tr.values[pos].clone());
