@@ -3,14 +3,15 @@
 
 //! `trace`: who drives a signal, and what reads it.
 //!
-//! Experimental, and only for an FSDB opened through the built-in Verdi NPI
-//! backend: connectivity comes from an elaborated design database, not from the
-//! waveform. See [`crate::backend::design`].
+//! Experimental. Connectivity comes from a design database, never from the
+//! waveform, so it needs a format that has one alongside: an FSDB with Verdi's
+//! KDB, or a WLF with QuestaSim's post-simulation debug database. Everything
+//! else says so and stops. See [`crate::backend::design`].
 //!
 //! `--at T` annotates every endpoint with its value at T, from the waveform
 //! already open.
 
-use crate::backend::design::{probe_kdb, Direction, Hop, HopKind, TraceStatus};
+use crate::backend::design::{Direction, Hop, HopKind, TraceStatus};
 use crate::cli::Args;
 use crate::json::{Json, Obj};
 use crate::model::Wave;
@@ -21,7 +22,8 @@ use super::common::*;
 struct TraceData {
     signal: String,
     dir: Direction,
-    kdb: String,
+    /// The design database that answered: a Verdi KDB, or a Questa `.dbg`.
+    design_db: String,
     status: TraceStatus,
     hops: Vec<Hop>,
     total: usize,
@@ -51,7 +53,8 @@ fn unsupported_message(wave: &Wave) -> String {
         tag.to_string()
     };
     let mut s = format!(
-        "trace requires an FSDB opened through the built-in Verdi NPI backend; \
+        "trace needs a design database alongside the waveform: an FSDB opened through the \
+         built-in Verdi NPI backend, or a WLF with a QuestaSim debug database; \
          '{fmt}' has no design data."
     );
     // Only actionable for an .fsdb; unsetting it cannot give a VCD design data.
@@ -93,20 +96,21 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
         return Err(unsupported_message(wave));
     }
 
-    // Resolve against the waveform, so NPI gets a full hierarchical path and
-    // the user gets rwave's own error messages.
-    let (path, _scope) = resolve_signal_path(wave, target, "signal")?;
-
-    // The waveform names the design it came from; `--kdb` overrides it.
-    let recorded = wave.design_query().and_then(|dq| dq.recorded_design_dir());
-    let kdb = probe_kdb(args.kdb.as_deref(), recorded.as_deref())
-        .map_err(|m| m.into_error())?;
+    // Resolve against the waveform, so the design database gets a full
+    // hierarchical path and the user gets rwave's own error messages. The scope
+    // travels with it: a backend that has to re-spell the name for another tool
+    // cannot recover it by splitting, because an escaped identifier may hold the
+    // separator.
+    let (path, scope) = resolve_signal_path(wave, target, "signal")?;
 
     let dq = wave
         .design_query()
-        .expect("capability re-checked after the probe");
-    dq.ensure_design(&kdb, args.top.as_deref())?;
-    let outcome = dq.trace(&path, dir, control)?;
+        .expect("capability checked immediately above");
+    // Each backend knows where its own database lives: a KDB named by the FSDB
+    // header or by `--kdb`, a `.dbg` found by Questa's same-basename rule.
+    let db = dq.locate_design(args.kdb.as_deref())?;
+    dq.ensure_design(&db, args.top.as_deref())?;
+    let outcome = dq.trace(&path, &scope, dir, control)?;
 
     let total = outcome.hops.len();
     let limit = limit_of(args);
@@ -161,7 +165,7 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     Ok(TraceData {
         signal: path,
         dir,
-        kdb: kdb.display().to_string(),
+        design_db: db.display().to_string(),
         status: outcome.status,
         hops,
         total,
@@ -181,7 +185,7 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
         // Reserved for a future time-aware ("active") trace, which reports only
         // the driver in effect at T rather than every structural driver.
         .push("mode", Json::str("static"))
-        .push("kdb", Json::str(d.kdb.clone()))
+        .push("design_db", Json::str(d.design_db.clone()))
         .push("status", Json::str(d.status.tag()));
     if let Some((ticks, human)) = &d.at {
         o = o
@@ -220,7 +224,7 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
             Obj::new()
                 .push("group", Json::Int(h.group as i64))
                 .push("kind", Json::str(h.kind.tag()))
-                .push("npi_type", Json::str(h.npi_type.clone()))
+                .push("raw_kind", Json::str(h.raw_kind.clone()))
                 .push("statement", Json::str(h.statement.clone()))
                 .push("scope", Json::str(h.scope.clone()))
                 .push("file", Json::opt_str(h.file.as_deref()))
@@ -309,7 +313,7 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
     if d.hops.is_empty() {
         // The header already said "0 drivers"; a status line would repeat it.
         if args.verbose {
-            println!("\nkdb: {}", d.kdb);
+            println!("\ndesign: {}", d.design_db);
         }
         return Ok(());
     }
@@ -378,7 +382,7 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
         println!("\n{} endpoint(s) not dumped in this waveform", d.unresolved_in_wave);
     }
     if args.verbose {
-        println!("\nkdb: {}", d.kdb);
+        println!("\ndesign: {}", d.design_db);
     }
     if d.truncated {
         let n = if d.dir == Direction::Driver { "drivers" } else { "loads" };

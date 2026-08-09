@@ -31,6 +31,7 @@ use crate::plugin::ffi::RwaveBackend;
 ))]
 pub mod diag;
 pub mod npi_dump;
+pub mod questa;
 #[cfg(any(
     all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
     all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),

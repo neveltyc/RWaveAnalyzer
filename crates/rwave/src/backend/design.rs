@@ -14,8 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// What kind of construct drives or reads a signal. Derived from the NPI object
-/// type of the statement, never guessed from names.
+/// What kind of construct drives or reads a signal. Derived from the design
+/// database's own object type, never guessed from names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HopKind {
     /// `assign lhs = rhs` — a continuous assignment.
@@ -30,7 +30,14 @@ pub enum HopKind {
     Control,
     /// A literal or parameter.
     Constant,
-    /// Reported by NPI but not one of the shapes above.
+    /// A structural primitive: the netlist has a driver here but no statement
+    /// to attribute it to. Questa only. Not folded into `ContAssign`, which it
+    /// often is not — Questa reports the adder inside an `always_ff` this way.
+    Gate,
+    /// A tristate driver. Several of these on one net is correct, not a
+    /// conflict, which is why it is worth distinguishing. Questa only.
+    Tristate,
+    /// Reported by the design database but not one of the shapes above.
     Other,
 }
 
@@ -42,6 +49,8 @@ impl HopKind {
             HopKind::Port => "port",
             HopKind::Control => "control",
             HopKind::Constant => "constant",
+            HopKind::Gate => "gate",
+            HopKind::Tristate => "tri",
             HopKind::Other => "other",
         }
     }
@@ -55,9 +64,10 @@ pub struct Hop {
     /// source and stay grouped in output.
     pub group: usize,
     pub kind: HopKind,
-    /// NPI's own object type, passed through so a caller can see exactly what
-    /// NPI reported even where `kind` folds several types together.
-    pub npi_type: String,
+    /// The design database's own word for this construct — `npiContAssign` from
+    /// NPI, `Gate`/`FF`/`TRI` from Questa — passed through so a caller can see
+    /// exactly what was reported even where `kind` folds several types together.
+    pub raw_kind: String,
     /// The statement's source text, e.g. `assign res = res_q`.
     pub statement: String,
     /// The scope the statement lives in.
@@ -116,13 +126,26 @@ impl Direction {
     }
 }
 
-/// Connectivity queries against an elaborated design database. Implemented only
-/// by the built-in Verdi NPI FSDB backend.
+/// Connectivity queries against an elaborated design database. Implemented by
+/// the built-in Verdi NPI FSDB backend, which reads a KDB, and by the built-in
+/// WLF backend, which asks QuestaSim about a `.dbg`.
 ///
 /// Loading a design is expensive and checks out a licence, so
 /// [`ensure_design`](Self::ensure_design) is idempotent and a `--batch` session
 /// pays for it once.
 pub trait DesignQuery {
+    /// Where this backend's design database is, or precisely why it cannot be
+    /// found. Runs before any cost is paid, so a missing tool or a bad `--kdb`
+    /// is reported without first checking out a licence.
+    ///
+    /// The default is the Verdi flow: the path recorded in the waveform, which
+    /// `--kdb` overrides. Formats that locate a database another way — Questa
+    /// finds a `.dbg` by its own same-basename rule — override this.
+    fn locate_design(&mut self, cli_kdb: Option<&str>) -> Result<PathBuf, String> {
+        let recorded = self.recorded_design_dir();
+        probe_kdb(cli_kdb, recorded.as_deref()).map_err(KdbMiss::into_error)
+    }
+
     /// Load `kdb`. Idempotent. On failure the session must stay usable, so the
     /// caller can retry with a different `--kdb`.
     fn ensure_design(&mut self, kdb: &Path, top: Option<&str>) -> Result<(), String>;
@@ -135,12 +158,19 @@ pub trait DesignQuery {
         None
     }
 
-    /// Trace `signal` in the given direction. `control` includes the enclosing
-    /// `if`, `case`, and clock-edge dependencies, which NPI omits at the source
-    /// when false. Names are never pattern-matched to decide this.
+    /// Trace `signal` in the given direction, resolved in `scope`.
+    ///
+    /// The scope is passed alongside the path because a backend that has to
+    /// re-spell the name for another tool cannot recover it by splitting: a
+    /// Verilog escaped identifier may contain the separator.
+    ///
+    /// `control` includes the enclosing `if`, `case`, and clock-edge
+    /// dependencies, which NPI omits at the source when false. Names are never
+    /// pattern-matched to decide this.
     fn trace(
         &mut self,
         signal: &str,
+        scope: &str,
         dir: Direction,
         control: bool,
     ) -> Result<TraceOutcome, String>;

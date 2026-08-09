@@ -231,6 +231,10 @@ terr=$($RW trace "$HF" hier_deep.u_m0.u_a.clk 2>&1); tcode=$?
 [[ "$tcode" -eq 1 ]] && ok || bad "trace on vcd exits 1 (got $tcode)"
 printf '%s' "$terr" | grep -q "built-in Verdi NPI backend" \
   && ok || bad "trace refusal names the required backend"
+# Two backends can answer, so the refusal must name both — a Questa user told
+# only about Verdi would conclude the command is useless to them.
+printf '%s' "$terr" | grep -q "QuestaSim" \
+  && ok || bad "trace refusal names the Questa route too"
 # A missing signal argument is a usage error (exit 2), not a runtime one.
 $RW trace "$HF" >/dev/null 2>&1; [[ $? -eq 2 ]] && ok || bad "trace without a signal exits 2"
 # --driver and --load are opposites, not a last-one-wins toggle.

@@ -41,8 +41,12 @@ struct OwnedVarDecl {
 
 pub struct WlfBackend {
     file_id: *mut c_void,
-    #[allow(dead_code)] // path is kept for diagnostics; rwave caches it independently
     path: String,
+
+    /// Connectivity state: the located vsim, its live session, and the source
+    /// cache. Empty until the first `trace`, so a plain `info` or `dump` never
+    /// starts a process or takes a licence. See [`super::design`].
+    pub(super) design: super::design::DesignSession,
 
     secs_per_tick: f64,
     timescale_display: CString,
@@ -54,6 +58,12 @@ pub struct WlfBackend {
 }
 
 impl WlfBackend {
+    /// The waveform this session was opened on. `trace` needs it to run vsim in
+    /// the file's own directory and to name the debug database beside it.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     pub fn open(path: &str) -> Result<Self, String> {
         let lib = libwlf();
 
@@ -104,6 +114,7 @@ impl WlfBackend {
         Ok(WlfBackend {
             file_id,
             path: path.to_string(),
+            design: Default::default(),
             secs_per_tick,
             timescale_display: to_cstring(&display),
             end_time,

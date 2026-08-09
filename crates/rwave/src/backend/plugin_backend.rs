@@ -52,12 +52,12 @@ struct LoadedPlugin {
     /// mapped so the vtable behind it stays valid. `None` for a built-in,
     /// whose vtable is compiled into the rwave binary. Also read as the
     /// built-in/external discriminator by [`LoadedPlugin::is_builtin`].
-    // Only the fsdb design-query path reads this; elsewhere it is held purely
-    // to keep the library mapped.
-    #[cfg_attr(
-        not(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64")),
-        allow(dead_code)
-    )]
+    // Only the design-query paths read this; elsewhere it is held purely to
+    // keep the library mapped.
+    #[cfg_attr(not(any(
+        all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),
+        all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    )), allow(dead_code))]
     library: Option<Library>,
     vtable: *const RwaveBackend,
 }
@@ -69,7 +69,10 @@ impl LoadedPlugin {
     /// queries) exist only for built-ins, whose concrete session type this
     /// crate knows. An external plugin advertising the same format token is
     /// still a different implementation behind an opaque handle.
-    #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(
+        all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),
+        all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    ))]
     fn is_builtin(&self) -> bool {
         self.library.is_none()
     }
@@ -565,30 +568,43 @@ impl WaveformBackend for PluginBackend {
     /// keeps the ABI frozen and costs external plugins nothing.
     ///
     /// The guard is both halves of the identity: `is_builtin` rules out an
-    /// external `.so`, and the format name rules out the other built-in (WLF).
-    /// An external FSDB plugin selected via `$RWAVE_PLUGIN_FSDB` is therefore
-    /// excluded automatically — which is also correct on the merits, since the
-    /// FFR reader it wraps has no connectivity API at all.
-    #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]
+    /// external `.so`, and the format name picks which built-in session type
+    /// the handle actually is. An external plugin selected via
+    /// `$RWAVE_PLUGIN_FSDB` is therefore excluded automatically — which is also
+    /// correct on the merits, since the FFR reader it wraps has no connectivity
+    /// API at all.
+    #[cfg(any(
+        all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"),
+        all(feature = "wlf", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    ))]
     fn design_query(&mut self) -> Option<&mut dyn super::DesignQuery> {
-        use crate::plugin::builtin::fsdb::backend::FsdbBackend;
         if !self.plugin.is_builtin() {
             return None;
         }
         // SAFETY: `name` is validated non-NULL and equal to the requested
         // format token in `register`.
         let name = unsafe { CStr::from_ptr(self.vtable().name) };
-        if name.to_bytes() != b"fsdb" {
-            return None;
+        // SAFETY (both arms): for a built-in backend the opaque session handle
+        // is exactly the `Box::into_raw(Box::new(…))` its own `api_open`
+        // produced — the same cast its trampolines perform. The two conditions
+        // prove that provenance: only `builtin::vtable` registers a built-in,
+        // and each built-in names itself after the one format it serves. Tied
+        // to `&mut self`, so no second reference can exist while this one does.
+        match name.to_bytes() {
+            #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]
+            b"fsdb" => Some(unsafe {
+                &mut *(self.handle as *mut crate::plugin::builtin::fsdb::backend::FsdbBackend)
+            }),
+            #[cfg(all(
+                feature = "wlf",
+                target_arch = "x86_64",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            b"wlf" => Some(unsafe {
+                &mut *(self.handle as *mut crate::plugin::builtin::wlf::backend::WlfBackend)
+            }),
+            _ => None,
         }
-        // SAFETY: for the built-in fsdb backend the opaque session handle is
-        // exactly the `Box::into_raw(Box::new(FsdbBackend))` produced by
-        // `fsdb::api_open` — the same cast its own trampolines perform. The
-        // two conditions above prove that provenance: only `builtin::vtable`
-        // registers a built-in, and only `fsdb::vtable()` names itself "fsdb".
-        // Tied to `&mut self`, so no second reference to the session can exist
-        // while this one is alive.
-        Some(unsafe { &mut *(self.handle as *mut FsdbBackend) })
     }
 
     fn load_traces_windowed(

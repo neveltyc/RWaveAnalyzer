@@ -17,8 +17,10 @@ up from a deep leaf.
 
 `trace` reports drivers and loads with the driving statement's source text and
 `file:line`, and with `--at T` gives each endpoint its value then. Experimental,
-and only for an FSDB opened through the built-in Verdi NPI backend: connectivity
-comes from an elaborated design database, not from the waveform.
+and it needs a design database beside the waveform, because connectivity is not
+in the dump: an FSDB with Verdi's KDB, read through the built-in NPI backend, or
+a WLF with QuestaSim's post-simulation debug database. Every other format says so
+and stops.
 
 WLF point queries stop replaying the run. `snapshot --at` and `compare` on
 `.wlf` now seek: libwlf's range scan starts at the window and supplies each
@@ -39,6 +41,21 @@ because libwlf cannot report when it last changed.
   build, so an unresolvable location is refused rather than guessed at.
 - `$RWAVE_NPI_L1_LIB`, for a Verdi install whose `libnpiL1.so` does not sit next
   to `libNPI.so`.
+- **`trace` on a `.wlf`, answered by QuestaSim.** The `.dbg` that `vopt -debugdb`
+  writes has no published format and no API — its only reader is linked inside
+  the `vish` executable, which is not a loadable object — so rwave runs
+  `vsim -c -view` and asks in Tcl. `vsim` is looked for beside `$RWAVE_WLF_LIB`
+  and then on `PATH`, and nowhere else. Drivers carry `file:line` and the source
+  line itself; loads name the reading process and its scope but no location,
+  because after simulation Questa reports `line: -1` for readers and has no
+  `find loads`. `--kdb`, `--top`, and `--control` describe a Verdi database and
+  are refused on a WLF rather than quietly ignored.
+- **One `vsim` per rwave process, so `--batch` is the way to ask a lot.** The
+  session starts on the first `trace` and is shut down on exit; six queries in a
+  batch stream took 2.1 s against 12.2 s as six separate commands. It is not a
+  daemon on purpose: a live session holds two Questa licences, and keeping them
+  after the command finished would take them from someone else.
+- `$RWAVE_VSIM_TIMEOUT_MS`, for a design whose debug database is slow to load.
 
 ### Changed
 - **Options are scoped to the command that defines them.** `--kdb`, `--top`,

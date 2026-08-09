@@ -17,7 +17,8 @@
 
 #![allow(clippy::missing_safety_doc)] // SAFETY notes are inline at each call
 
-mod backend;
+pub mod backend;
+pub mod design;
 mod wlf_sys;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};

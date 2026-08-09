@@ -338,6 +338,28 @@ rwave info run.wlf
 The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
 at runtime and does not ship it.
 
+**`trace` on a WLF** needs Questa's post-simulation debug database, which the
+waveform does not contain. Build one alongside the `.wlf`, then run rwave from
+that directory:
+
+```sh
+vopt +acc top -o top_opt -debugdb
+vsim -postsimdataflow -debugdb=run.dbg -wlf run.wlf top_opt -do 'add log -r /*; run -all; quit -f'
+rwave trace run.wlf top.u_core.res
+```
+
+rwave finds `run.dbg` by Questa's own rule (same basename, else `vsim.dbg`) and
+answers by running `vsim -c -view` for as long as the rwave process lives, so
+`vsim` must be on `PATH` or beside `$RWAVE_WLF_LIB`. That session holds two
+Questa licences until rwave exits — use `--batch` for many queries, which
+reuses one session instead of paying ~2 s and a licence checkout per call.
+
+Drivers come back with `file:line` and the source statement. Loads are
+topological only — which processes read the signal, and where they live, but no
+source location: after simulation Questa reports `line: -1` for readers and has
+no `find loads` command, so there is nothing to read. `--kdb`, `--top`, and
+`--control` are Verdi concepts and are refused here rather than ignored.
+
 ### FSDB
 
 rwave supports two ways to read `.fsdb` files. Both are experimental and
@@ -417,6 +439,7 @@ happens when a dump is copied away from its build.
 | `RWAVE_FSDB_LIB`   | Absolute path to `libNPI.so`. Enables built-in FSDB reading (NPI, needs Verdi-Ultra license). |
 | `RWAVE_PLUGIN_FSDB` | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
 | `RWAVE_NPI_L1_LIB` | Absolute path to `libnpiL1.so` (Verdi's NPI connectivity library), if it is not next to `libNPI.so`. Used by `trace`. |
+| `RWAVE_VSIM_TIMEOUT_MS` | How long to wait for one `vsim` answer during `trace` on a WLF. Default 60000; raise it for a design whose debug database is slow to load. |
 
 For other formats or a custom backend implementation, rwave loads any shared
 library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see

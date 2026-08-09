@@ -161,7 +161,7 @@ pub fn parse_dump(text: &str) -> Vec<Hop> {
             hops.push(Hop {
                 group,
                 kind: kind_of(&npi_type),
-                npi_type,
+                raw_kind: npi_type,
                 statement,
                 scope: scope.clone(),
                 file,
@@ -233,7 +233,7 @@ Need pass through
         assert_eq!(hops.len(), 1);
         let h = &hops[0];
         assert_eq!(h.kind, HopKind::ContAssign);
-        assert_eq!(h.npi_type, "npiContAssign");
+        assert_eq!(h.raw_kind, "npiContAssign");
         assert_eq!(h.statement, "assign res = res_q");
         assert_eq!(h.scope, "tb.u_core.u_alu");
         assert_eq!(h.file.as_deref(), Some("/p/dut.sv"));
