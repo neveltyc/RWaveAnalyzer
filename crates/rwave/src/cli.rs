@@ -5,10 +5,10 @@
 //!
 //! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
 //! per-command flags are `--begin`, `--end`, `--scope`, `--depth`, `--filter`,
-//! `--exclude`, `--at`, `--condition`, `--show`. `--json`, `--limit`, and
-//! `--verbose` may appear either before or after the subcommand. We avoid a
-//! third-party arg parser to keep the static binary small and the error text
-//! under our control.
+//! `--exclude`, `--at`, `--condition`, `--show`, `--kdb`, `--top`, `--of`,
+//! and the boolean `--driver`/`--load`. `--json`, `--limit`, and `--verbose` may appear either before or
+//! after the subcommand. We avoid a third-party arg parser to keep the static
+//! binary small and the error text under our control.
 
 /// Default result limit when neither `--limit` nor `--verbose` is given.
 pub const DEFAULT_LIMIT: usize = 500;
@@ -23,6 +23,8 @@ pub enum Command {
     Snapshot,
     Compare,
     Search,
+    Tree,
+    Trace,
 }
 
 impl Command {
@@ -35,8 +37,17 @@ impl Command {
             "snapshot" => Command::Snapshot,
             "compare" => Command::Compare,
             "search" => Command::Search,
+            "tree" => Command::Tree,
+            "trace" => Command::Trace,
             _ => return None,
         })
+    }
+
+    /// Commands that take a second positional after `<file>`: `trace <file>
+    /// <SIGNAL>` (required) and `tree <file> [SCOPE]` (optional, equivalent to
+    /// `--scope`). Every other command still rejects extra positionals.
+    fn takes_target(&self) -> bool {
+        matches!(self, Command::Trace | Command::Tree)
     }
 }
 
@@ -65,6 +76,19 @@ pub struct Args {
     /// (OR-of-ANDs). Empty = no `--condition` given.
     pub condition: Vec<String>,
     pub show: Option<String>,
+    /// Second positional: the signal for `trace`, the starting scope for `tree`.
+    /// Never inherited in batch mode — a positional belongs to its own line.
+    pub target: Option<String>,
+    /// `trace --load`: report what reads the signal instead of what drives it.
+    /// Drivers are the default because that is the question being asked almost
+    /// every time.
+    pub load: bool,
+    /// Path to the Verdi knowledge database (`kdb.elab++` or a `simv.daidir`).
+    pub kdb: Option<String>,
+    /// Design top-level name hint, when the waveform root and the KDB top differ.
+    pub top: Option<String>,
+    /// `tree`: print the full ancestor chain of this signal instead of a subtree.
+    pub of: Option<String>,
 }
 
 /// Global default options for a batch run, applied to every command unless a
@@ -86,6 +110,10 @@ pub struct Defaults {
     /// of its own replaces this whole group (see [`parse_batch_line`]).
     pub condition: Vec<String>,
     pub show: Option<String>,
+    pub load: bool,
+    pub kdb: Option<String>,
+    pub top: Option<String>,
+    pub of: Option<String>,
 }
 
 /// A fully parsed `--batch` invocation: the file to load once, the output
@@ -132,8 +160,15 @@ Commands:
   search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]
                                                 Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;
                                                 a changed(SIG) term fires at SIG's transitions (event mode)
+  tree      <file> [SCOPE] [--depth N] [--of SIGNAL]
+                                                Browse the hierarchy: child scopes of SCOPE, or --of's full ancestor chain
+  trace     <file> SIGNAL [--load] [--at T] [--top NAME] [--kdb DIR]
+                                                Experimental: what drives SIGNAL (--load: what reads it), with file:line.
+                                                Needs an FSDB opened through the built-in Verdi NPI backend. The design
+                                                library is read from the FSDB itself; --kdb is only for when it has moved.
 
-Selection options (every command above except info):
+Selection options (all four on every command except info, tree, and trace;
+tree takes --scope and --depth only):
   --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
                     name ('*' and '?' allowed); a path matches as a segment-aligned
                     suffix of a scope path, so 'u_tx.u_fifo' finds that subtree
@@ -143,6 +178,11 @@ Selection options (every command above except info):
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
+
+tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
+depth counts levels below the matched scope root, except that tree counts scopes
+where list counts signals. Unlike elsewhere, tree accepts --depth without a
+scope, measuring from the root. It ignores --filter and --exclude.
 
 Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
@@ -186,7 +226,7 @@ Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is ra
 /// for --filter", not "print version").
 const VALUE_FLAGS: &[&str] = &[
     "--limit", "--begin", "--end", "--scope", "--depth", "--filter", "--exclude",
-    "--at", "--condition", "--show",
+    "--at", "--condition", "--show", "--kdb", "--top", "--of",
 ];
 
 /// Parse a slice of argv tokens (excluding argv[0]).
@@ -242,6 +282,11 @@ struct Acc {
     at: Option<String>,
     condition: Vec<String>,
     show: Option<String>,
+    driver: bool,
+    load: bool,
+    kdb: Option<String>,
+    top: Option<String>,
+    of: Option<String>,
     command: Option<Command>,
     positionals: Vec<String>,
 }
@@ -256,6 +301,18 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
         let tok = &argv[i];
         match tok.as_str() {
             "--json" => acc.json = true,
+            "--driver" => {
+                if acc.load {
+                    return Err("--driver and --load are opposites; give one".into());
+                }
+                acc.driver = true;
+            }
+            "--load" => {
+                if acc.driver {
+                    return Err("--driver and --load are opposites; give one".into());
+                }
+                acc.load = true;
+            }
             "--batch" => acc.batch = true,
             "--verbose" => acc.verbose = true,
             "--limit" => {
@@ -315,6 +372,18 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                 i += 1;
                 acc.show = Some(require_value(argv, i, "--show")?);
             }
+            "--kdb" => {
+                i += 1;
+                acc.kdb = Some(require_value(argv, i, "--kdb")?);
+            }
+            "--top" => {
+                i += 1;
+                acc.top = Some(require_value(argv, i, "--top")?);
+            }
+            "--of" => {
+                i += 1;
+                acc.of = Some(require_value(argv, i, "--of")?);
+            }
             "--changed" => {
                 return Err(
                     "--changed is not available; did you mean --condition \"changed(SIG)\"?"
@@ -338,7 +407,7 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                         None => {
                             return Err(format!(
                                 "invalid command: '{other}' (choose from info, list, dump, \
-                                 summary, snapshot, compare, search)"
+                                 summary, snapshot, compare, search, tree, trace)"
                             ));
                         }
                     }
@@ -358,6 +427,7 @@ fn check_required(
     command: &Command,
     at: &Option<String>,
     condition: &[String],
+    target: &Option<String>,
 ) -> Result<(), String> {
     match command {
         Command::Snapshot if at.is_none() => {
@@ -369,8 +439,91 @@ fn check_required(
         Command::Search if condition.is_empty() => {
             Err("the following arguments are required: --condition".into())
         }
+        Command::Trace if target.as_deref().is_none_or(|s| s.trim().is_empty()) => {
+            Err("the following arguments are required: <signal> (rwave trace <file> <signal>)"
+                .into())
+        }
         _ => Ok(()),
     }
+}
+
+/// Reject flags that do not belong to the command they were given with.
+///
+/// Scoping is per command, not global: `--kdb` is `trace`'s business and no
+/// concern of `list`'s. The parser keeps one global flag table, so without this
+/// a command-specific flag would be quietly accepted and ignored everywhere.
+///
+/// Applied to what *this* invocation spelled out, never to values inherited
+/// from a `--batch` line — a session-wide `--kdb` default is there for the
+/// `trace` lines and must not make every `list` line fail.
+///
+/// Deliberately limited to the new flags and the two new commands. The seven
+/// original commands still tolerate the original flags they ignore
+/// (`list … --at 5` has always been accepted); tightening that is a change to
+/// shipped behaviour and belongs in its own commit, not this one.
+fn check_command_flags(command: &Command, acc: &Acc) -> Result<(), String> {
+    let only = |flag: &str, owner: &str| -> Result<(), String> {
+        Err(format!("{flag} is only valid for {owner}"))
+    };
+    let is_trace = matches!(command, Command::Trace);
+    let is_tree = matches!(command, Command::Tree);
+
+    if !is_trace {
+        if acc.driver {
+            return only("--driver", "trace");
+        }
+        if acc.load {
+            return only("--load", "trace");
+        }
+        if acc.kdb.is_some() {
+            return only("--kdb", "trace");
+        }
+        if acc.top.is_some() {
+            return only("--top", "trace");
+        }
+    }
+    if !is_tree && acc.of.is_some() {
+        return only("--of", "tree");
+    }
+    // The new commands are new, so restricting what they accept cannot break
+    // anything that already works.
+    let given = |v: &Option<String>| v.is_some();
+    if is_tree {
+        for (given_flag, name) in [
+            (given(&acc.filter), "--filter"),
+            (given(&acc.exclude), "--exclude"),
+            (given(&acc.at), "--at"),
+            (given(&acc.begin), "--begin"),
+            (given(&acc.end), "--end"),
+            (given(&acc.show), "--show"),
+            (!acc.condition.is_empty(), "--condition"),
+        ] {
+            if given_flag {
+                return Err(format!(
+                    "{name} does not apply to tree"
+                ));
+            }
+        }
+    }
+    if is_trace {
+        for (given_flag, name) in [
+            (given(&acc.scope), "--scope"),
+            (acc.depth.is_some(), "--depth"),
+            (given(&acc.filter), "--filter"),
+            (given(&acc.exclude), "--exclude"),
+            (given(&acc.begin), "--begin"),
+            (given(&acc.end), "--end"),
+            (given(&acc.show), "--show"),
+            (!acc.condition.is_empty(), "--condition"),
+        ] {
+            if given_flag {
+                return Err(format!(
+                    "{name} does not apply to trace"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_limit(limit: Option<i64>) -> Result<(), String> {
@@ -387,13 +540,23 @@ fn check_limit(limit: Option<i64>) -> Result<(), String> {
 /// default `--depth` without ever naming a scope fails on that line — and a
 /// line clearing an inherited scope with `--scope ''` fails the same way, since
 /// a blank value means "not given" everywhere in the selection flags.
-fn check_depth(depth: Option<i64>, scope: &Option<String>) -> Result<(), String> {
+fn check_depth(
+    command: &Command,
+    depth: Option<i64>,
+    scope: &Option<String>,
+) -> Result<(), String> {
     let n = match depth {
         Some(n) => n,
         None => return Ok(()),
     };
     if n <= 0 {
         return Err(format!("depth must be positive; got {n}"));
+    }
+    // `tree` walks the hierarchy itself, so a bare `--depth` is meaningful there:
+    // it counts from the root. Every other command measures depth from a matched
+    // `--scope` and so still requires one.
+    if matches!(command, Command::Tree) {
+        return Ok(());
     }
     if !scope.as_deref().is_some_and(|s| !s.trim().is_empty()) {
         return Err("--depth requires --scope (depth is counted from the scope root)".into());
@@ -416,26 +579,33 @@ fn parse_inner(argv: &[String], batch_mode: bool) -> Result<ParseOutcome, String
 
 /// Resolve an ordinary single-command invocation.
 fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
-    let command = match acc.command {
-        Some(c) => c,
+    let command = match &acc.command {
+        Some(c) => c.clone(),
         None => return Ok(ParseOutcome::Print(help_text())),
     };
+    check_command_flags(&command, &acc)?;
     if acc.positionals.is_empty() {
         return Err(format!(
             "the following arguments are required: <file> (for '{}')",
             cmd_name(&command)
         ));
     }
-    if acc.positionals.len() > 1 {
+    // `trace`/`tree` take one more positional (the signal / the starting scope);
+    // for every other command a second positional stays the error it has always
+    // been, with the same message.
+    let allowed = if command.takes_target() { 2 } else { 1 };
+    if acc.positionals.len() > allowed {
         return Err(format!(
             "unexpected extra arguments: {}",
-            acc.positionals[1..].join(" ")
+            acc.positionals[allowed..].join(" ")
         ));
     }
-    let file = acc.positionals.into_iter().next().unwrap();
-    check_required(&command, &acc.at, &acc.condition)?;
+    let mut it = acc.positionals.into_iter();
+    let file = it.next().unwrap();
+    let target = it.next();
+    check_required(&command, &acc.at, &acc.condition, &target)?;
     check_limit(acc.limit)?;
-    check_depth(acc.depth, &acc.scope)?;
+    check_depth(&command, acc.depth, &acc.scope)?;
     Ok(ParseOutcome::Run(Args {
         command,
         file,
@@ -451,6 +621,11 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         at: acc.at,
         condition: acc.condition,
         show: acc.show,
+        target,
+        load: acc.load,
+        kdb: acc.kdb,
+        top: acc.top,
+        of: acc.of,
     }))
 }
 
@@ -499,6 +674,10 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
+            load: acc.load,
+            kdb: acc.kdb,
+            top: acc.top,
+            of: acc.of,
         },
     }))
 }
@@ -511,21 +690,27 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
 pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> Result<Args, String> {
     let mut acc = Acc::default();
     accumulate(tokens, &mut acc, false)?;
-    let command = match acc.command {
-        Some(c) => c,
+    let command = match &acc.command {
+        Some(c) => c.clone(),
         None => {
             return Err("missing command (each line must start with a subcommand: info, list, \
-                 dump, summary, snapshot, compare, search)"
+                 dump, summary, snapshot, compare, search, tree, trace)"
                 .into());
         }
     };
-    if !acc.positionals.is_empty() {
+    // The file is injected, so a batch line carries at most the command's own
+    // target positional (`trace <signal>` / `tree <scope>`); other commands take
+    // none, and keep the original message.
+    let allowed = if command.takes_target() { 1 } else { 0 };
+    if acc.positionals.len() > allowed {
         return Err(format!(
             "unexpected argument: {} (the waveform file is given once on the --batch line, \
              not per command)",
-            acc.positionals.join(" ")
+            acc.positionals[allowed..].join(" ")
         ));
     }
+    check_command_flags(&command, &acc)?;
+    let target = acc.positionals.into_iter().next();
     let limit = acc.limit.or(defaults.limit);
     let verbose = acc.verbose || defaults.verbose;
     let begin = acc.begin.or_else(|| defaults.begin.clone());
@@ -543,7 +728,10 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     // scope alone makes the inherited depth an error and `--depth ''` is not a
     // number. A depth the line asked for itself is kept, so `--scope '' --depth
     // 3` still reports the contradiction the user wrote.
-    let scope_cleared = acc_scope_is_blank && acc.depth.is_none();
+    // `tree` is the exception: it measures depth from the root when no scope is
+    // given, so clearing the scope there does not invalidate an inherited depth.
+    let scope_cleared =
+        acc_scope_is_blank && acc.depth.is_none() && !matches!(command, Command::Tree);
     let depth = if scope_cleared { None } else { acc.depth.or(defaults.depth) };
     let filter = acc.filter.or_else(|| defaults.filter.clone());
     let exclude = acc.exclude.or_else(|| defaults.exclude.clone());
@@ -556,9 +744,13 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         acc.condition
     };
     let show = acc.show.or_else(|| defaults.show.clone());
-    check_required(&command, &at, &condition)?;
+    let load = acc.load || defaults.load;
+    let kdb = acc.kdb.or_else(|| defaults.kdb.clone());
+    let top = acc.top.or_else(|| defaults.top.clone());
+    let of = acc.of.or_else(|| defaults.of.clone());
+    check_required(&command, &at, &condition, &target)?;
     check_limit(limit)?;
-    check_depth(depth, &scope)?;
+    check_depth(&command, depth, &scope)?;
     Ok(Args {
         command,
         file: file.to_string(),
@@ -574,6 +766,11 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         at,
         condition,
         show,
+        target,
+        load,
+        kdb,
+        top,
+        of,
     })
 }
 
@@ -686,6 +883,8 @@ fn cmd_name(c: &Command) -> &'static str {
         Command::Snapshot => "snapshot",
         Command::Compare => "compare",
         Command::Search => "search",
+        Command::Tree => "tree",
+        Command::Trace => "trace",
     }
 }
 
