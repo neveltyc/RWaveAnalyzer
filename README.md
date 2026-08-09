@@ -237,7 +237,9 @@ the tree, and a path written out from the root works too.
 **`--depth` counts from the matched scope**, with a signal sitting directly in
 it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of
 its submodules'". It requires `--scope`, since there is nothing to count from
-otherwise.
+otherwise. `tree` applies the same rule to scopes rather than signals, so
+`tree --depth 1` lists a scope's own children, and it is the one command that
+accepts `--depth` on its own, counting from the root.
 
 **Selection is decided per path, not per signal.** A signal is kept when any
 one of its paths clears every option. That is what makes `--exclude` safe on a
