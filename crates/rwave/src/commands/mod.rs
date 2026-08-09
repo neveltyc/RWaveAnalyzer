@@ -4,7 +4,8 @@
 //! Command implementations for `rwave`.
 //!
 //! One module per subcommand (`info`, `list`, `dump`, `snapshot`, `compare`,
-//! `summary`, `search`); each owns its command's JSON shape and text layout.
+//! `summary`, `search`, `tree`, `trace`); each owns its command's JSON shape
+//! and text layout.
 //! Cross-command helpers (limit/clip math, selection, value formatting, the
 //! streaming threshold) live in [`common`]. The dispatch entry points route a
 //! parsed [`Args`]: `--json` goes through the `compute_*` functions, text
@@ -23,6 +24,8 @@ mod list;
 mod search;
 mod snapshot;
 mod summary;
+mod trace;
+mod tree;
 
 use crate::cli::{Args, Command};
 use crate::json::Json;
@@ -36,6 +39,8 @@ use list::{compute_list, text_list};
 use search::{compute_search, text_search};
 use snapshot::{compute_snapshot, text_snapshot};
 use summary::{compute_summary, text_summary};
+use trace::{compute_trace, text_trace};
+use tree::{compute_tree, text_tree};
 
 /// Dispatch a parsed command (single-command path). `--json` goes through the
 /// shared [`compute`] functions; text output uses the per-command `text_*`
@@ -62,6 +67,8 @@ pub fn render_text(wave: &mut Wave, args: &Args) -> Result<(), String> {
         Command::Snapshot => text_snapshot(wave, args),
         Command::Compare => text_compare(wave, args),
         Command::Search => text_search(wave, args),
+        Command::Tree => text_tree(wave, args),
+        Command::Trace => text_trace(wave, args),
     }
 }
 
@@ -78,5 +85,7 @@ pub fn compute(wave: &mut Wave, args: &Args) -> Result<Json, String> {
         Command::Snapshot => compute_snapshot(wave, args),
         Command::Compare => compute_compare(wave, args),
         Command::Search => compute_search(wave, args),
+        Command::Tree => compute_tree(wave, args),
+        Command::Trace => compute_trace(wave, args),
     }
 }
