@@ -19,6 +19,7 @@
 //!
 //! [`DesignQuery`]: crate::backend::design::DesignQuery
 
+pub mod dbg;
 pub mod frame;
 pub mod locate;
 pub mod parse;

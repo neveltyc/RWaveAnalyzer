@@ -40,4 +40,16 @@ rustc-hash = { workspace = true }
 # built-in backends' vendor libraries (libwlf / libNPI), all dlopened.
 libloading = "0.8"
 
+# Questa's post-simulation debug database (.dbg) is SQLite with a replaced
+# 16-byte file header, and `trace` on a WLF reads its connectivity directly
+# rather than asking `vsim` for it. Bundled, so the build does not depend on a
+# system SQLite, and pinned exactly: the schema this reads is undocumented, so
+# the reader is validated against one known-good stack rather than a range.
+#
+# This is the only C in the tree. It is not target-scoped: scoping it to the
+# one target that ships the backend would also stop its tests compiling on a
+# macOS dev machine, and all four release targets build it, including the
+# musl-static arm64 one under crt-static, panic=abort and LTO.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "serialize"] }
+
 [dev-dependencies]
