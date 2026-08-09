@@ -91,11 +91,6 @@ pub enum TraceStatus {
     /// Only port boundaries came back: the signal is driven from outside the
     /// part of the hierarchy NPI could follow.
     BoundaryOnly,
-    /// Every driver candidate is also a load of the same net, which is what a
-    /// testbench driving through a virtual interface looks like from an RTL
-    /// point of view. The real driver is in class-based testbench code that the
-    /// RTL fan-in cannot see.
-    TestbenchDriven,
 }
 
 impl TraceStatus {
@@ -104,7 +99,6 @@ impl TraceStatus {
             TraceStatus::Resolved => "resolved",
             TraceStatus::NotFound => "no_driver_found",
             TraceStatus::BoundaryOnly => "boundary_only",
-            TraceStatus::TestbenchDriven => "testbench_driven",
         }
     }
 }

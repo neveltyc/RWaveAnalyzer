@@ -97,12 +97,12 @@ impl FsdbBackend {
                 .into_boxed_slice(),
         );
 
-        let npi = fsdb_sys::npi();
+        let dsn = fsdb_sys::design_syms()?;
         // Loading prints progress and license chatter to stdout/stderr, which
         // would corrupt --json output.
         let rc = {
             let _silence = fsdb_sys::silence_stdio();
-            unsafe { (npi.load_design)(argc, argv.as_mut_ptr()) }
+            unsafe { (dsn.load_design)(argc, argv.as_mut_ptr()) }
         };
         if rc != 1 {
             return Err(bridge_err(
@@ -126,13 +126,15 @@ impl FsdbBackend {
         let Ok(c) = CString::new(name) else {
             return false;
         };
-        let npi = fsdb_sys::npi();
+        let Ok(dsn) = fsdb_sys::design_syms() else {
+            return false;
+        };
         let _silence = fsdb_sys::silence_stdio();
-        let h = unsafe { (npi.handle_by_name)(c.as_ptr(), std::ptr::null_mut()) };
+        let h = unsafe { (dsn.handle_by_name)(c.as_ptr(), std::ptr::null_mut()) };
         if h.is_null() {
             return false;
         }
-        unsafe { (npi.release_handle)(h) };
+        unsafe { (dsn.release_handle)(h) };
         true
     }
 }
@@ -146,11 +148,12 @@ impl DesignQuery for FsdbBackend {
     /// independent of the open session.
     fn recorded_design_dir(&mut self) -> Option<PathBuf> {
         let path = CString::new(self.path()).ok()?;
-        let npi = fsdb_sys::npi();
+        // Absent on a Verdi predating the call; the caller falls back to --kdb.
+        let waveform_info = fsdb_sys::design_syms().ok()?.waveform_info?;
         let mut info = fsdb_sys::NpiWaveformInfo::default();
         let rc = {
             let _silence = fsdb_sys::silence_stdio();
-            unsafe { (npi.waveform_info)(path.as_ptr(), &mut info) }
+            unsafe { waveform_info(path.as_ptr(), &mut info) }
         };
         if rc == 0 || info.simv_daidir_path.is_null() {
             return None;
@@ -164,9 +167,10 @@ impl DesignQuery for FsdbBackend {
     }
 
     fn ensure_design(&mut self, kdb: &Path, top: Option<&str>) -> Result<(), String> {
-        // Resolve L1 first: without it there is nothing to answer with, and
-        // failing here gives a better message than a successful design load
-        // followed by "no such symbol".
+        // Resolve the design-side symbols and L1 first: without them there is
+        // nothing to answer with, and failing here beats a successful design
+        // load followed by "no such symbol".
+        fsdb_sys::design_syms()?;
         npi_design_sys::ensure_loaded()?;
         self.load_design(kdb, top)
     }
@@ -219,15 +223,7 @@ impl DesignQuery for FsdbBackend {
         };
         let hops = parse_dump(&text);
 
-        let status = classify(&hops, dir, |d| {
-            let text = match d {
-                Direction::Driver => run(l1.trace_driver_dump),
-                Direction::Load => run(l1.trace_load_dump),
-            };
-            // A failed cross-check query must not fail the whole trace: it can
-            // only downgrade the verdict from testbench_driven to resolved.
-            text.map(|t| parse_dump(&t)).unwrap_or_default()
-        });
+        let status = classify(&hops);
         Ok(TraceOutcome { hops, status })
     }
 }

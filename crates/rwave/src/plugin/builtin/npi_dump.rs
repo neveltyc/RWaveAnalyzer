@@ -23,51 +23,31 @@
 //! `<N>` opens a group, `<D>`/`<L>` is the driving/loading statement, and the
 //! deeper-indented lines under it are the signals that statement touches.
 
-use crate::backend::design::{Direction, Hop, HopKind, TraceStatus};
+use crate::backend::design::{Hop, HopKind, TraceStatus};
 
 /// Decide the overall verdict for a set of hops.
 ///
-/// `other` fetches the opposite direction. It is a closure rather than a value
-/// because running it means a second full NPI traversal, and the call below is
-/// arranged so that only queries which could actually come back
-/// `TestbenchDriven` pay for it.
-pub fn classify(
-    hops: &[Hop],
-    dir: Direction,
-    other: impl FnOnce(Direction) -> Vec<Hop>,
-) -> TraceStatus {
-    if hops.is_empty() {
+/// Control hops are excluded from the judgement, so asking for them with
+/// `--control` cannot change the verdict: how much detail is displayed is not
+/// evidence about where a signal comes from.
+///
+/// There is deliberately no "driven from a testbench" verdict. Inferring one
+/// from a statement appearing in both the driver and load traces looks
+/// plausible and is wrong: `free_cnt <= free_cnt + 1` writes and reads the
+/// same net in one statement, and NPI reports that identical statement on both
+/// sides, so an ordinary free-running counter classifies as testbench-driven.
+/// Verified against Verdi V-2023.12. Distinguishing a virtual-interface drive
+/// needs evidence from NPI about the reference itself, not a coincidence of
+/// source locations.
+pub fn classify(hops: &[Hop]) -> TraceStatus {
+    let structural: Vec<&Hop> = hops.iter().filter(|h| h.kind != HopKind::Control).collect();
+    if structural.is_empty() {
         return TraceStatus::NotFound;
     }
-    if hops.iter().all(|h| h.kind == HopKind::Port) {
+    if structural.iter().all(|h| h.kind == HopKind::Port) {
         // Everything we found is a hierarchy port: the actual driver is outside
         // the part of the design NPI followed.
         return TraceStatus::BoundaryOnly;
-    }
-    if dir != Direction::Driver {
-        return TraceStatus::Resolved;
-    }
-    // The testbench-drive shape is *procedural* assignments only. A continuous
-    // assign or a port is a structural driver by construction and can never be
-    // the "this is really a reader" case, so skip the second traversal for it
-    // — which is the common case, and the traversal is the expensive part.
-    if !hops.iter().all(|h| h.kind == HopKind::Procedural) {
-        return TraceStatus::Resolved;
-    }
-    // A statement that appears verbatim in both this net's driver list and its
-    // load list is not telling us who drives the net — it is the shape a
-    // testbench driving through a virtual interface leaves behind, where the
-    // true driver lives in class-based code an RTL fan-in cannot see. This is
-    // an identity test on (statement, file, line), not a name heuristic, so it
-    // cannot fire on an ordinary self-referencing counter: `q <= q + 1` drives
-    // through one statement and loads through a different one.
-    let loads = other(Direction::Load);
-    if !loads.is_empty() {
-        let key = |h: &Hop| (h.statement.clone(), h.file.clone(), h.line);
-        let load_keys: Vec<_> = loads.iter().map(key).collect();
-        if hops.iter().all(|h| load_keys.contains(&key(h))) {
-            return TraceStatus::TestbenchDriven;
-        }
     }
     TraceStatus::Resolved
 }
@@ -395,15 +375,9 @@ Need pass through
 
     // -- classify -----------------------------------------------------------
 
-    /// Panics if the cross-check traversal is run, so a test can assert that a
-    /// verdict was reached without paying for the second NPI query.
-    fn must_not_query(_d: Direction) -> Vec<Hop> {
-        panic!("classify ran the opposite-direction traversal when it did not need to");
-    }
-
     #[test]
     fn no_hops_reports_not_found() {
-        assert_eq!(classify(&[], Direction::Driver, must_not_query), TraceStatus::NotFound);
+        assert_eq!(classify(&[]), TraceStatus::NotFound);
     }
 
     #[test]
@@ -413,53 +387,41 @@ Need pass through
             .filter(|h| h.kind == HopKind::Port)
             .collect();
         assert!(!ports.is_empty());
-        assert_eq!(
-            classify(&ports, Direction::Driver, must_not_query),
-            TraceStatus::BoundaryOnly
-        );
+        assert_eq!(classify(&ports), TraceStatus::BoundaryOnly);
     }
 
+    /// A free-running counter writes and reads the same net in one statement,
+    /// and NPI reports that identical statement as both its driver and its
+    /// load. Any verdict inferred from that overlap calls ordinary RTL
+    /// testbench-driven; this is the shape that proved it, taken verbatim from
+    /// Verdi V-2023.12 output for `always_ff @(posedge clk) free_cnt <= free_cnt + 1;`.
     #[test]
-    fn a_continuous_assign_driver_skips_the_cross_check_entirely() {
-        // The second traversal is the expensive half of a trace; a structural
-        // driver can never be the testbench-alias case, so it must not run.
-        let drivers = parse_dump(DRIVER_DUMP);
-        assert_eq!(drivers[0].kind, HopKind::ContAssign);
-        assert_eq!(
-            classify(&drivers, Direction::Driver, must_not_query),
-            TraceStatus::Resolved
-        );
+    fn a_self_referential_counter_is_an_ordinary_resolved_driver() {
+        let dump = "\
+<1> source: free_cnt, scope: tb.u_core
+    <D> npiAssignment, free_cnt <= (free_cnt + 'h01);, {/p/dut.sv : 69}
+          npiReg, tb.u_core.free_cnt, {/p/dut.sv : 67}
+";
+        let hops = parse_dump(dump);
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].signals, vec!["tb.u_core.free_cnt"]);
+        assert_eq!(classify(&hops), TraceStatus::Resolved);
     }
 
+    /// Control hops must not move the verdict, or `--control` would change
+    /// what the tool says about a design rather than how much of it it shows.
     #[test]
-    fn a_load_query_never_runs_the_cross_check() {
-        let hops = parse_dump(LOAD_DUMP);
-        assert_eq!(classify(&hops, Direction::Load, must_not_query), TraceStatus::Resolved);
-    }
-
-    #[test]
-    fn a_procedural_driver_that_is_also_a_load_of_the_same_net_is_reported_honestly() {
-        let drivers = parse_dump(CONTROL_DUMP)
+    fn control_hops_do_not_change_the_verdict() {
+        let ports: Vec<Hop> = parse_dump(LOAD_DUMP)
             .into_iter()
-            .filter(|h| h.kind == HopKind::Procedural)
-            .collect::<Vec<_>>();
-        let loads = drivers.clone();
-        assert_eq!(
-            classify(&drivers, Direction::Driver, move |_| loads),
-            TraceStatus::TestbenchDriven
-        );
-    }
-
-    #[test]
-    fn an_ordinary_procedural_driver_is_not_mistaken_for_testbench_drive() {
-        let drivers = parse_dump(CONTROL_DUMP)
-            .into_iter()
-            .filter(|h| h.kind == HopKind::Procedural)
-            .collect::<Vec<_>>();
-        let loads = parse_dump(LOAD_DUMP);
-        assert_eq!(
-            classify(&drivers, Direction::Driver, move |_| loads),
-            TraceStatus::Resolved
-        );
+            .filter(|h| h.kind == HopKind::Port)
+            .collect();
+        let with_control: Vec<Hop> = ports
+            .iter()
+            .cloned()
+            .chain(parse_dump(CONTROL_DUMP).into_iter().filter(|h| h.kind == HopKind::Control))
+            .collect();
+        assert_eq!(classify(&ports), TraceStatus::BoundaryOnly);
+        assert_eq!(classify(&with_control), TraceStatus::BoundaryOnly);
     }
 }
