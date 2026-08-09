@@ -251,10 +251,37 @@ impl Design {
         out
     }
 
+    /// The same signal reached by a shorter path, when exactly one exists.
+    ///
+    /// An interface accessed through a modport port is named for the port in
+    /// the waveform — `tb.u_core.b.clk` — and for its own instance in the
+    /// design — `/tb/b/clk`. Matching on the trailing components finds it. Only
+    /// a unique match is taken: two candidates mean the shorter path does not
+    /// identify which one was asked for, and answering about the wrong signal
+    /// is worse than saying the name did not resolve.
+    fn by_suffix(&self, questa_path: &str) -> Option<Vec<i64>> {
+        let segs: Vec<&str> = questa_path.trim_start_matches('/').split('/').collect();
+        for take in (2..segs.len()).rev() {
+            let tail = format!("/{}", segs[segs.len() - take..].join("/"));
+            let hits: Vec<&String> = self
+                .by_path
+                .keys()
+                .filter(|p| p.ends_with(&tail) && *p != questa_path)
+                .collect();
+            if hits.len() == 1 {
+                return self.by_path.get(hits[0]).cloned();
+            }
+            if hits.len() > 1 {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether the design knows this path at all — the difference between "no
     /// drivers" and "no such signal", which an empty answer cannot express.
     pub fn resolves(&self, questa_path: &str) -> bool {
-        self.by_path.contains_key(questa_path)
+        self.by_path.contains_key(questa_path) || self.by_suffix(questa_path).is_some()
     }
 
     /// Drivers or loads of `questa_path`.
@@ -268,6 +295,7 @@ impl Design {
             .by_path
             .get(questa_path)
             .cloned()
+            .or_else(|| self.by_suffix(questa_path))
             .ok_or_else(|| err(format!("{questa_path} is not in the design database")))?;
 
         // Every context with this path, since the wiring may hang off any of
@@ -442,10 +470,14 @@ fn hop_of(
     Hop {
         group: 0,
         kind: kind_of(&s.kind, &s.spec2),
-        raw_kind: if s.spec2.is_empty() { s.kind.clone() } else { s.spec2.clone() },
+        raw_kind: if s.spec2.is_empty() {
+            s.kind.clone()
+        } else {
+            identifier(&s.spec2).to_string()
+        },
         // The database records a location but no text; the caller fills this in
         // from the source file when it can read it.
-        statement: s.spec2.clone(),
+        statement: identifier(&s.spec2).to_string(),
         scope,
         file,
         line,
@@ -472,6 +504,16 @@ fn join(scope: &str, local: &str) -> String {
 /// own `#tag#suffix` statement names are legal by construction and pass.
 fn reportable(name: &str) -> bool {
     !name.is_empty() && !name.contains([' ', '(', ')', ','])
+}
+
+/// The identifier out of a shape's name.
+///
+/// A memory arrives as `cpuregs (32 X 32 )`: the leading token is the name the
+/// RTL declares, and the rest is Questa describing its shape. Nothing legal in
+/// an identifier contains a space, so cutting at the first one recovers the
+/// name instead of discarding the endpoint.
+fn identifier(name: &str) -> &str {
+    name.split_whitespace().next().unwrap_or(name)
 }
 
 /// Questa's construct name decides the kind; its shape type is the fallback.
