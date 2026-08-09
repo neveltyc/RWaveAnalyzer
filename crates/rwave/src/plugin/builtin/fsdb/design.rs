@@ -38,14 +38,6 @@ const ERR_PREFIX: &str = "rwave-fsdb";
 #[derive(Default)]
 pub struct DesignSession {
     loaded: Option<(PathBuf, Option<String>)>,
-    /// The argv handed to `npi_load_design`, kept alive for as long as the
-    /// design is loaded.
-    ///
-    /// `npi_load_design` takes `char**` by value, which is consistent with
-    /// parse-and-copy, but NPI is closed-source and the sibling `npi_init` is
-    /// documented in this crate as retaining its argv. Outliving the design
-    /// costs a few dozen bytes and removes the question entirely.
-    _argv: Vec<CString>,
 }
 
 impl FsdbBackend {
@@ -85,14 +77,25 @@ impl FsdbBackend {
             );
         }
         let argc = argv_owned.len() as c_int;
+        // Both the strings and the `char**` array are leaked, for the same
+        // reason `npi_init` leaks its own argv in `fsdb_sys`: NPI is
+        // closed-source, `npi_load_design` keeps the design in *process*-global
+        // state, and a design outlives the session that asked for it. Keeping
+        // only the strings alive would still leave the array dangling, which is
+        // the object a retained `char**` actually points at. A few dozen bytes
+        // per distinct design settles the question.
+        //
         // NULL-terminated like a real `main` argv: `argc` says how many there
         // are, but an option loop that walks to NULL instead would otherwise
         // run off the end of the allocation.
-        let mut argv: Vec<*mut c_char> = argv_owned
-            .iter()
-            .map(|s| s.as_ptr() as *mut c_char)
-            .chain(std::iter::once(std::ptr::null_mut()))
-            .collect();
+        let argv: &'static mut [*mut c_char] = Box::leak(
+            argv_owned
+                .into_iter()
+                .map(|s| s.into_raw())
+                .chain(std::iter::once(std::ptr::null_mut()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
 
         let npi = fsdb_sys::npi();
         // Loading prints progress and license chatter to stdout/stderr, which
@@ -111,7 +114,6 @@ impl FsdbBackend {
             ));
         }
         self.design.loaded = Some(want);
-        self.design._argv = argv_owned;
         Ok(())
     }
 

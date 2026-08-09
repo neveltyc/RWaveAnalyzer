@@ -129,6 +129,8 @@ impl Default for NpiWaveformInfo {
 #[allow(dead_code)]
 pub struct LibNpi {
     _library: Library,
+    /// The file `_library` was opened from. See [`loaded_path`].
+    path: PathBuf,
 
     /// `npi_load_design(int argc, char** argv)` — loads an elaborated design
     /// database so the connectivity APIs have something to answer from. Bound
@@ -198,10 +200,15 @@ pub fn ensure_loaded() -> Result<(), String> {
     }
 }
 
-/// The `libNPI.so` path that was actually loaded, for callers that need to
-/// re-open the same object (see `npi_design_sys`'s RTLD_GLOBAL promotion).
-pub fn resolved_path() -> Result<PathBuf, String> {
-    locate_npi()
+/// The path `libNPI.so` was actually loaded from.
+///
+/// Recorded at load rather than re-resolved, so a caller re-opening the same
+/// object cannot end up with a *different* file: resolution reads the
+/// environment and the executable's directory, and re-running it after a
+/// `chdir` or an environment change could map a second, distinct copy of
+/// libNPI whose `npi_init` never ran.
+pub fn loaded_path() -> Option<PathBuf> {
+    LIBNPI.get().and_then(|r| r.as_ref().ok()).map(|l| l.path.clone())
 }
 
 pub fn npi() -> &'static LibNpi {
@@ -347,6 +354,7 @@ fn load_npi_once() -> Result<LibNpi, String> {
 
     Ok(LibNpi {
         _library: lib,
+        path,
         load_design,
         handle_by_name,
         release_handle,

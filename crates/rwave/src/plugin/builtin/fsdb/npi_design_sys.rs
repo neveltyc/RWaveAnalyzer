@@ -112,9 +112,9 @@ fn load_once() -> Result<LibNpiL1, String> {
     // correct for its own use and must stay that way; re-opening it here with
     // RTLD_GLOBAL promotes the already-loaded object into the global scope
     // (dlopen is refcounted and returns the same handle) without disturbing
-    // anything. Without this, the dlopen below fails with a wall of undefined
-    // `npi_*` symbols.
-    if let Ok(npi_path) = fsdb_sys::resolved_path() {
+    // anything. Without it L1 has nothing to bind its `npi_*` calls to, and
+    // under RTLD_LAZY that surfaces at the first call rather than at load.
+    if let Some(npi_path) = fsdb_sys::loaded_path() {
         let promoted = unsafe {
             libloading::os::unix::Library::open(
                 Some(&npi_path),
@@ -122,7 +122,9 @@ fn load_once() -> Result<LibNpiL1, String> {
             )
         };
         if let Ok(lib) = promoted {
-            // Keep the extra refcount: dropping it would undo the promotion.
+            // Held rather than dropped for tidiness; the promotion itself is
+            // permanent, since l_global is only cleared when an object is
+            // unloaded and fsdb_sys' own handle keeps the count above zero.
             std::mem::forget(lib);
         }
     }
@@ -223,9 +225,8 @@ where
     const CAP: usize = 1 << 20;
     let mut buf = vec![0u8; CAP];
     let mode = CString::new("w").expect("static");
-    // Hand stdio CAP-1 so the final byte is guaranteed to stay the NUL from the
-    // zeroed allocation; the scan below then always terminates in bounds even
-    // if the library fills the buffer completely.
+    // Hand stdio CAP-1 so the final byte stays the NUL from the zeroed
+    // allocation and the scan below always terminates in bounds.
     let file = unsafe { fmemopen(buf.as_mut_ptr() as *mut c_void, CAP - 1, mode.as_ptr()) };
     if file.is_null() {
         return Err(bridge_err(
@@ -233,19 +234,69 @@ where
             "could not allocate a capture buffer",
         ));
     }
-    {
+    let rc = {
         let _guard = FileGuard(file);
-        let _rc = f(file);
+        f(file)
+    };
+    // The count is the number of groups written; negative is an NPI-side
+    // failure. Letting that through would surface as "no driver found", which
+    // is a different fact.
+    if rc < 0 {
+        return Err(bridge_err(ERR_PREFIX, format!("NPI trace failed (rc={rc})")));
     }
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    // A completely full buffer means the library had more to say. Reporting a
-    // truncated dump as if it were complete would silently drop drivers, and
-    // the cut-off record would parse into a bogus one.
-    if end >= CAP - 1 {
+    // A full buffer means the library had more to say. Reporting a truncated
+    // dump as complete would silently drop drivers and parse the severed last
+    // record into a bogus one.
+    //
+    // The threshold is CAP-2, not CAP-1, because glibc reserves the final byte
+    // of the region it was given for a terminator: on overflow it writes
+    // `buffer[size-1] = 0`, which with size = CAP-1 lands at CAP-2. A CAP-1
+    // threshold is unreachable there. Verified against glibc 2.31.
+    if end >= CAP - 2 {
         return Err(bridge_err(
             ERR_PREFIX,
             "NPI trace output exceeded the capture buffer",
         ));
     }
     Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" {
+        fn fwrite(ptr: *const c_void, size: usize, n: usize, stream: *mut c_void) -> usize;
+    }
+
+    /// Write `n` bytes of 'A' into the capture stream.
+    fn fill(n: usize) -> Result<String, String> {
+        capture_dump(|file| {
+            let chunk = vec![b'A'; n];
+            unsafe { fwrite(chunk.as_ptr() as *const c_void, 1, n, file) };
+            0
+        })
+    }
+
+    #[test]
+    fn a_short_dump_comes_back_whole() {
+        assert_eq!(fill(1024).unwrap().len(), 1024);
+    }
+
+    #[test]
+    fn an_overlong_dump_is_refused_rather_than_silently_cut() {
+        // The detection threshold depends on where libc puts its terminator:
+        // glibc reserves the last byte of the region it was given, so a
+        // CAP-1 threshold never fires and a truncated dump would be reported
+        // as a complete driver list.
+        let err = fill((1 << 20) + 4096).unwrap_err();
+        assert!(err.contains("exceeded the capture buffer"), "got {err}");
+    }
+
+    #[test]
+    fn a_negative_return_code_is_an_error_not_an_empty_result() {
+        let err = capture_dump(|_| -1).unwrap_err();
+        assert!(err.contains("NPI trace failed"), "got {err}");
+    }
 }
