@@ -92,6 +92,22 @@ pub mod callback_response {
     pub const STOP: i32 = 1;
 }
 
+/// `WlfCallbackReason` values the scan consumes; the enum starts at
+/// `WLF_STARTLOG = 0x01`. Reasons not listed are markers the trace decode
+/// ignores: `ENDLOG` repeats the current value at the end of a scan or
+/// logging bracket, and `DNE` fires where the signal does not exist.
+pub mod callback_reason {
+    /// Start of a signal's recording bracket; at a scan starting inside the
+    /// bracket, the carried value in effect there.
+    pub const STARTLOG: i32 = 1;
+    /// A real value transition.
+    pub const EVENT: i32 = 3;
+}
+
+/// endDelta value meaning "through the last delta cycle of the end time".
+/// Captures logged with `-nowlfcollapse` keep per-delta events.
+pub const WLF_LAST_DELTA: c_int = 0x7fff_ffff;
+
 /// `WlfSymbolSel` bit masks for scope detection. Mirrors the
 /// `wlfSel*` macros in `wlf_api.h`. We only need the "is this a scope?"
 /// classification here — full sel decoding lives in higher layers.

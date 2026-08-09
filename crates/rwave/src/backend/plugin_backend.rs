@@ -22,7 +22,7 @@
 //! that borrow is `'static` because cache entries are never removed.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::{LazyLock, Mutex};
 
 use libloading::Library;
@@ -525,13 +525,14 @@ impl WaveformBackend for PluginBackend {
         self.run_trace_decode(sids, |ptr, len, emit, ctx| {
             // SAFETY: load_traces validated non-NULL on load; we hand it owned
             // pointers and a ctx whose layout we control.
-            let _rc = unsafe { (vtable.load_traces.unwrap())(handle, ptr, len, emit, ctx) };
+            let rc = unsafe { (vtable.load_traces.unwrap())(handle, ptr, len, emit, ctx) };
+            warn_partial_decode(rc);
         })
     }
 
     fn supports_windowed(&self) -> bool {
-        // Specialized iff the plugin filled the (optional, appended) vtable
-        // slot. Built-in NPI does; WLF and older/external plugins leave it NULL.
+        // Specialized iff the plugin filled the optional vtable slot. Both
+        // built-ins do; external plugins predating the slot leave it NULL.
         self.vtable().load_traces_windowed.is_some()
     }
 
@@ -554,7 +555,8 @@ impl WaveformBackend for PluginBackend {
         self.run_trace_decode(sids, |ptr, len, emit, ctx| {
             // SAFETY: `windowed` is non-NULL (matched `Some`); same pointer and
             // ctx contract as load_traces, plus the two tick bounds.
-            let _rc = unsafe { windowed(handle, ptr, len, from, to_tick, emit, ctx) };
+            let rc = unsafe { windowed(handle, ptr, len, from, to_tick, emit, ctx) };
+            warn_partial_decode(rc);
         })
     }
 }
@@ -570,8 +572,8 @@ struct EmitCtx<'a> {
 }
 
 /// C-ABI trampoline plugins call once per change event. Decodes the
-/// value into the appropriate [`RawValue`] variant and appends to the
-/// caller's `Vec<SignalTrace>`.
+/// value into the appropriate [`RawValue`] variant and folds it into the
+/// caller's `Vec<SignalTrace>` via [`fold_change`].
 unsafe extern "C" fn emit_trampoline(
     ctx: *mut c_void,
     backend_sid: u64,
@@ -611,9 +613,60 @@ unsafe extern "C" fn emit_trampoline(
         ValueKind::Event => RawValue::Event,
     };
 
-    let trace = &mut ctx.output[idx];
-    trace.times.push(time_tick);
-    trace.values.push(raw);
+    fold_change(&mut ctx.output[idx], kind, time_tick, raw);
+}
+
+/// Fold one emitted change into a trace: at most one entry per tick and no
+/// consecutive equal values, events exempt. The duplicate suppression
+/// matches the wellen decode; the per-tick collapse is stricter, since
+/// wellen keeps same-tick distinct values. That is deliberate: the vendor
+/// libraries behind this trampoline report transport granularity, not
+/// user-visible writes. libwlf delivers a wide vector one 32-bit word per
+/// callback and NPI can deliver same-tick glitch VCs, so the last write per
+/// tick wins, and a tick whose net value equals the previous entry is no
+/// change at all.
+fn fold_change(trace: &mut SignalTrace, kind: ValueKind, tick: i64, raw: RawValue) {
+    if kind == ValueKind::Event {
+        trace.times.push(tick);
+        trace.values.push(raw);
+        return;
+    }
+    match trace.times.last() {
+        Some(&last_t) if last_t == tick => {
+            let n = trace.values.len();
+            trace.values[n - 1] = raw;
+            // Net value equal to the entry before → the tick is a no-change.
+            if n >= 2 && values_equal(&trace.values[n - 1], &trace.values[n - 2]) {
+                trace.times.pop();
+                trace.values.pop();
+            }
+        }
+        Some(_) if values_equal(trace.values.last().expect("non-empty"), &raw) => {}
+        _ => {
+            trace.times.push(tick);
+            trace.values.push(raw);
+        }
+    }
+}
+
+/// Value equality as the wellen decode's duplicate check sees it: reals by
+/// bit pattern, so NaN equals NaN and 0.0 differs from -0.0; everything
+/// else by content. Same rule as the FST windowed reader.
+fn values_equal(a: &RawValue, b: &RawValue) -> bool {
+    match (a, b) {
+        (RawValue::Real(x), RawValue::Real(y)) => x.to_bits() == y.to_bits(),
+        _ => a == b,
+    }
+}
+
+/// A nonzero backend return means the decode stopped partway. The traces
+/// collected so far are consumed regardless, as the trait has no error
+/// channel; say so rather than presenting them as complete. The backend has
+/// already printed its own diagnostic.
+fn warn_partial_decode(rc: c_int) {
+    if rc != 0 {
+        eprintln!("rwave: backend trace decode reported rc={rc}; results may be incomplete");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -674,5 +727,107 @@ fn map_type_str(s: &str) -> &'static str {
         "bit" => "bit",
         "string" => "string",
         _ => "wire",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(s: &str) -> RawValue {
+        RawValue::Bits(BitStr::new(s))
+    }
+
+    fn trace() -> SignalTrace {
+        SignalTrace {
+            times: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+
+    fn shape(t: &SignalTrace) -> Vec<(i64, String)> {
+        t.times
+            .iter()
+            .zip(t.values.iter())
+            .map(|(t, v)| (*t, v.raw_str().into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn fold_distinct_ticks_append() {
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 1, bits("0"));
+        fold_change(&mut t, ValueKind::Bits, 5, bits("1"));
+        assert_eq!(shape(&t), vec![(1, "0".into()), (5, "1".into())]);
+    }
+
+    #[test]
+    fn fold_same_tick_last_wins() {
+        // libwlf word-partial delivery: three callbacks at one tick, each a
+        // fuller update; only the final value survives.
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 1, bits("0000"));
+        fold_change(&mut t, ValueKind::Bits, 7, bits("0011"));
+        fold_change(&mut t, ValueKind::Bits, 7, bits("1111"));
+        assert_eq!(shape(&t), vec![(1, "0000".into()), (7, "1111".into())]);
+    }
+
+    #[test]
+    fn fold_same_tick_net_nochange_disappears() {
+        // Glitch: value pulses and returns within one tick. The net entry
+        // equals the previous state, so the tick vanishes entirely.
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 1, bits("0"));
+        fold_change(&mut t, ValueKind::Bits, 7, bits("1"));
+        fold_change(&mut t, ValueKind::Bits, 7, bits("0"));
+        assert_eq!(shape(&t), vec![(1, "0".into())]);
+        // A later same-tick callback may then re-establish a change.
+        fold_change(&mut t, ValueKind::Bits, 7, bits("1"));
+        assert_eq!(shape(&t), vec![(1, "0".into()), (7, "1".into())]);
+    }
+
+    #[test]
+    fn fold_consecutive_duplicate_suppressed() {
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 1, bits("1"));
+        fold_change(&mut t, ValueKind::Bits, 5, bits("1"));
+        fold_change(&mut t, ValueKind::Bits, 9, bits("0"));
+        assert_eq!(shape(&t), vec![(1, "1".into()), (9, "0".into())]);
+    }
+
+    #[test]
+    fn fold_first_entry_at_any_tick_kept() {
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 42, bits("x"));
+        assert_eq!(shape(&t), vec![(42, "x".into())]);
+    }
+
+    #[test]
+    fn fold_events_never_collapsed() {
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Event, 3, RawValue::Event);
+        fold_change(&mut t, ValueKind::Event, 3, RawValue::Event);
+        fold_change(&mut t, ValueKind::Event, 4, RawValue::Event);
+        assert_eq!(t.times, vec![3, 3, 4]);
+    }
+
+    #[test]
+    fn fold_real_equality_by_bit_pattern() {
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Real, 1, RawValue::Real(f64::NAN));
+        fold_change(&mut t, ValueKind::Real, 2, RawValue::Real(f64::NAN));
+        assert_eq!(t.times, vec![1], "NaN repeat is a duplicate");
+        fold_change(&mut t, ValueKind::Real, 3, RawValue::Real(0.0));
+        fold_change(&mut t, ValueKind::Real, 4, RawValue::Real(-0.0));
+        assert_eq!(t.times, vec![1, 3, 4], "-0.0 differs from 0.0 by bits");
+    }
+
+    #[test]
+    fn fold_seed_then_change_at_next_tick() {
+        // Windowed WLF shape: carried seed at from-1, real change at from.
+        let mut t = trace();
+        fold_change(&mut t, ValueKind::Bits, 99, bits("1")); // STARTLOG seed
+        fold_change(&mut t, ValueKind::Bits, 100, bits("0")); // event at from
+        assert_eq!(shape(&t), vec![(99, "1".into()), (100, "0".into())]);
     }
 }
