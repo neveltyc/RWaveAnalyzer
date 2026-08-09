@@ -20,6 +20,14 @@ up from a deep leaf.
 and only for an FSDB opened through the built-in Verdi NPI backend: connectivity
 comes from an elaborated design database, not from the waveform.
 
+WLF point queries stop replaying the run. `snapshot --at` and `compare` on
+`.wlf` now seek: libwlf's range scan starts at the window and supplies each
+signal's carried value at scan start, so a query reads the instant, not the
+history before it. On a 48 MB Questa capture of 20 M time steps that is ~2 ms
+at flat memory where the full decode took ~600 ms. One deviation, documented
+on the backend: the carried value is tagged one tick before the window,
+because libwlf cannot report when it last changed.
+
 ### Added
 - `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
 - `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`.
@@ -42,6 +50,25 @@ comes from an elaborated design database, not from the waveform.
   counting scopes where `list` counts signals.
 - `trace` and `tree` take a second positional argument. Other commands reject
   extra positionals with the message they always had.
+
+### Performance
+- **WLF seeks with `wlfReadDataOverRange`.** The windowed vtable slot is now
+  filled; scan cost is proportional to the window's time steps, independent of
+  where in the file the window sits.
+
+### Fixed
+- **Plugin traces are folded to one net entry per tick**, last write wins,
+  with consecutive duplicates suppressed as in the wellen decode; events are
+  exempt. The per-tick collapse is stricter than wellen because the vendor
+  libraries report transport granularity, not user-visible writes: libwlf
+  delivers a wide vector one 32-bit word per callback, which made a 256-bit
+  bus count 8 `summary` changes per real transition and put 7 transient
+  partial rows per instant in `dump`, and its end-of-scan ENDLOG marker
+  appended a fake trailing change to every signal. FSDB same-tick glitch VCs
+  collapse to their net value the same way.
+- WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
+  `-nowlfcollapse` keep their end-tick delta events; default delta-collapsed
+  captures are unaffected.
 
 ### Internal
 - Design connectivity is a Rust trait (`DesignQuery`) reached through a
