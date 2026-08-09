@@ -216,21 +216,17 @@ impl WlfBackend {
     /// window followed by every change in the window, via `emit` in time
     /// order. `to == i64::MAX` means "to the end".
     ///
-    /// libwlf makes this a seek, not a replay: `wlfReadDataOverRange` with a
-    /// mid-file start walks only the window's time steps (measured on Questa
-    /// 10.7c: a 200 ns window anywhere in a 20 M-step capture costs ~1–2 ms
-    /// vs ~600 ms for the full scan), and at scan start every registered
-    /// signal already being logged there fires a `STARTLOG` callback carrying
-    /// its value entering the window — the seed comes free. A signal whose
-    /// logging starts inside the window fires its STARTLOG mid-scan at its
-    /// true tick; one whose logging starts after the window fires nothing at
-    /// all and stays absent, exactly matching the windowed contract.
+    /// `wlfReadDataOverRange` seeks rather than replays: a mid-file scan
+    /// walks only the window's time steps, and each registered signal
+    /// already being logged at the window start fires a `STARTLOG` callback
+    /// carrying its value there. A signal whose logging starts inside the
+    /// window fires STARTLOG at its true tick; one whose logging starts
+    /// after the window fires nothing and stays absent.
     ///
-    /// The one deviation from the FST/FSDB backends: libwlf does not report
-    /// *when* the carried value was last changed (its reverse-search API is
-    /// non-functional outside a live vsim session), so the seed is tagged at
-    /// `from - 1` — see [`run_scan`] for why `- 1` — rather than the change's
-    /// true tick. Point/window consumers read the seed's value, not its time.
+    /// Deviation from the FST/FSDB backends: libwlf does not report when the
+    /// carried value last changed, so the seed is tagged `from - 1` rather
+    /// than the true tick. Window consumers read the seed's value, not its
+    /// time.
     ///
     /// # Safety
     /// Same contract as [`load_traces`](Self::load_traces).
@@ -260,8 +256,8 @@ impl WlfBackend {
 
     // ---- internals -------------------------------------------------------
 
-    /// End tick for scans: the value captured at open, else `wlfFileEndTime`
-    /// (some writers leave `WlfFileInfo.lastTime` zero).
+    /// End tick for scans: the value captured at open, else `wlfFileEndTime`;
+    /// some writers leave `WlfFileInfo.lastTime` zero.
     fn resolve_end_time(&self) -> i64 {
         if self.end_time > 0 {
             return self.end_time;
@@ -283,29 +279,22 @@ impl WlfBackend {
         self.decl_cache = Some(out);
     }
 
-    /// Run a libwlf scan over `[from, to]` for the requested `sids`. One
-    /// IMMEDIATE signal-event callback per sid; a single time-advance
-    /// callback updates `cur_time` so each signal callback can tag its
-    /// emit with the right tick.
+    /// Run a libwlf scan over `[from, to]` for the requested `sids`: one
+    /// IMMEDIATE signal-event callback per sid, plus a shared time-advance
+    /// callback that keeps `cur_time` current for tagging.
     ///
-    /// Emission rules (see [`signal_event_cb`]): only `EVENT` and
-    /// `STARTLOG` reasons produce values; `ENDLOG` (a fake trailing
-    /// change libwlf fires at scan end with the then-current value) and
-    /// everything else are dropped. Callbacks arriving before the first
-    /// time-advance CB belong to the scan start: a real change exactly at
-    /// `from` (EVENT) is tagged `from`, while a carried value (STARTLOG)
-    /// is tagged `from - 1` so window consumers — which treat trace
-    /// entries at `>= from` as in-window changes — never mistake the
-    /// carried state for an event at `from`. A full scan starts at 0, so
-    /// there its STARTLOG keeps today's tag of 0 (the initial value _is_
-    /// the t=0 state, as in a VCD `$dumpvars` block).
+    /// Only `EVENT` and `STARTLOG` callbacks emit values; `ENDLOG` repeats
+    /// the current value at scan end, `DNE` carries none, and both are
+    /// dropped. Callbacks arriving before the first time-advance callback
+    /// belong to the scan start: an EVENT there is a real change at `from`
+    /// and is tagged `from`, while a STARTLOG is the carried value and is
+    /// tagged `from - 1`, so window consumers never read it as a change at
+    /// `from`. A full scan starts at 0, where STARTLOG keeps tag 0: the
+    /// initial value is the t=0 state.
     ///
-    /// Memory model: the [`SharedScanCtx`] and one [`PerSignalScanData`]
-    /// per signal are heap-allocated and their addresses handed to
-    /// libwlf as `cbData`. We keep them in Vecs / Boxes for the full
-    /// duration of the scan so the addresses stay valid. After the scan
-    /// returns, the value ids are destroyed, the pack is destroyed, and
-    /// the Boxes drop normally.
+    /// The [`SharedScanCtx`] and per-signal scan data are heap-allocated,
+    /// their addresses handed to libwlf as `cbData`, and freed only after
+    /// scan and pack teardown.
     fn run_scan(
         &mut self,
         sids: &[u64],
@@ -350,12 +339,10 @@ impl WlfBackend {
         });
         let shared_ptr: *mut SharedScanCtx = &mut *shared;
 
-        // Per-signal scan data, heap-allocated and handed to libwlf as raw
-        // cbData pointers. Ownership goes through Box::into_raw (reclaimed
-        // after the scan) rather than a Vec<Box<..>>: moving a Box — a Vec
-        // push, a realloc — invalidates raw pointers derived from it under
-        // Rust's aliasing rules, and libwlf holds these pointers for the
-        // whole scan.
+        // Per-signal scan data; libwlf holds the raw cbData pointers for the
+        // whole scan. Ownership goes through Box::into_raw and back via
+        // Box::from_raw after teardown, because moving a Box invalidates raw
+        // pointers derived from it.
         let mut sig_datas: Vec<*mut PerSignalScanData> = Vec::with_capacity(sids.len());
 
         let scan_result = (|| -> Result<(), String> {
@@ -401,8 +388,8 @@ impl WlfBackend {
                 };
                 if rc != 0 {
                     // SAFETY: val_id was created by wlfValueCreate; data_ptr
-                    // came from Box::into_raw just above and was never shared
-                    // (registration failed), so reclaiming it here is sound.
+                    // came from Box::into_raw just above and registration
+                    // failed, so libwlf never kept it.
                     unsafe { (lib.wlf_value_destroy)(val_id) };
                     drop(unsafe { Box::from_raw(data_ptr) });
                     return Err(bridge_err(ERR_PREFIX, format!(
@@ -418,9 +405,8 @@ impl WlfBackend {
                 return Ok(());
             }
 
-            // endDelta = WLF_LAST_DELTA so files logged with -nowlfcollapse
-            // keep their end-tick delta events (0 and LAST_DELTA are
-            // identical on default delta-collapsed captures).
+            // endDelta = WLF_LAST_DELTA so captures logged with
+            // -nowlfcollapse keep their end-tick delta events.
             // SAFETY: pack/time_advance_cb/shared_ptr all valid; delta CB
             // slot is declared as opaque void* so passing NULL is allowed.
             let rc = unsafe {
@@ -447,8 +433,8 @@ impl WlfBackend {
         })();
 
         // Cleanup: destroy each WlfValueId, then the pack, then reclaim the
-        // scan-data boxes — libwlf may still dereference cbData during pack
-        // teardown, so the boxes must outlive wlfPackDestroy.
+        // scan-data boxes last; libwlf may still dereference cbData during
+        // pack teardown.
         for &p in &sig_datas {
             // SAFETY: p came from Box::into_raw above; value_id was created
             // via wlfValueCreate.
@@ -488,15 +474,12 @@ struct SharedScanCtx {
     cur_time: i64,
     #[allow(dead_code)] // delta is tracked for future delta-mode support
     cur_delta: c_int,
-    /// Tick to stamp on carried-value STARTLOG callbacks that arrive before
-    /// the first time-advance CB: one tick before a mid-file window's start
-    /// (so the seed sorts before, and is never confused with, a change at
-    /// `from`); 0 when the scan starts at 0 — full scans and zero-anchored
-    /// windows, where the initial value genuinely is the t=0 state.
+    /// Tick stamped on carried-value STARTLOG callbacks before the first
+    /// time-advance callback: one before the window start, or 0 when the
+    /// scan starts at 0.
     seed_tag: i64,
-    /// Set by the first time-advance CB. Until then the scan is delivering
-    /// its start-of-window state (STARTLOG stuffing + changes exactly at
-    /// `from`).
+    /// Set by the first time-advance callback; until then the scan is
+    /// delivering its start-of-window state.
     have_time: bool,
     rwave_emit: RwaveEmit,
     rwave_ctx: *mut c_void,
@@ -536,11 +519,10 @@ unsafe extern "C" fn time_advance_cb(
 }
 
 /// libwlf signal-event callback. Pulls the current value via
-/// `wlfValueToString`, tags it per the reason (see [`WlfBackend::run_scan`]
-/// for the tagging rules), and hands it back to rwave via the cached
-/// `RwaveEmit`. Reasons other than EVENT / STARTLOG carry no change —
-/// ENDLOG repeats the current value at scan end, DNE has no value at all —
-/// and are dropped. cb_data is a `*mut PerSignalScanData`.
+/// `wlfValueToString`, tags it per the rules in [`WlfBackend::run_scan`],
+/// and hands it back to rwave via the cached `RwaveEmit`. Reasons other
+/// than EVENT and STARTLOG carry no change and are dropped. cb_data is a
+/// `*mut PerSignalScanData`.
 unsafe extern "C" fn signal_event_cb(cb_data: *mut c_void, reason: c_int) -> c_int {
     if cb_data.is_null() {
         return callback_response::CONTINUE;
@@ -752,23 +734,22 @@ fn drain_iter(iter: *mut c_void) -> Vec<*mut c_void> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Clamp a windowed request onto the file's `[0, end]` axis: a `from` beyond
-/// the end anchors at the final instant (the stuffed values there answer any
-/// later query); `to` at or beyond the end — including the i64::MAX sentinel —
-/// becomes the end itself; a degenerate `to < from` must not shrink the scan
-/// below its start. A negative `end` (a corrupt or empty file where
-/// `wlfFileEndTime` failed) floors at 0 — `Ord::clamp` would panic on an
-/// inverted range, and this is called under an `extern "C"` frame.
+/// Clamp a windowed request onto the file's `[0, end]` axis. A `from` beyond
+/// the end anchors at the final instant, whose stuffed values answer any
+/// later query. A `to` at or beyond the end, including the i64::MAX
+/// sentinel, becomes the end. A `to` below `from` must not shrink the scan
+/// below its start, and a negative `end` floors at 0 because `Ord::clamp`
+/// panics on an inverted range under this `extern "C"` frame.
 fn clamp_window(from: i64, to: i64, end: i64) -> (i64, i64) {
     let end = end.max(0);
     let from = from.clamp(0, end);
     (from, to.min(end).max(from))
 }
 
-/// Tick stamped on carried-value STARTLOG callbacks at scan start: one before
-/// the window so consumers never read the carried state as a change at `from`
-/// (a full scan starts at 0, where the initial value genuinely is the t=0
-/// state).
+/// Tick stamped on carried-value STARTLOG callbacks at scan start: one
+/// before the window, so consumers never read the carried state as a change
+/// at `from`. A scan starting at 0 keeps tag 0; the initial value is the
+/// t=0 state.
 fn seed_tag_for(from: i64) -> i64 {
     if from > 0 { from - 1 } else { 0 }
 }
@@ -879,8 +860,7 @@ mod tests {
 
     #[test]
     fn clamp_window_negative_end_collapses_to_zero() {
-        // A corrupt end time must clamp, not panic (Ord::clamp asserts on an
-        // inverted range, and this runs under an extern "C" frame).
+        // A corrupt end time must clamp, not panic.
         assert_eq!(clamp_window(100, 200, -7), (0, 0));
     }
 

@@ -551,9 +551,8 @@ impl WaveformBackend for PluginBackend {
     }
 
     fn supports_windowed(&self) -> bool {
-        // Specialized iff the plugin filled the (optional, appended) vtable
-        // slot. Both built-ins (NPI FSDB, WLF) do; external plugins predating
-        // the slot leave it NULL.
+        // Specialized iff the plugin filled the optional vtable slot. Both
+        // built-ins do; external plugins predating the slot leave it NULL.
         self.vtable().load_traces_windowed.is_some()
     }
 
@@ -673,22 +672,14 @@ unsafe extern "C" fn emit_trampoline(
 }
 
 /// Fold one emitted change into a trace: at most one entry per tick and no
-/// consecutive equal values. The duplicate suppression matches the wellen
-/// decode; the per-tick collapse is stricter — wellen keeps same-tick
-/// distinct values (a VCD glitch stays visible), while here the last write
-/// per tick wins and a tick whose net value equals the previous entry's is
-/// no change at all.
-///
-/// The stricter rule is deliberate: the vendor libraries behind this
-/// trampoline report transport granularity, not user-visible writes — libwlf
-/// delivers a wide vector one 32-bit word per callback (each carrying the
-/// full, partially-updated vector) and NPI can deliver same-tick glitch VCs
-/// — and the vendors' own tools display the collapsed net value. Without
-/// this, a 256-bit bus counted 8 "changes" per real transition in `summary`
-/// and printed 8 rows (7 of them transient partial values) per instant in
-/// `dump`.
-///
-/// Events are exempt: every occurrence is meaningful, none carry values.
+/// consecutive equal values, events exempt. The duplicate suppression
+/// matches the wellen decode; the per-tick collapse is stricter, since
+/// wellen keeps same-tick distinct values. That is deliberate: the vendor
+/// libraries behind this trampoline report transport granularity, not
+/// user-visible writes. libwlf delivers a wide vector one 32-bit word per
+/// callback and NPI can deliver same-tick glitch VCs, so the last write per
+/// tick wins, and a tick whose net value equals the previous entry is no
+/// change at all.
 fn fold_change(trace: &mut SignalTrace, kind: ValueKind, tick: i64, raw: RawValue) {
     if kind == ValueKind::Event {
         trace.times.push(tick);
@@ -714,8 +705,8 @@ fn fold_change(trace: &mut SignalTrace, kind: ValueKind, tick: i64, raw: RawValu
 }
 
 /// Value equality as the wellen decode's duplicate check sees it: reals by
-/// bit pattern (NaN == NaN, 0.0 != -0.0), everything else by content. Same
-/// rule as the FST windowed reader.
+/// bit pattern, so NaN equals NaN and 0.0 differs from -0.0; everything
+/// else by content. Same rule as the FST windowed reader.
 fn values_equal(a: &RawValue, b: &RawValue) -> bool {
     match (a, b) {
         (RawValue::Real(x), RawValue::Real(y)) => x.to_bits() == y.to_bits(),
@@ -723,10 +714,10 @@ fn values_equal(a: &RawValue, b: &RawValue) -> bool {
     }
 }
 
-/// A nonzero backend return means the decode stopped partway; the traces
-/// collected so far are consumed regardless (the trait has no error channel),
-/// so say so instead of presenting them as complete. The backend has already
-/// printed its own diagnostic.
+/// A nonzero backend return means the decode stopped partway. The traces
+/// collected so far are consumed regardless, as the trait has no error
+/// channel; say so rather than presenting them as complete. The backend has
+/// already printed its own diagnostic.
 fn warn_partial_decode(rc: c_int) {
     if rc != 0 {
         eprintln!("rwave: backend trace decode reported rc={rc}; results may be incomplete");

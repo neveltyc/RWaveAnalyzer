@@ -146,9 +146,9 @@ typedef struct {
                         const uint64_t* sids, size_t n_sids,
                         RwaveEmit emit, void* ctx);
 
-    /* windowed trace decode (optional — leave NULL when the format cannot
-       seek by time; rwave then falls back to load_traces). Per signal:
-       its last change at-or-before from_tick, then every change in
+    /* Windowed trace decode, optional: NULL means the format cannot seek
+       by time and rwave falls back to load_traces. Per signal: the last
+       change at-or-before from_tick, then every change in
        (from_tick, to_tick]. to_tick = INT64_MAX means "to the end". */
     int             (*load_traces_windowed)(
                         RwaveSession*,
@@ -162,10 +162,9 @@ const RwaveBackend* rwave_backend(const char** err_out);
 ```
 
 `RwaveEmit` calls must be in nondecreasing time order per signal. Several
-emissions may share one tick (a vendor library reporting a wide vector
-word-by-word, or same-tick glitches); rwave folds them — the last value
-per tick wins, a tick whose net value equals the previous entry is
-dropped, and event-kind signals are exempt (every emission is kept).
+emissions may share one tick; rwave keeps the last value per tick, drops a
+tick whose net value equals the previous entry, and exempts event-kind
+signals, for which every emission is kept.
 
 ### Paths and scopes
 

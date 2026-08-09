@@ -410,8 +410,8 @@ impl Wave {
 
     /// Whether the backend can decode a time window meaningfully faster than a
     /// full history (i.e. it can seek by time); when false, callers behave
-    /// exactly as before. FST and the built-in FSDB (NPI) and WLF backends
-    /// report true; VCD and GHW cannot seek.
+    /// exactly as before. FST and the built-in FSDB and WLF backends report
+    /// true; VCD and GHW cannot seek.
     ///
     /// Only `snapshot` and `compare` consult this to prefer the windowed
     /// collector. `dump` reaches it only via `collect_events_bounded`, i.e.
@@ -830,15 +830,11 @@ impl Wave {
         let mut a: HashMap<Sid, RawValue> = HashMap::new();
         let mut b: HashMap<Sid, RawValue> = HashMap::new();
         // On a seeking backend, two point windows beat one spanning window:
-        // every seeking backend's window cost grows with the span (WLF walks
-        // the window's time steps, FSDB/FST its per-signal changes), so a
-        // far-apart pair — `compare` across a whole run — would re-read
-        // everything between the instants just to throw it away. Two point
-        // queries read only the instants themselves; for near pairs that is
-        // at worst a second ~point-sized scan. Without seeking, the split
-        // would double the full-decode fallback instead, so the one-window
-        // path stays for that case (its seed + in-window changes answer both
-        // instants from the single pass).
+        // window cost grows with the span, so a far-apart pair would re-read
+        // everything between the instants. Without seeking, the split would
+        // double the full-decode fallback, so the one-window path stays for
+        // that case; its seed and in-window changes answer both instants
+        // from the single pass.
         if self.backend.supports_windowed() && ta != tb {
             self.for_each_signal_windowed(sids, ta, Some(ta), batch, |sid, tr| {
                 if let Some(pos) = last_at_or_before(&tr.times, ta) {
@@ -1104,10 +1100,9 @@ mod windowed_equiv_tests {
         /// `(backend_sid, ascending (tick, value) changes)` per signal.
         data: Vec<(usize, Vec<(i64, RawValue)>)>,
         windowed: bool,
-        /// Serve windows the way the WLF backend does: the carried value is
-        /// tagged `from - 1` (libwlf cannot report its true change tick),
-        /// while a change exactly at `from` keeps its own tick. Consumers
-        /// must not care — they read the seed's value, never its time.
+        /// Serve windows in the WLF backend's shape: the carried value
+        /// tagged `from - 1`, a change exactly at `from` at its own tick.
+        /// Consumers read the seed's value, never its time.
         wlf_seed_shape: bool,
     }
 
@@ -1328,11 +1323,10 @@ mod windowed_equiv_tests {
         }
     }
 
-    // The three consumer equivalences again, against the WLF seed shape
-    // (carried value at `from - 1` instead of its true tick). Pins the
-    // "consumers read the seed's value, not its time" contract the WLF
-    // backend documents: values, definedness, and dump's in-window event
-    // sets must all be indistinguishable from true-tick seeds.
+    // The three consumer equivalences again, against the WLF seed shape:
+    // carried value at `from - 1` instead of its true tick. Values,
+    // definedness, and dump's event sets must be indistinguishable from
+    // true-tick seeds.
 
     #[test]
     fn snapshot_wlf_seed_shape_matches_full() {

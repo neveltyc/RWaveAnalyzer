@@ -21,12 +21,12 @@ and only for an FSDB opened through the built-in Verdi NPI backend: connectivity
 comes from an elaborated design database, not from the waveform.
 
 WLF point queries stop replaying the run. `snapshot --at` and `compare` on
-`.wlf` now seek: libwlf's range scan starts at the window and stuffs each
+`.wlf` now seek: libwlf's range scan starts at the window and supplies each
 signal's carried value at scan start, so a query reads the instant, not the
-history before it (measured on a 48 MB / 20 M-step Questa 10.7c capture: ~2 ms
-vs ~600 ms, at flat memory). One deviation, documented on the backend: the
-carried value is tagged one tick before the window — libwlf cannot report when
-it last changed (its reverse search needs a live vsim session).
+history before it. On a 48 MB Questa capture of 20 M time steps that is ~2 ms
+at flat memory where the full decode took ~600 ms. One deviation, documented
+on the backend: the carried value is tagged one tick before the window,
+because libwlf cannot report when it last changed.
 
 ### Added
 - `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
@@ -57,18 +57,18 @@ it last changed (its reverse search needs a live vsim session).
   where in the file the window sits.
 
 ### Fixed
-- **Plugin traces are folded to one net entry per tick** (last write wins),
-  with consecutive duplicates suppressed as in the wellen decode; events
-  exempt. The per-tick collapse is stricter than wellen — the vendor
+- **Plugin traces are folded to one net entry per tick**, last write wins,
+  with consecutive duplicates suppressed as in the wellen decode; events are
+  exempt. The per-tick collapse is stricter than wellen because the vendor
   libraries report transport granularity, not user-visible writes: libwlf
-  delivers a wide vector one 32-bit word per callback, so a 256-bit bus
-  counted 8 `summary` changes per real transition and `dump` printed the 7
-  transient partial values; libwlf's end-of-scan ENDLOG marker also appended
-  a fake trailing change to every signal. All three artifacts are gone; FSDB
-  same-tick glitch VCs collapse to their net value the same way.
+  delivers a wide vector one 32-bit word per callback, which made a 256-bit
+  bus count 8 `summary` changes per real transition and put 7 transient
+  partial rows per instant in `dump`, and its end-of-scan ENDLOG marker
+  appended a fake trailing change to every signal. FSDB same-tick glitch VCs
+  collapse to their net value the same way.
 - WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
-  `-nowlfcollapse` keep their end-tick delta events (no effect on default
-  delta-collapsed files).
+  `-nowlfcollapse` keep their end-tick delta events; default delta-collapsed
+  captures are unaffected.
 
 ### Internal
 - Design connectivity is a Rust trait (`DesignQuery`) reached through a

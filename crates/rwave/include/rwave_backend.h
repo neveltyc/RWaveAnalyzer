@@ -82,10 +82,9 @@ typedef struct {
  * borrowed for the call only.
  *
  * Emissions must be in nondecreasing time order per signal. Several
- * emissions may share one tick (e.g. a vendor library reporting a wide
- * vector word-by-word); rwave keeps the last value per tick and drops
- * ticks whose net value equals the previous entry (event-kind signals
- * exempt — every emission is kept). */
+ * emissions may share one tick; rwave keeps the last value per tick,
+ * drops a tick whose net value equals the previous entry, and exempts
+ * event-kind signals, for which every emission is kept. */
 typedef void (*RwaveEmit)(
     void           *ctx,
     uint64_t        backend_sid,
