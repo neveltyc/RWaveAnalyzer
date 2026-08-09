@@ -20,6 +20,14 @@ up from a deep leaf.
 and only for an FSDB opened through the built-in Verdi NPI backend: connectivity
 comes from an elaborated design database, not from the waveform.
 
+WLF point queries stop replaying the run. `snapshot --at` and `compare` on
+`.wlf` now seek: libwlf's range scan starts at the window and stuffs each
+signal's carried value at scan start, so a query reads the instant, not the
+history before it (measured on a 48 MB / 20 M-step Questa 10.7c capture: ~2 ms
+vs ~600 ms, at flat memory). One deviation, documented on the backend: the
+carried value is tagged one tick before the window — libwlf cannot report when
+it last changed (its reverse search needs a live vsim session).
+
 ### Added
 - `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
 - `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`.
@@ -42,6 +50,23 @@ comes from an elaborated design database, not from the waveform.
   counting scopes where `list` counts signals.
 - `trace` and `tree` take a second positional argument. Other commands reject
   extra positionals with the message they always had.
+
+### Performance
+- **WLF seeks with `wlfReadDataOverRange`.** The windowed vtable slot is now
+  filled; scan cost is proportional to the window's time steps, independent of
+  where in the file the window sits.
+
+### Fixed
+- **Plugin traces are normalized to the wellen shape**: one entry per tick
+  (last write wins) and no consecutive duplicates, events exempt. libwlf
+  reports a wide vector one 32-bit word per callback, so a 256-bit bus counted
+  8 `summary` changes per real transition and `dump` printed the 7 transient
+  partial values; libwlf's end-of-scan ENDLOG marker also appended a fake
+  trailing change to every signal. All three artifacts are gone; FSDB same-tick
+  glitch VCs collapse the same way.
+- WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
+  `-nowlfcollapse` keep their end-tick delta events (no effect on default
+  delta-collapsed files).
 
 ### Internal
 - Design connectivity is a Rust trait (`DesignQuery`) reached through a

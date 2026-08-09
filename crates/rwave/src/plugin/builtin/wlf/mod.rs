@@ -55,9 +55,7 @@ static VTABLE: RwaveBackend = RwaveBackend {
 
     var_decls: Some(api_var_decls),
     load_traces: Some(api_load_traces),
-    // WLF's libwlf offers no by-time seek (only range streaming), so it stays
-    // on the full-decode path; leaving this NULL makes rwave fall back.
-    load_traces_windowed: None,
+    load_traces_windowed: Some(api_load_traces_windowed),
 };
 
 /// Resolve the built-in WLF vtable, loading `libwlf` on first call. `Err`
@@ -187,6 +185,19 @@ unsafe extern "C" fn api_load_traces(
 ) -> c_int {
     let b = unsafe { &mut *(handle as *mut WlfBackend) };
     b.load_traces(sids, n_sids, emit, ctx)
+}
+
+unsafe extern "C" fn api_load_traces_windowed(
+    handle: *mut RwaveSession,
+    sids: *const u64,
+    n_sids: usize,
+    from_tick: i64,
+    to_tick: i64,
+    emit: RwaveEmit,
+    ctx: *mut c_void,
+) -> c_int {
+    let b = unsafe { &mut *(handle as *mut WlfBackend) };
+    b.load_traces_windowed(sids, n_sids, from_tick, to_tick, emit, ctx)
 }
 
 /// Paired with `api_free_err` via `CString::into_raw` / `from_raw`.
