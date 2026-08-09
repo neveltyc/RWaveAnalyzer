@@ -3,10 +3,8 @@
 
 //! Parser for the text Verdi's NPI L1 connectivity API writes to a `FILE*`.
 //!
-//! Deliberately kept out of the `fsdb` module, which is gated to linux-x86_64
-//! because it dlopens vendor libraries. Nothing here touches FFI — it is a
-//! string-to-[`Hop`] transform — so living outside that gate means its tests
-//! run on every platform rather than only where NPI happens to be loadable.
+//! Kept out of the `fsdb` module, which is gated to linux-x86_64 for its vendor
+//! dlopens. Nothing here touches FFI, so its tests run on every platform.
 //!
 //! The grammar, as emitted by Verdi V-2023.12 for
 //! `npi_trace_{driver,load}_dump2`:
@@ -25,20 +23,15 @@
 
 use crate::backend::design::{Hop, HopKind, TraceStatus};
 
-/// Decide the overall verdict for a set of hops.
+/// The overall verdict for a set of hops.
 ///
-/// Control hops are excluded from the judgement, so asking for them with
-/// `--control` cannot change the verdict: how much detail is displayed is not
-/// evidence about where a signal comes from.
+/// Control hops are excluded, so `--control` cannot change the verdict.
 ///
-/// There is deliberately no "driven from a testbench" verdict. Inferring one
-/// from a statement appearing in both the driver and load traces looks
-/// plausible and is wrong: `free_cnt <= free_cnt + 1` writes and reads the
-/// same net in one statement, and NPI reports that identical statement on both
-/// sides, so an ordinary free-running counter classifies as testbench-driven.
-/// Verified against Verdi V-2023.12. Distinguishing a virtual-interface drive
-/// needs evidence from NPI about the reference itself, not a coincidence of
-/// source locations.
+/// There is no "driven from a testbench" verdict. Inferring one from a
+/// statement appearing in both the driver and load traces is wrong:
+/// `free_cnt <= free_cnt + 1` writes and reads the same net in one statement,
+/// which NPI reports identically on both sides, so an ordinary counter would
+/// classify as testbench-driven.
 pub fn classify(hops: &[Hop]) -> TraceStatus {
     let structural: Vec<&Hop> = hops.iter().filter(|h| h.kind != HopKind::Control).collect();
     if structural.is_empty() {
@@ -69,9 +62,8 @@ pub fn kind_of(npi_type: &str) -> HopKind {
 
 /// Split a trailing `{<file> : <line>}` off a dump record.
 ///
-/// Anchors on the `", {"` that separates the record's last field from its
-/// location rather than on a bare `{`, so a statement that merely *ends* in a
-/// brace — `q = '{default : 0}` — is not mistaken for a location.
+/// Anchors on the `", {"` separator rather than a bare `{`, so a statement
+/// ending in a brace such as `q = '{default : 0}` is not read as a location.
 fn split_location(s: &str) -> (String, Option<String>, Option<u32>) {
     let t = s.trim_end();
     if t.ends_with('}') {
@@ -92,9 +84,8 @@ fn split_location(s: &str) -> (String, Option<String>, Option<u32>) {
 
 /// Parse one `TYPE, TEXT, {FILE : LINE}` record.
 ///
-/// Splits on the *first* comma for the type and takes the location off the
-/// *end*, so the statement text in between may contain commas of its own
-/// (`q <= f(a, b);`), which naive comma-splitting would mangle.
+/// Type comes off the first comma and the location off the end, so the
+/// statement between them may contain commas of its own.
 fn parse_record(s: &str) -> (String, String, Option<String>, Option<u32>) {
     let (head, file, line) = split_location(s);
     match head.split_once(',') {
@@ -133,9 +124,8 @@ pub fn parse_dump(text: &str) -> Vec<Hop> {
             continue;
         }
         // A `<`-and-digit line is a group header. If it does not parse, reset
-        // the group state rather than carrying the previous group's scope
-        // forward — attributing hops to the wrong scope is worse than losing
-        // the scope.
+        // rather than carry the previous scope forward: misattributing a hop is
+        // worse than losing its scope.
         if line.starts_with('<') && line[1..].starts_with(|c: char| c.is_ascii_digit()) {
             match group_header(line) {
                 Some((n, sc)) => {
@@ -185,8 +175,8 @@ pub fn parse_dump(text: &str) -> Vec<Hop> {
         if let Some(h) = hops.last_mut() {
             let (npi_type, name, _file, _line) = parse_record(line);
             if npi_type.starts_with("npi") && !name.is_empty() {
-                // Literals are not signals; recording them as endpoints would
-                // put `'h00` in a list the caller looks values up by.
+                // Literals are not signals, and the caller looks values up by
+                // these names.
                 if kind_of(&npi_type) != HopKind::Constant {
                     h.signals.push(name);
                 }

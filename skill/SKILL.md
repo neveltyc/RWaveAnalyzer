@@ -1,6 +1,6 @@
 ---
 name: waveform-debug
-description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
+description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals, browse the design hierarchy, or find what drives a signal — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
 ---
 
 # rwave — agent skill
@@ -9,8 +9,9 @@ description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively re
 terminal. It natively reads **VCD**, **FST**, and **GHW** (prefer FST — typically
 10× smaller than VCD). On linux-amd64 it also provides experimental support for
 **WLF** (Questa/ModelSim) and **FSDB** (Verdi) by calling into each vendor's own
-reader library interface. Seven query commands cover inspection, search,
-comparison, and summary. **Always pass `--json` from an agent.** This file covers
+reader library interface. Nine commands cover inspection, search, comparison,
+summary, hierarchy, and driver/load tracing. **Always pass `--json` from an
+agent.** This file covers
 what is unique to driving the tool from an agent — see the repo README for the
 full reference.
 
@@ -119,14 +120,20 @@ fields you'll usually parse out.
 | `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `roots[]`, `root_signals`, `scopes[]`/`chain[]` with `.path`, `.name`, `.level`, `.signals`, `.children` |
 | `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
 
-`trace` works only on `.fsdb` via the built-in NPI backend; elsewhere it exits 1.
-That is a capability limit, not a transient failure, so do not retry.
+`tree` works on every format. `trace` works only on `.fsdb` via the built-in NPI
+backend; elsewhere it exits 1. That is a capability limit, not a transient
+failure, so do not retry it on another file format.
+
+`trace` rules:
 
 - Never pass `--kdb` unless rwave asks for it. The design library is read from
   the FSDB header; if that fails, use only a path the user supplies.
-- Check `status` before trusting the list: `resolved`, `boundary_only` (driver
-  outside the traced hierarchy), `no_driver_found`.
-- Clock/reset and enclosing `if`/`case` are excluded unless you pass `--control`.
+- Read `status` before trusting the list: `resolved`, `boundary_only` (the
+  driver is outside the traced hierarchy), `no_driver_found`.
+- Clock, reset, and enclosing `if`/`case` are excluded unless you pass
+  `--control`.
+- One driver is the normal answer; several usually means a reset arm plus a
+  data arm. Loads are often many, so pass `--limit`.
 
 For `dump`, **always pass `--begin/--end` and a selection** — running it
 unbounded on a large dump streams the whole file.
@@ -250,6 +257,34 @@ sub-interval, with `--show` capturing the field values you care about.
 3. snapshot --at <first_hit>             full picture at that moment
 4. dump --begin <pre> --end <hit> --filter <relevant>
 ```
+
+### Orient in an unfamiliar hierarchy
+
+```
+1. tree                                  top-level scopes
+2. tree <scope> --depth 2                what is inside one block
+3. tree --of <signal>                    the ancestor chain of a signal you already have
+```
+
+`tree --of` is the fastest way back up from a deep leaf: every row is a path you
+can paste straight into `--scope`. `--depth` counts scopes here, where `list`
+counts signals.
+
+### "Why does this signal have that value?" (FSDB + NPI only)
+
+```
+1. snapshot --at T --filter <signal>     confirm the value
+2. trace <signal> --at T                 the driving statement, with file:line
+3. trace <driver_signal> --at T          walk one level up the cone
+4. trace <signal> --load                 or go the other way: who reads it
+```
+
+Each `drivers[]` entry carries `statement`, `file`, `line`, and the `signals[]`
+it reads; with `--at` those come with their values, so one call answers both
+"who drives it" and "what was it carrying". Follow a `signals[].path` into the
+next `trace` to walk the cone. Stop when `status` is `boundary_only`, which
+means the driver is outside what could be followed, or when a hop reaches a
+primary input.
 
 ### Clock/reset sanity
 

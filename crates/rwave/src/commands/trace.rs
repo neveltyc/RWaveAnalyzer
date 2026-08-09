@@ -1,17 +1,14 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! `trace`: who drives this signal, and what does it drive.
+//! `trace`: who drives a signal, and what reads it.
 //!
-//! Experimental, and available only for an FSDB opened through the built-in
-//! Verdi NPI backend, because connectivity comes from an elaborated design
-//! database (KDB) rather than from the waveform. Every other backend reports a
-//! clean "unsupported" — see [`crate::backend::design`] for why the capability
-//! is a Rust trait instead of a C vtable slot.
+//! Experimental, and only for an FSDB opened through the built-in Verdi NPI
+//! backend: connectivity comes from an elaborated design database, not from the
+//! waveform. See [`crate::backend::design`].
 //!
-//! What rwave adds over a purely structural tracer is the waveform it already
-//! has open: with `--at T` every endpoint is annotated with its value at T, so
-//! "who drives this" and "what was it carrying" are one question.
+//! `--at T` annotates every endpoint with its value at T, from the waveform
+//! already open.
 
 use crate::backend::design::{probe_kdb, Direction, Hop, HopKind, TraceStatus};
 use crate::cli::Args;
@@ -39,12 +36,10 @@ struct TraceData {
     unresolved_in_wave: usize,
 }
 
-/// The message shown when the open file cannot answer connectivity questions.
-/// An external FSDB plugin is a reversible choice, so it gets its own line.
+/// Shown when the open file cannot answer connectivity questions.
 fn unsupported_message(wave: &Wave) -> String {
-    // Plugin-backed formats all report `Unknown`, so fall back to the file's
-    // own extension: telling a WLF user their file is "unknown" is worse than
-    // saying nothing.
+    // Plugin-backed formats report `Unknown`, so name the file's extension
+    // instead.
     let tag = wave.file_format().tag();
     let fmt = if tag == "unknown" {
         std::path::Path::new(wave.path())
@@ -59,8 +54,7 @@ fn unsupported_message(wave: &Wave) -> String {
         "trace requires an FSDB opened through the built-in Verdi NPI backend; \
          '{fmt}' has no design data."
     );
-    // Only worth saying for an .fsdb: unsetting it does not give a VCD design
-    // data, so on any other format it is advice that cannot help.
+    // Only actionable for an .fsdb; unsetting it cannot give a VCD design data.
     if fmt == "fsdb" && std::env::var_os("RWAVE_PLUGIN_FSDB").is_some() {
         s.push_str("\nUnset RWAVE_PLUGIN_FSDB, which replaces that backend.");
     }
@@ -77,13 +71,10 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
             "the following arguments are required: <signal> (rwave trace <file> <signal>)"
                 .to_string()
         })?;
-    // Drivers by default: "who drives this" is the question nearly every time,
-    // and in compliant RTL the answer is a single statement. `--load` flips it.
+    // Drivers by default; `--load` flips it.
     let dir = if args.load { Direction::Load } else { Direction::Driver };
-    // Control dependencies (clock edges, enclosing if/case) are suppressed at
-    // the source unless asked for. NPI has a first-class option for this, so we
-    // never have to guess from names: a substring test for "rst" would eat
-    // `first_valid` and `burst_len` along with the resets.
+    // NPI filters control dependencies at the source, so names are never
+    // pattern-matched to find clocks and resets.
     let control = args.control;
 
     // Parse --at before anything expensive: loading a design checks out a
@@ -96,21 +87,17 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
         }
     };
 
-    // Capability first. Whether the signal name is ambiguous is irrelevant if
-    // this file can never answer the question at all — reporting "matches 7
-    // signals" on a VCD would send the user off refining a name that was never
-    // going to work.
+    // Capability first: an ambiguous name is irrelevant if this file can never
+    // answer at all.
     if wave.design_query().is_none() {
         return Err(unsupported_message(wave));
     }
 
-    // Then resolve against the waveform: it gives the user rwave's own error
-    // messages and examples, and hands NPI a full hierarchical path rather than
-    // whatever shorthand was typed.
+    // Resolve against the waveform, so NPI gets a full hierarchical path and
+    // the user gets rwave's own error messages.
     let (path, _scope) = resolve_signal_path(wave, target, "signal")?;
 
-    // The waveform names the design it came from; `--kdb` overrides it. There
-    // is no third source — see `probe_kdb`.
+    // The waveform names the design it came from; `--kdb` overrides it.
     let recorded = wave.design_query().and_then(|dq| dq.recorded_design_dir());
     let kdb = probe_kdb(args.kdb.as_deref(), recorded.as_deref())
         .map_err(|m| m.into_error())?;
@@ -142,10 +129,7 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
                     }
                 }
             }
-            // One pass over the signal table instead of one per endpoint:
-            // `wanted` holds up to a few hundred names and an FSDB design can
-            // carry a million signals, each probe otherwise re-lowercasing
-            // every alias it walks past.
+            // One pass over the signal table instead of one per endpoint.
             let index = endpoint_index(wave, &wanted);
             let mut sids = Vec::new();
             let mut pairs = Vec::new();

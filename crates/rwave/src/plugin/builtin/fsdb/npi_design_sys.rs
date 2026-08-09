@@ -3,22 +3,17 @@
 
 //! Bindings for Verdi's NPI L1 connectivity layer (`libnpiL1.so`).
 //!
-//! Loaded lazily and separately from `libNPI.so`: the waveform path must keep
-//! working on an install where L1 is absent, so a failure here degrades `trace`
-//! to a clear error and leaves everything else alone.
+//! Loaded lazily and separately from `libNPI.so`, so an install without L1
+//! degrades `trace` alone and leaves the waveform path working.
 //!
-//! **Why the `_dump` variants.** L1's richer entry points
-//! (`npi_trace_driver_by_hdl2`) take `std::vector&` and `std::string&`
-//! arguments, which cannot be called across a C FFI boundary from Rust at all.
-//! Their `_dump` siblings take a `FILE*` instead and are otherwise identical —
-//! `int npi_trace_driver_dump2(const char*, FILE*, bool, std::vector<void*>*,
-//! const trcOption_t&)`, where the vector argument is a *pointer* we pass NULL
-//! for and `trcOption_t` is a plain 5-`bool` POD passed by reference. That
-//! makes the whole signature C-compatible, so we get L1's full traversal
-//! (hierarchy crossing, pass-through, control dependencies) without a shim and
-//! without vendoring anything from Synopsys.
+//! The `_dump` variants are the callable ones. L1's richer entry points take
+//! `std::vector&` and `std::string&` arguments, which no C FFI can express.
+//! Their `_dump` siblings are otherwise identical but take a `FILE*`, and their
+//! remaining C++ arguments are a pointer we pass NULL for and a 5-`bool` POD by
+//! reference, so the whole signature is C-compatible. That buys L1's full
+//! traversal with no shim and nothing vendored from Synopsys.
 //!
-//! The text those functions emit is parsed in `design.rs`.
+//! The emitted text is parsed by [`crate::plugin::builtin::npi_dump`].
 
 use std::ffi::{c_char, c_int, c_void};
 use std::path::PathBuf;
@@ -44,9 +39,8 @@ pub struct TrcOption {
     pub trc_var_idx: bool,
     /// Report data signals.
     pub report_data: bool,
-    /// Report control signals (clock edges, enclosing if/case). Turning this
-    /// off is how clock/reset noise is suppressed — at the source, rather than
-    /// by pattern-matching signal names downstream.
+    /// Report control signals: clock edges and enclosing `if`/`case`. Off by
+    /// default, which suppresses clock and reset noise at the source.
     pub report_control: bool,
     /// Report statement properties.
     pub trc_stmt_prop: bool,
@@ -106,14 +100,10 @@ fn load_once() -> Result<LibNpiL1, String> {
     // have run before any L1 call. This also means librt is already preloaded.
     fsdb_sys::ensure_loaded()?;
 
-    // libnpiL1.so declares no DT_NEEDED on libNPI.so (confirmed with readelf)
-    // yet calls into it, so it can only link if libNPI's symbols are in the
-    // global scope. The waveform path loads libNPI with RTLD_LOCAL, which is
-    // correct for its own use and must stay that way; re-opening it here with
-    // RTLD_GLOBAL promotes the already-loaded object into the global scope
-    // (dlopen is refcounted and returns the same handle) without disturbing
-    // anything. Without it L1 has nothing to bind its `npi_*` calls to, and
-    // under RTLD_LAZY that surfaces at the first call rather than at load.
+    // libnpiL1.so declares no DT_NEEDED on libNPI.so yet calls into it, so it
+    // links only if libNPI's symbols are in the global scope. Re-opening the
+    // already-loaded object with RTLD_GLOBAL promotes it there, leaving the
+    // waveform path's RTLD_LOCAL handle alone.
     if let Some(npi_path) = fsdb_sys::loaded_path() {
         let promoted = unsafe {
             libloading::os::unix::Library::open(
@@ -122,9 +112,6 @@ fn load_once() -> Result<LibNpiL1, String> {
             )
         };
         if let Ok(lib) = promoted {
-            // Held rather than dropped for tidiness; the promotion itself is
-            // permanent, since l_global is only cleared when an object is
-            // unloaded and fsdb_sys' own handle keeps the count above zero.
             std::mem::forget(lib);
         }
     }
@@ -195,11 +182,9 @@ fn locate_l1() -> PathBuf {
 
 /// Run `f` with a `FILE*` that writes into memory, and return what it wrote.
 ///
-/// `open_memstream` grows its own allocation, so there is no capture ceiling to
-/// tune. A fixed buffer would have one, and it would bind exactly where it must
-/// not: a clock or reset can have tens of thousands of loads, and `--limit`
-/// cannot help because the whole dump has to be parsed before there is a total
-/// to clip.
+/// `open_memstream` grows its own allocation, so there is no capture ceiling.
+/// A fixed one would bind on high-fanout nets, where `--limit` cannot help: the
+/// dump must be parsed in full before there is a total to clip.
 pub fn capture_dump<F>(f: F) -> Result<String, String>
 where
     F: FnOnce(*mut c_void) -> c_int,

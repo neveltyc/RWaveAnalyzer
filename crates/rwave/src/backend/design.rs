@@ -1,29 +1,21 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! Design-connectivity queries: "who drives this signal, and what does it drive".
+//! Design-connectivity queries: who drives a signal, and what reads it.
 //!
-//! This is deliberately *not* part of the C plugin ABI. A waveform file records
-//! values over time and says nothing about connectivity; answering a driver
-//! question needs an elaborated design database (Verdi's KDB) alongside it. Only
-//! the built-in Verdi NPI backend can do that, so the capability lives here as a
-//! plain Rust trait that backend reaches through
+//! Answering needs an elaborated design database alongside the waveform, which
+//! only the built-in Verdi NPI backend has. Every other backend inherits the
+//! default `None` from
 //! [`WaveformBackend::design_query`](super::WaveformBackend::design_query).
-//! Every other backend — wellen's VCD/FST/GHW, WLF, and every external plugin —
-//! inherits the default `None` and the command layer reports a clean
-//! "unsupported" instead.
 //!
-//! Keeping this out of the vtable is a correctness requirement, not just tidiness:
-//! `RwaveBackend` is a C struct whose length is fixed by the plugin that was
-//! compiled against it, so appending capability slots is what makes a new host
-//! read past the end of an older plugin's vtable. See `docs/PLUGIN.md`.
+//! A Rust trait rather than a C vtable slot: `RwaveBackend`'s length is fixed
+//! when a plugin is compiled, so appending slots makes a newer host read past
+//! the end of an older plugin's vtable. See `docs/PLUGIN.md`.
 
 use std::path::{Path, PathBuf};
 
-/// What kind of construct drives (or loads) a signal.
-///
-/// Derived from the NPI object type reported for the driving *statement*, not
-/// guessed from names.
+/// What kind of construct drives or reads a signal. Derived from the NPI object
+/// type of the statement, never guessed from names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HopKind {
     /// `assign lhs = rhs` — a continuous assignment.
@@ -33,8 +25,8 @@ pub enum HopKind {
     /// A module/interface port the signal passes through; the real driver is on
     /// the other side of the hierarchy boundary.
     Port,
-    /// An enclosing `if`/`case`/`while`/`@(...)` — this gates the assignment
-    /// rather than supplying its data.
+    /// An enclosing `if`, `case`, or clock edge. Gates the assignment rather
+    /// than supplying its data.
     Control,
     /// A literal or parameter.
     Constant,
@@ -55,17 +47,16 @@ impl HopKind {
     }
 }
 
-/// One endpoint of a trace: a statement that drives (or reads) the queried
-/// signal, plus the signals that statement itself depends on.
+/// One endpoint: a statement that drives or reads the queried signal, plus the
+/// signals that statement touches.
 #[derive(Debug, Clone)]
 pub struct Hop {
     /// 1-based group number as reported by NPI, so several hops can share a
     /// source and stay grouped in output.
     pub group: usize,
     pub kind: HopKind,
-    /// NPI's own object type (`npiContAssign`, `npiPort`, …), passed through so
-    /// a caller can tell exactly what NPI saw even when `kind` folds several
-    /// types together.
+    /// NPI's own object type, passed through so a caller can see exactly what
+    /// NPI reported even where `kind` folds several types together.
     pub npi_type: String,
     /// The statement's source text, e.g. `assign res = res_q`.
     pub statement: String,
@@ -75,13 +66,11 @@ pub struct Hop {
     pub line: Option<u32>,
     /// True when this hop crossed a hierarchy port boundary to get here.
     pub boundary: bool,
-    /// Signals the statement reads (for a driver) or the target it writes (for
-    /// a load), as full hierarchical paths.
+    /// Full hierarchical paths of the signals the statement touches.
     pub signals: Vec<String>,
 }
 
-/// Overall confidence in a trace result. Reporting "I cannot see it" beats
-/// reporting a driver that is really just a reader.
+/// Overall verdict for a trace result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceStatus {
     /// Structural drivers/loads were found.
@@ -127,33 +116,28 @@ impl Direction {
     }
 }
 
-/// Connectivity queries against an elaborated design database.
+/// Connectivity queries against an elaborated design database. Implemented only
+/// by the built-in Verdi NPI FSDB backend.
 ///
-/// Implemented only by the built-in Verdi NPI FSDB backend. Loading a design is
-/// expensive and checks out a license, so [`ensure_design`](Self::ensure_design)
-/// is idempotent: a `--batch` session pays for it once and every later query is
-/// an in-memory lookup.
+/// Loading a design is expensive and checks out a licence, so
+/// [`ensure_design`](Self::ensure_design) is idempotent and a `--batch` session
+/// pays for it once.
 pub trait DesignQuery {
-    /// Load `kdb` (idempotent — a repeat call with the same database is a no-op).
-    /// On failure the session must stay usable so the caller can retry with a
-    /// different `--kdb`.
+    /// Load `kdb`. Idempotent. On failure the session must stay usable, so the
+    /// caller can retry with a different `--kdb`.
     fn ensure_design(&mut self, kdb: &Path, top: Option<&str>) -> Result<(), String>;
 
-    /// The design library this waveform records having been produced from, if
-    /// the format carries it.
+    /// The design library the waveform records having been produced from.
     ///
-    /// Not a guess: FSDB stores the absolute `simv.daidir` path in its header,
-    /// so the file can say which design it belongs to instead of us assuming it
-    /// sits in the same directory. Returns `None` when the field is absent
-    /// (a dump from another simulator, or one written without it).
+    /// FSDB stores the `simv.daidir` path in its header. `None` when the format
+    /// does not carry it.
     fn recorded_design_dir(&mut self) -> Option<PathBuf> {
         None
     }
 
     /// Trace `signal` in the given direction. `control` includes the enclosing
-    /// `if`/`case`/clock-edge dependencies; with it false NPI omits them at the
-    /// source, which is how clock/reset noise is suppressed without ever
-    /// pattern-matching on signal names.
+    /// `if`, `case`, and clock-edge dependencies, which NPI omits at the source
+    /// when false. Names are never pattern-matched to decide this.
     fn trace(
         &mut self,
         signal: &str,

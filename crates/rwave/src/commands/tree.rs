@@ -3,15 +3,13 @@
 
 //! `tree`: browse the design hierarchy.
 //!
-//! Two modes. Without `--of` it prints the scopes below a root — the whole
-//! top level by default, or the subtree(s) matched by `--scope` / the `SCOPE`
-//! positional. With `--of SIGNAL` it prints that signal's full ancestor chain,
-//! top-down, which is the one-shot answer to "I am eight levels deep, what is
-//! above me and how do I get back to the DUT top".
+//! Without `--of`, the scopes below a root: the top level by default, or
+//! whatever `--scope` or the `SCOPE` positional matches. With `--of SIGNAL`,
+//! that signal's ancestor chain top-down, which is the way back up from a deep
+//! leaf.
 //!
-//! Everything here is derived from the scope strings the backend already
-//! reported, so `tree` works on every format and needs no new backend
-//! capability.
+//! Derived entirely from scope strings the backend already reported, so it
+//! works on every format.
 
 use crate::cli::Args;
 use crate::filter::SEPARATORS;
@@ -32,18 +30,16 @@ struct Node {
     children: usize,
 }
 
-/// Every ancestor prefix of `scope`, shortest first, followed by `scope` itself.
+/// Every ancestor prefix of `scope`, shortest first, then `scope` itself.
 ///
-/// Slices the original string at separator positions rather than splitting and
-/// re-joining, so a `/`-separated FSDB path keeps its slashes and a synthesized
-/// prefix is always a real substring of a path the backend actually reported.
+/// Slices at separator positions rather than splitting and re-joining, so a
+/// `/`-separated FSDB path keeps its slashes.
 fn prefixes(scope: &str) -> impl Iterator<Item = &str> {
     scope
         .char_indices()
-        // Skip a separator at index 0: a leading `/` (Questa/VHDL-style paths
-        // reach us verbatim through the FSDB backend) would otherwise yield an
-        // empty prefix, which then becomes the parent of every top-level scope
-        // and collapses the whole tree under one blank-named root.
+        // Skip a separator at index 0. A leading `/`, which Questa and VHDL
+        // hierarchies carry, would yield an empty prefix that then becomes the
+        // parent of every top-level scope.
         .filter(|(i, c)| *i > 0 && SEPARATORS.contains(c))
         .map(move |(i, _)| &scope[..i])
         .chain(std::iter::once(scope))
@@ -59,11 +55,9 @@ fn last_segment(path: &str) -> &str {
 
 /// The parent scope path, or `None` for a top-level scope.
 ///
-/// A separator at index 0 means a leading-separator path such as `/top`, whose
-/// parent is the root and not an empty-named scope. Returning `Some("")` there
-/// would file every top-level scope under a node that does not exist, leaving
-/// the top level empty; `prefixes` guards the same case and the two have to
-/// agree.
+/// A separator at index 0 means a path like `/top`, whose parent is the root.
+/// Returning `Some("")` would file every top-level scope under a node that does
+/// not exist. `prefixes` guards the same case; the two must agree.
 fn parent_of(path: &str) -> Option<&str> {
     match path.rfind(SEPARATORS) {
         Some(0) | None => None,
@@ -71,23 +65,20 @@ fn parent_of(path: &str) -> Option<&str> {
     }
 }
 
-/// The full scope index: every scope that holds a signal, plus every
-/// intermediate scope synthesized from those paths.
+/// Every scope that holds a signal, plus the intermediate scopes synthesized
+/// from those paths.
 ///
 /// `Wave::scopes()` reports only scopes that directly contain a signal, so a
-/// module that holds nothing but sub-modules is missing from it. Walking the
-/// prefixes fills those holes; without this the tree would show gaps exactly
-/// where the structural hierarchy is most interesting.
+/// module of nothing but sub-modules is missing from it.
 struct Index {
     /// Scope path -> directly-declared signal count. Sorted, so iteration and
     /// child lookup are both ordered.
     scopes: std::collections::BTreeMap<String, usize>,
     /// Parent path -> its direct children, in sorted order.
     ///
-    /// Materialized once rather than re-derived per node: scanning every scope
-    /// to find one node's children turns a walk into O(N²), which on a 56k-scope
-    /// design is tens of seconds — and `--limit` cannot save it, because the
-    /// walk has to finish before there is a total to clip.
+    /// Materialized once. Re-deriving it per node makes the walk O(N²), and
+    /// `--limit` cannot bound that: the walk must finish before there is a
+    /// total to clip.
     children: std::collections::BTreeMap<String, Vec<String>>,
     /// Top-level scopes (those with no parent), in sorted order.
     tops: Vec<String>,
@@ -106,9 +97,8 @@ impl Index {
                     root_signals += 1;
                     continue;
                 }
-                // Materialize the ancestors so intermediate scopes exist even
-                // when they hold no signals of their own. Only on first sight
-                // of a scope: the prefixes are the same for every alias in it.
+                // Materialize ancestors so intermediate scopes exist even when
+                // they hold no signals. Once per scope, not per alias.
                 let seen = scopes.contains_key(scope);
                 *scopes.entry(scope.to_string()).or_insert(0) += 1;
                 if !seen {
@@ -145,10 +135,9 @@ impl Index {
         self.scopes.get(path).copied().unwrap_or(0)
     }
 
-    /// Append `path` and its descendants, stopping `max_level` levels below the
-    /// root. `level` is the indent depth of `path` itself, so `max_level == 1`
-    /// yields the root and its direct children, matching what `--depth 1` means
-    /// for `list`: one level below the matched scope.
+    /// Append `path` and its descendants, `max_level` levels below the root.
+    /// `max_level == 1` yields the root and its direct children, matching what
+    /// `--depth 1` means for `list`.
     fn walk(&self, path: &str, level: usize, max_level: usize, out: &mut Vec<Node>) {
         out.push(Node {
             path: path.to_string(),
@@ -160,8 +149,7 @@ impl Index {
         if level >= max_level {
             return;
         }
-        // `walk` takes &self and children_of hands back a borrow of the same
-        // map, so recursing while iterating is two shared borrows.
+
         for c in self.children_of(path) {
             self.walk(c, level + 1, max_level, out);
         }
@@ -180,10 +168,9 @@ fn root_pattern(args: &Args) -> Option<String> {
     pick(&args.target).or_else(|| pick(&args.scope))
 }
 
-/// Resolve the roots to print. With no pattern that is the top level; with one
-/// it is every scope the pattern matches whose parent does *not* match, so a
-/// subtree is rooted where the match begins rather than repeated at every
-/// descendant.
+/// The roots to print: the top level with no pattern, otherwise every scope the
+/// pattern matches whose parent does not, so a subtree is rooted where the match
+/// begins rather than repeated at every descendant.
 fn roots(index: &Index, args: &Args) -> Result<Vec<String>, String> {
     let pattern = match root_pattern(args) {
         None => return Ok(index.tops.clone()),
