@@ -102,6 +102,12 @@ because libwlf cannot report when it last changed.
   instead. That route came first and is kept for comparison; it is slower, needs
   a licence, and reports neither load locations nor control dependencies.
 
+### Fixed
+- `--batch` ended a command at the first unquoted `#`, taking the rest as the
+  result's label. Questa names an unnamed generate block after the pointer it
+  elaborated to (`genblk#116507296#57`), so every signal under one was
+  unaskable. A label is a word of its own now.
+
 ### Changed
 - **Options are scoped to the command that defines them.** `--kdb`, `--top`,
   `--driver`, `--load`, and `--control` are `trace`'s; `--of` is `tree`'s; using
