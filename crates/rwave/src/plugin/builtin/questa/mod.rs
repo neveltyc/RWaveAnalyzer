@@ -1,31 +1,18 @@
 // Copyright (c) 2026 neveltyc
 // released under the MIT License (see LICENSE)
 
-//! Driving QuestaSim's `vsim` as a subprocess, to answer connectivity questions
-//! about a `.wlf`.
+//! Reading QuestaSim's post-simulation debug database, to answer connectivity
+//! questions about a `.wlf`.
 //!
 //! A WLF records values over time and carries no connectivity at all. Questa
-//! keeps that in a separate post-simulation debug database (`.dbg`, written by
-//! `vopt -debugdb`), whose format is proprietary and has no callable API: its
-//! only parser is statically linked inside the `vish` executable, which is a
-//! non-PIE `ET_EXEC` and so cannot be loaded into another process, and the
-//! `dbg_*` reader symbols appear in none of the shipped shared libraries. So
-//! the only way in is to run `vsim -c -view` and drive its Tcl commands.
+//! keeps that in a separate database (`.dbg`, written by `vopt -debugdb`),
+//! which is SQLite behind a replaced 16-byte header — see [`dbg`].
 //!
-//! Nothing here touches FFI or a vendor library — it is `std::process` and
-//! string handling — so unlike the `wlf` module this carries no target gate and
-//! its tests run on every platform. Only the [`DesignQuery`] implementation
-//! that uses it is gated.
-//!
-//! [`DesignQuery`]: crate::backend::design::DesignQuery
+//! Nothing here touches FFI or a vendor library, so unlike the `wlf` module
+//! this carries no target gate and its tests run on every platform.
 
 pub mod dbg;
-pub mod frame;
-pub mod locate;
-pub mod parse;
-pub mod session;
 pub mod source;
-pub mod tcl;
 
 /// Prefix on every message from this module, matching `rwave-wlf` and
 /// `rwave-fsdb` elsewhere.
@@ -41,6 +28,22 @@ pub fn err(msg: impl AsRef<str>) -> String {
     format!("{ERR_PREFIX}: {}", msg.as_ref())
 }
 
+/// rwave's dotted path, given the scope it was resolved in, as a Questa path.
+///
+/// The scope is passed in rather than re-derived by splitting `path`, because a
+/// Verilog escaped identifier may itself contain a dot and splitting would cut
+/// it in the wrong place.
+pub fn to_questa(path: &str, scope: &str) -> String {
+    let leaf = match path.strip_prefix(scope) {
+        Some(rest) if !scope.is_empty() => rest.strip_prefix('.').unwrap_or(rest),
+        _ => path,
+    };
+    if scope.is_empty() {
+        return format!("/{leaf}");
+    }
+    format!("/{}/{}", scope.replace('.', "/"), leaf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +51,13 @@ mod tests {
     #[test]
     fn err_carries_the_backend_prefix() {
         assert_eq!(err("boom"), "rwave-questa: boom");
+    }
+
+    #[test]
+    fn a_path_takes_questas_spelling() {
+        assert_eq!(to_questa("top.u_core.res", "top.u_core"), "/top/u_core/res");
+        assert_eq!(to_questa("top", ""), "/top");
+        // The scope is trusted over splitting, so a dot inside a leaf survives.
+        assert_eq!(to_questa("tb.\\foo.bar", "tb"), "/tb/\\foo.bar");
     }
 }

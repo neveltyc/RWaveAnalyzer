@@ -98,9 +98,6 @@ because libwlf cannot report when it last changed.
   descent instead of by writing out every full path. On a 1.3 GB database that
   is 3 s off a cold query and 1.3 GB off its peak memory. `$RWAVE_DBG_OPEN=memory`
   restores the old path.
-- `$RWAVE_QUESTA_VSIM`, which answers the same questions by driving `vsim`
-  instead. That route came first and is kept for comparison; it is slower, needs
-  a licence, and reports neither load locations nor control dependencies.
 
 ### Fixed
 - **A `.dbg` whose columns have stopped meaning what they did is refused rather
