@@ -136,10 +136,19 @@ pub fn port_links(db: &Db) -> Result<Vec<PortLink>, String> {
 
 /// Nets collapsed into one by elaboration — an implicit wire and the net it
 /// stands for. Not a port crossing, so it does not make a hop a boundary.
+///
+/// Rows with a handle of `0` are placeholders, not aliases: a handle names a
+/// context and `0` names none. On a large design there are thousands of them,
+/// and taking them as edges makes `0` a hub joining every net they mention —
+/// one 76 031-net "electrical net", which is where a config signal used to
+/// come back with seventy thousand endpoints it had nothing to do with.
 pub fn simnet_links(db: &Db) -> Result<Vec<(i64, i64)>, String> {
-    rows(db, "SELECT anet_handle, fnet_handle FROM new_simnet_tbl", |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })
+    rows(
+        db,
+        "SELECT anet_handle, fnet_handle FROM new_simnet_tbl \
+         WHERE anet_handle != 0 AND fnet_handle != 0",
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
 }
 
 /// `((net elaboration made, which bit of the named object), one name it has)`.
@@ -531,5 +540,28 @@ mod tests {
         assert_eq!(lines_of(""), Vec::<u32>::new());
         assert_eq!(shape_ids("37 34 9 8"), vec![37, 34, 9, 8]);
         assert_eq!(shape_ids(""), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn a_zero_handle_is_a_placeholder_not_an_alias() {
+        // Verbatim shape from a real database: thousands of rows carry an
+        // `anet_handle` of 0. A handle names a context and 0 names none, so
+        // an edge through it would join every such row's net to every other.
+        use super::super::open::tests::{tmp, write_dbg};
+        use super::super::open::Kind;
+        let d = tmp("simnet-zero");
+        let p = d.join("run.dbg");
+        write_dbg(
+            &p,
+            Kind::Top,
+            6,
+            &["CREATE TABLE new_simnet_tbl \
+                (anet_handle, amsb, alsb, fnet_handle, fmsb, flsb, flags);
+               INSERT INTO new_simnet_tbl VALUES (0, NULL, NULL, 77, NULL, NULL, 2);
+               INSERT INTO new_simnet_tbl VALUES (0, NULL, NULL, 78, NULL, NULL, 4);
+               INSERT INTO new_simnet_tbl VALUES (11, NULL, NULL, 22, NULL, NULL, 4);"],
+        );
+        let db = Db::open(&p, Kind::Top).unwrap();
+        assert_eq!(simnet_links(&db).unwrap(), vec![(11, 22)]);
     }
 }

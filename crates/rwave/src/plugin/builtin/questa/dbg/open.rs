@@ -226,7 +226,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a file that is SQLite behind a Questa header, the way Questa
