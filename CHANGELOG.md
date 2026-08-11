@@ -52,6 +52,26 @@ because libwlf cannot report when it last changed.
   The file is only ever read; its header is corrected in memory. Each database
   states its own schema version, and an unrecognised one is refused rather than
   read as though the layout had held.
+
+  The reader was taken from answering a shaped fixture to answering two SoCs
+  whose hierarchies nobody arranged for it. Fifteen ways of missing an answer
+  came out of that, none of which a fixture can produce, because a fixture has
+  nothing in the tables a reader ignores: `inst_tbl` is not the list of
+  instances; `shape_tbl` holds a node only where elaboration needed one, and
+  `rw_process_tbl` is the only record of the rest; the reader and writer lists
+  are Tcl, so a bit-select arrives braced; a `for` generate replicates one
+  statement into a node per branch and every branch is an answer; a struct is
+  recorded a member at a time; a bus can reach a leaf module with no port row
+  of its own, and `simnet_tbl` is what says so; a variable declared inside a
+  named block has no signal row anywhere and only `proc_net_tbl` names it. Each
+  was found by asking QuestaSim the same question and comparing, and each
+  produced a confident wrong answer rather than an error.
+
+  Opening is now paged rather than read whole — a custom read-only VFS corrects
+  the header as SQLite asks for the first page — and the hierarchy is indexed by
+  descent instead of by writing out every full path. On a 1.3 GB database that
+  is 3 s off a cold query and 1.3 GB off its peak memory. `$RWAVE_DBG_OPEN=memory`
+  restores the old path.
 - `$RWAVE_QUESTA_VSIM`, which answers the same questions by driving `vsim`
   instead. That route came first and is kept for comparison; it is slower, needs
   a licence, and reports neither load locations nor control dependencies.
