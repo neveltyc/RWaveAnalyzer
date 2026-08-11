@@ -46,20 +46,33 @@ interfaces (modport, whole, arrays), packed structs and unions and their
 members, every assignment form, `wand`/`wor`/`tri` and implicit nets, memories,
 functions and tasks, and a hierarchical reference across instances.
 
+`constructs_vhdl.vhd` is the same idea in the other language — an entity with
+ports of each direction, a clocked process, a concurrent and a conditional
+assignment, a component instantiation and a for-generate — instantiated from
+the SystemVerilog top, because `rw_du_tbl` carries a `lang` column and a
+design unit that is not Verilog had never been asked about.
+
 ```bash
-vlib work && vlog -sv -mfcu constructs.sv
+vlib work && vcom constructs_vhdl.vhd && vlog -sv -mfcu constructs.sv
 vopt +acc tb -o tb_opt -debugdb
 vsim -c -postsimdataflow -debugdb=cx.dbg -wlf cx.wlf tb_opt \
      -do 'add log -r /*; run -all; quit -f'
 python3 verify/questa/diff.py --wlf cx.wlf --rwave ./rwave
 ```
 
-141 signals, a few seconds a run, and each construct sits in a scope named
+239 signals, a few seconds a run, and each construct sits in a scope named
 after it — a disagreement names the construct rather than a line number. It
-found two faults the day it was written: a struct member's readers were lost
-whenever the whole object also had shapes of its own, and a hierarchical
-reference was invisible because the reading module records it under the full
-path, which is not a local name of any scope the net sits in.
+found four faults in its first two days: a struct member's readers were lost
+whenever the whole object also had shapes of its own; a hierarchical reference
+was invisible because the reading module records it under the full path, which
+is not a local name of any scope the net sits in; a statement reachable both
+ways was reported twice under the two tables' spellings of it; and the tag
+rewrite between those spellings was a table of four, so a `force` — `#FORCE#`
+against `#f#` — went missing.
+
+The mixed-language half found nothing, which is also worth knowing: a VHDL
+unit's processes, its component instantiation and its generate branches are
+found the same way Verilog's are.
 
 ## Run
 

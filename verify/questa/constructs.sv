@@ -416,6 +416,75 @@ module cx_meth_user (cx_meth_if.user bus, input logic [7:0] d, output logic [7:0
   assign got = bus.peek();
 endmodule
 
+// -------------------------------------------------- the third sweep of forms
+//
+// What the first two sweeps left: the ways a net gets a driver without an
+// `assign` statement to point at, and the places a name can be reached from
+// that are not the scope it sits in.
+
+module cx_decl_assign (input logic a, input logic b, output logic y, output logic z);
+  wire w = a & b;                                   // assignment in the declaration
+  assign #2 y = w;                                  // a delay on a continuous assign
+  wire (strong1, weak0) s = a;                      // drive strength
+  assign z = s | w;
+endmodule
+
+// Bidirectional switches: the connection has no direction at all.
+module cx_switch (inout wire x, inout wire y, input logic en);
+  tranif1 u_t1 (x, y, en);
+  tran    u_t0 (x, y);
+endmodule
+
+// The rest of the gate primitives a gate-level netlist is made of.
+module cx_gates (input logic a, input logic b, input logic en,
+                 output logic o_nand, output logic o_nor, output logic o_xnor,
+                 output logic o_notif, output logic o_pull);
+  nand   u_nand  (o_nand, a, b);
+  nor    u_nor   (o_nor, a, b);
+  xnor   u_xnor  (o_xnor, a, b);
+  notif0 u_notif (o_notif, a, en);
+  pullup u_pull  (o_pull);
+endmodule
+
+// `alias` makes two names one net with no statement between them.
+module cx_alias (input logic [7:0] in_side, output logic [7:0] out_side);
+  // Both sides have to be nets: an alias is a wiring statement, not an
+  // assignment, which is the reason it is here at all.
+  wire [7:0] left, right;
+  alias left = right;
+  assign left = in_side;
+  assign out_side = right;
+endmodule
+
+// An assertion reads signals; whether it counts as a load is Questa's call,
+// but the reader must not fall over on the construct.
+module cx_assert (input logic clk, input logic req, input logic ack);
+  a_handshake: assert property (@(posedge clk) req |-> ##[0:3] ack);
+  always_comb begin
+    if (req && ack) begin
+      // an immediate assertion, which is a statement reading both
+      assert (req !== 1'bx);
+    end
+  end
+endmodule
+
+// A packed array of structs as a port, and a parameter of type.
+module cx_struct_array #(parameter type T = cx_pkg::req_t) (
+    input  T [1:0] pair,
+    output logic [7:0] picked
+);
+  assign picked = pair[1].addr ^ pair[0].addr;
+endmodule
+
+// Two processes writing one variable, which is what a `reg` driven from two
+// always blocks looks like to the netlist.
+module cx_two_writers (input logic clk, input logic sel, input logic [7:0] d,
+                       output logic [7:0] shared);
+  always_ff @(posedge clk) if (sel) shared <= d;
+  always_ff @(posedge clk) if (!sel) shared <= ~d;
+  final $display("shared=%0h", shared);             // a final block reading it
+endmodule
+
 // ------------------------------------------------------------------- top
 
 module tb;
@@ -566,6 +635,54 @@ module tb;
   initial begin
     #50 tb.u_hier_target.poked = 8'h11;
   end
+
+  // -- the third sweep
+  wire da_y, da_z;
+  cx_decl_assign u_decl (.a(stim[0]), .b(stim[1]), .y(da_y), .z(da_z));
+
+  wire sw_x, sw_y;
+  assign sw_x = stim[2] ? stim[3] : 1'bz;
+  cx_switch u_switch (.x(sw_x), .y(sw_y), .en(stim[4]));
+
+  wire g_nand, g_nor, g_xnor, g_notif, g_pull;
+  cx_gates u_gates (
+      .a(stim[0]), .b(stim[1]), .en(stim[2]),
+      .o_nand(g_nand), .o_nor(g_nor), .o_xnor(g_xnor),
+      .o_notif(g_notif), .o_pull(g_pull)
+  );
+
+  wire [7:0] alias_out;
+  cx_alias u_alias (.in_side(stim[7:0]), .out_side(alias_out));
+
+  cx_assert u_assert (.clk(clk), .req(stim[5]), .ack(stim[6]));
+
+  cx_pkg::req_t [1:0] pair;
+  wire [7:0] picked;
+  always_comb begin
+    pair[0].addr = stim[7:0];
+    pair[0].len = stim[11:8];
+    pair[0].valid = stim[12];
+    pair[1].addr = stim[15:8];
+    pair[1].len = stim[3:0];
+    pair[1].valid = stim[4];
+  end
+  cx_struct_array u_struct_array (.pair(pair), .picked(picked));
+
+  wire [7:0] shared_q;
+  cx_two_writers u_two_writers (.clk(clk), .sel(stim[7]), .d(stim[7:0]), .shared(shared_q));
+
+  // A hierarchical reference reaching into one element of an instance array,
+  // which is a scope the walk has to descend through rather than name.
+  wire [3:0] reach_arr;
+  assign reach_arr = tb.u_arrays.u_arr[2].y;
+
+  // -- the other language, instantiated directly from here
+  wire [7:0] vhdl_q;
+  wire [3:0] vhdl_lanes;
+  cx_vhdl u_vhdl (
+      .clk(clk), .d(stim[7:0]), .sel(stim[6]),
+      .q(vhdl_q), .lanes(vhdl_lanes)
+  );
 endmodule
 
 // A bound instance: connectivity created from outside the target module.
