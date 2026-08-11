@@ -82,6 +82,15 @@ lists every pin on the net, which rwave reports as a port hop and then drops
 once it has the statement. Comparing those measures the difference in what each
 enumerates, so both sides are filtered and what was removed is printed.
 
+`--max-extra N` fails the run when more than N signals are answered beyond
+what vsim reports. Missing answers fail on their own; extras do not, because
+the database really does hold drivers Questa's post-simulation commands decline
+to print. That leniency only covers one direction, though: a change that
+invents connectivity keeps every answer vsim gave and adds to it, which passes
+a check that only looks for what is missing. The construct fixture's extras are
+known and fixed, so pin them — `--max-extra 20` — and a regression that
+manufactures endpoints fails rather than passing quietly.
+
 `--shard I/N` checks signals `I, I+N, I+2N…`. One shard samples the whole
 hierarchy where `--limit` takes an alphabetical prefix, which on a large design
 covers only the first scope: veerwolf's first 60 signals disagree nowhere, and

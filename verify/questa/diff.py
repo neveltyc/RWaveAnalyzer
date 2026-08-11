@@ -212,6 +212,20 @@ def main():
         "hour — most of which is vsim enumerating a hierarchy that has not "
         "changed. Run the sweep to prove no regression, not to test a change.",
     )
+    ap.add_argument(
+        "--max-extra",
+        type=int,
+        default=None,
+        metavar="N",
+        help="fail when more than N signals are answered beyond what vsim "
+        "reports. Missing answers already fail; extras do not, because reading "
+        "the database really does surface drivers vsim's post-simulation "
+        "commands decline to print, and each of those was checked against the "
+        "RTL once. But that leniency hides the other direction: a change that "
+        "invents connectivity keeps every answer vsim gave and simply adds. On "
+        "a fixture whose extras are known and fixed, pin the number here and a "
+        "regression that manufactures endpoints fails the run.",
+    )
     args = ap.parse_args()
 
     if args.signals:
@@ -266,11 +280,20 @@ def main():
             objects + r[3],
         )
 
+    beyond = extra + unverifiable
     print(
         "\n== RESULT: %d signal(s) checked, %d missing, %d answered beyond vsim, "
         "%d object endpoints not compared =="
-        % (len(sigs), bad, extra + unverifiable, objects)
+        % (len(sigs), bad, beyond, objects)
     )
+    if args.max_extra is not None and beyond > args.max_extra:
+        print(
+            "FAIL: %d answered beyond vsim, over the %d this design is known to "
+            "have. An answer vsim does not give is not wrong by itself, but more "
+            "of them than last time is connectivity that was invented since."
+            % (beyond, args.max_extra)
+        )
+        return 1
     return 1 if bad else 0
 
 

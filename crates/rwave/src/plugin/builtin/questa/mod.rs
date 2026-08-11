@@ -33,6 +33,12 @@ pub fn err(msg: impl AsRef<str>) -> String {
 /// The scope is passed in rather than re-derived by splitting `path`, because a
 /// Verilog escaped identifier may itself contain a dot and splitting would cut
 /// it in the wrong place.
+/// The scope is re-spelled by replacing its separators, which is exact for
+/// every name rwave can represent: its paths are dot-separated and carry no
+/// escaping, so a scope component holding a dot of its own — a Verilog
+/// `\esc.name` naming an instance rather than the signal — is already
+/// ambiguous before it arrives here. The leaf is the case worth protecting and
+/// it is protected, by taking the scope as given rather than splitting.
 pub fn to_questa(path: &str, scope: &str) -> String {
     let leaf = match path.strip_prefix(scope) {
         Some(rest) if !scope.is_empty() => rest.strip_prefix('.').unwrap_or(rest),
