@@ -130,11 +130,15 @@ def norm_proc(name):
 def is_statement(name):
     """Whether an endpoint names a statement rather than a declared object.
 
-    vsim's `drivers`/`readers` enumerate statements, which it spells `#p#47`,
-    `#a#26`, `#i#102`. A clocked memory is a load of its clock and is reported
-    by rwave as the object it is — `cpuregs`, with the line it is declared on —
-    which those commands never list. Comparing the two on that endpoint would
-    measure the difference in what each enumerates, not a disagreement.
+    Both tools spell a statement with a `#tag#`: vsim as `#ALWAYS#47`, the
+    database as `#p#47`. A name without one is a declared object — a port, a
+    cell pin, a memory — and the two tools do not enumerate the same ones. A
+    clocked memory is a load of its clock and rwave reports it as the object it
+    is, which `readers` never lists; on a design full of behavioural cells
+    `readers` lists every pin on the net, which rwave reports as a port hop and
+    then drops once it has the statement. Comparing those would measure the
+    difference in what each enumerates rather than a disagreement, so the filter
+    applies to BOTH sides and what it removed is counted and printed.
     """
     return name.rsplit("/", 1)[-1].startswith("#")
 
@@ -145,14 +149,37 @@ def norm_endpoint(path):
     return scope + "/" + norm_proc(leaf)
 
 
-def rwave_trace(rwave, wlf, sig, load):
-    argv = [rwave, "trace", wlf, sig, "--json", "--limit", "0"]
-    if load:
-        argv.append("--load")
-    r = subprocess.run(argv, capture_output=True, text=True)
-    if r.returncode != 0:
-        return None, r.stderr.strip()
-    return json.loads(r.stdout), None
+def rwave_answers(rwave, wlf, sigs):
+    """Every driver and load answer, from one rwave process.
+
+    Batch rather than a process per query: opening the design database is what
+    a trace costs — seconds on a large one, against milliseconds for the query
+    itself — and a run over thousands of signals would otherwise pay it twice
+    per signal. Answers come back one JSON object per line, tagged with the
+    1-based index of the command that produced them.
+    """
+    script = []
+    for s in sigs:
+        script.append("trace %s --limit 0" % s)
+        script.append("trace %s --load --limit 0" % s)
+    r = subprocess.run(
+        [rwave, "--batch", "--json", wlf],
+        input="\n".join(script) + "\n",
+        capture_output=True,
+        text=True,
+    )
+    out = {}
+    for line in r.stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        o = json.loads(line)
+        i = int(o["id"]) - 1
+        out[(i // 2, bool(i % 2))] = (
+            (o["result"], None) if o.get("ok") else (None, o.get("error", "").strip())
+        )
+    if not out and r.returncode != 0:
+        sys.exit("FAIL: rwave --batch produced nothing: %s" % r.stderr.strip())
+    return out
 
 
 def main():
@@ -161,15 +188,47 @@ def main():
     ap.add_argument("--rwave", default="rwave")
     ap.add_argument("--vsim", default="vsim")
     ap.add_argument("--limit", type=int, default=0, help="check at most N signals")
+    ap.add_argument(
+        "--shard",
+        metavar="I/N",
+        help="check signals I, I+N, I+2N... of the sorted list. One shard is a "
+        "sample spread over the whole hierarchy rather than a prefix of it, and "
+        "the N shards together cover every signal, so a design too large to "
+        "check in one pass can be split across concurrent runs.",
+    )
+    ap.add_argument(
+        "--block",
+        type=int,
+        default=250,
+        help="how many signals to hold answers for at once (default 250)",
+    )
+    ap.add_argument(
+        "--signals",
+        metavar="FILE",
+        help="check only the paths in FILE, one per line, instead of the whole "
+        "design. What a fix needs is the signals that disagreed, and asking "
+        "about twenty of them takes a minute where the full sweep takes an "
+        "hour — most of which is vsim enumerating a hierarchy that has not "
+        "changed. Run the sweep to prove no regression, not to test a change.",
+    )
     args = ap.parse_args()
 
-    names = vsim_batch(args.vsim, args.wlf, ["echo [find signals -r /*]"])
-    sigs = []
-    for line in names.get(0, []):
-        sigs += [s for s in line.split() if s.startswith("/")]
-    # vopt's own temporaries are in the design database but are not signals
-    # anyone traces, and neither backend should be judged on them.
-    sigs = sorted({s for s in sigs if "dbgTemp" not in s.rsplit("/", 1)[-1]})
+    if args.signals:
+        sigs = [l.strip() for l in open(args.signals) if l.strip().startswith("/")]
+    else:
+        names = vsim_batch(args.vsim, args.wlf, ["echo [find signals -r /*]"])
+        sigs = []
+        for line in names.get(0, []):
+            sigs += [s for s in line.split() if s.startswith("/")]
+        # vopt's own temporaries are in the design database but are not signals
+        # anyone traces, and neither backend should be judged on them.
+        sigs = sorted({s for s in sigs if "dbgTemp" not in s.rsplit("/", 1)[-1]})
+    if args.shard:
+        i, _, n = args.shard.partition("/")
+        if not n.isdigit() or not i.isdigit() or not 0 <= int(i) < int(n):
+            print("FAIL: --shard wants I/N with 0 <= I < N")
+            return 1
+        sigs = sigs[int(i) :: int(n)]
     if args.limit:
         sigs = sigs[: args.limit]
     print("signals to check: %d" % len(sigs))
@@ -177,25 +236,55 @@ def main():
         print("FAIL: vsim listed no signals; is the .dbg beside the .wlf?")
         return 1
 
-    cmds = []
-    for s in sigs:
-        cmds.append("echo [find drivers -possible -tcl {%s}]" % s)
-        cmds.append("find drivers -possible -transcript {%s}" % s)
-        # `drivers` crosses hierarchy where `find drivers -possible` declines to
-        # answer for a port at all, so it is the oracle for exactly the cases
-        # the other one leaves blank.
-        cmds.append("drivers {%s}" % s)
-        cmds.append("readers {%s}" % s)
-    truth = vsim_batch(args.vsim, args.wlf, cmds)
+    bad, extra, unverifiable, objects = 0, 0, 0, 0
+    # A block at a time. Both sides answer in bulk — one vsim session, one rwave
+    # process — but holding every answer at once is what decides the memory,
+    # and one net in a cell-heavy design has a thousand readers: over a few
+    # thousand signals that reaches gigabytes and the run is killed rather than
+    # finished. Per block the cost is one vsim start and one design open.
+    for base in range(0, len(sigs), args.block):
+        block = sigs[base : base + args.block]
+        cmds = []
+        for s in block:
+            cmds.append("echo [find drivers -possible -tcl {%s}]" % s)
+            cmds.append("find drivers -possible -transcript {%s}" % s)
+            # `drivers` crosses hierarchy where `find drivers -possible` declines
+            # to answer for a port at all, so it is the oracle for exactly the
+            # cases the other one leaves blank.
+            cmds.append("drivers {%s}" % s)
+            cmds.append("readers {%s}" % s)
+        truth = vsim_batch(args.vsim, args.wlf, cmds)
+        answers = rwave_answers(
+            args.rwave, args.wlf, [s.lstrip("/").replace("/", ".") for s in block]
+        )
+        r = compare(block, truth, answers)
+        bad, extra, unverifiable, objects = (
+            bad + r[0],
+            extra + r[1],
+            unverifiable + r[2],
+            objects + r[3],
+        )
 
-    bad, extra, unverifiable = 0, 0, 0
+    print(
+        "\n== RESULT: %d signal(s) checked, %d missing, %d answered beyond vsim, "
+        "%d object endpoints not compared =="
+        % (len(sigs), bad, extra + unverifiable, objects)
+    )
+    return 1 if bad else 0
+
+
+def compare(sigs, truth, answers):
+    """One block: `(missing, extra, unverifiable, objects)`."""
+    bad, extra, unverifiable, objects = 0, 0, 0, 0
     for i, s in enumerate(sigs):
         want_drv = tcl_rows(truth.get(4 * i, [])) | table_rows(truth.get(4 * i + 1, []))
-        want_drv_ep = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 2, []), "Driver")}
-        want_ld = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 3, []), "Reader")}
-        rw_sig = s.lstrip("/").replace("/", ".")
+        all_drv_ep = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 2, []), "Driver")}
+        all_ld = {norm_endpoint(e) for e in endpoints(truth.get(4 * i + 3, []), "Reader")}
+        want_drv_ep = {e for e in all_drv_ep if is_statement(e)}
+        want_ld = {e for e in all_ld if is_statement(e)}
+        objects += len(all_drv_ep - want_drv_ep) + len(all_ld - want_ld)
 
-        got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=False)
+        got, err = answers.get((i, False), (None, "no answer from rwave"))
         if got is None:
             # A signal vsim lists but rwave will not trace is only acceptable
             # when there was nothing to find in the first place.
@@ -225,7 +314,11 @@ def main():
             k for k in want_by_place if k in got_by_place and not (got_by_place[k] & want_by_place[k])
         ]
         if not want_drv and not want_drv_ep and got_drv:
+            # vsim answered nothing at all here. Printed like every other
+            # difference: a count on its own says how many to look at without
+            # saying which, and these are the ones most worth looking at.
             unverifiable += 1
+            print("\n%s: vsim gives no driver; rwave gives %s" % (s, sorted(got_drv)))
         elif missing or wrong:
             print("\n%s drivers differ\n  vsim : %s\n  rwave: %s" % (s, sorted(want_drv), sorted(got_drv)))
             bad += 1
@@ -247,7 +340,7 @@ def main():
             extra += 1
             print("\n%s: rwave reports %s that vsim does not" % (s, sorted(got_by_place.keys() - want_by_place.keys())))
 
-        got, err = rwave_trace(args.rwave, args.wlf, rw_sig, load=True)
+        got, err = answers.get((i, True), (None, "no answer from rwave"))
         if got is None:
             if want_ld:
                 print("\n%s\n  rwave failed: %s\n  vsim loads: %s" % (s, err, sorted(want_ld)))
@@ -258,9 +351,6 @@ def main():
             for h in got["loads"]
             if is_statement(h["raw_kind"])
         }
-        if not want_ld and got_ld:
-            unverifiable += 1
-            continue
         if want_ld - got_ld:
             print("\n%s loads missing\n  vsim : %s\n  rwave: %s" % (s, sorted(want_ld), sorted(got_ld)))
             bad += 1
@@ -275,12 +365,7 @@ def main():
                 continue
             extra += 1
             print("\n%s: rwave reports loads vsim does not: %s" % (s, sorted(got_ld - want_ld)))
-
-    print(
-        "\n== RESULT: %d signal(s) checked, %d missing, %d answered beyond vsim =="
-        % (len(sigs), bad, extra + unverifiable)
-    )
-    return 1 if bad else 0
+    return bad, extra, unverifiable, objects
 
 
 if __name__ == "__main__":

@@ -38,33 +38,74 @@ the dataset usable afterwards. The `.dbg` must keep the `.wlf`'s basename.
 python3 verify/questa/diff.py --wlf run.wlf --rwave ./rwave
 ```
 
-Expected: `RESULT: N signal(s) checked, 0 missing, M answered beyond vsim`.
-A missing answer is a failure and prints both sides. `--limit N` checks a prefix
-of the signal list while iterating.
+Expected: `RESULT: N signal(s) checked, 0 missing, M answered beyond vsim, K
+object endpoints not compared`. A missing answer is a failure and prints both
+sides, and so does every difference behind `M` — a count on its own says how
+many to look at without saying which.
+
+`K` counts endpoints vsim names that are not statements. Both tools spell a
+statement with a `#tag#`; a name without one is a declared object, and the two
+do not enumerate the same ones. On a design full of behavioural cells `readers`
+lists every pin on the net, which rwave reports as a port hop and then drops
+once it has the statement. Comparing those measures the difference in what each
+enumerates, so both sides are filtered and what was removed is printed.
+
+`--shard I/N` checks signals `I, I+N, I+2N…`. One shard samples the whole
+hierarchy where `--limit` takes an alphabetical prefix, which on a large design
+covers only the first scope: veerwolf's first 60 signals disagree nowhere, and
+1852 spread across it disagreed in 160 places. The N shards together cover every
+signal.
 
 ## Answers vsim does not give
 
-`M` is not a defect count. vsim declines to answer several questions it is
-asked, and rwave, reading the database rather than a rendered view, answers
-them. Three classes have been checked against the RTL:
+`M` is not a defect count. vsim declines to answer questions it is asked, and
+rwave, reading the database rather than a rendered view, answers them. What
+remains under `M` is one class, checked against the RTL:
 
 | class | why vsim is silent | checked against |
 |:--|:--|:--|
-| a variable rather than a net — picorv32's `set_mem_do_rdata` | `find drivers -possible` covers nets; on a variable it reports an internal error and marks the result *PARTIAL* | `picorv32.v:1199`, a `reg` set at 1407 and 1898 and read at 1958 |
-| a clocked memory as a load of its clock — `cpuregs`, `_ram` | `readers` enumerates statements, not declared objects | `picorv32.v:203`, `reg [31:0] cpuregs [0:regfile_size-1]` |
-| a port or interface member driven from an enclosing scope | `find drivers -possible` does not follow a port, which is the whole point of the feature | `dut.sv:102`, the `initial` block that drives `b.data`; `tinyriscv.v:361`, `.raddr_o(clint_raddr_o)` |
+| a port driven or read from the scope around it | `find drivers -possible` does not follow a port, which is the whole point of the feature | `dut.sv:102`, the `initial` block driving `b.data`; `tinyriscv.v:361`, `.raddr_o(clint_raddr_o)`; `ifu_mem_ctl.sv:418`, the `always_comb` feeding `miss_state_ff`'s `din` at 456, and `:461`, the `assign` reading the same net |
 
-The count is printed rather than hidden: a fourth class would be a new claim,
-and it should be looked at rather than assumed to belong to one of these.
+Two more used to be counted here and are now settled in the comparison itself,
+because both were the harness measuring a difference in what each tool
+enumerates rather than a disagreement:
 
-Run it on more than the fixture — a wrong column reading often only shows up on
-real RTL:
+- **a declared object as an endpoint** — a clocked memory is a load of its
+  clock, and on a design of behavioural cells `readers` lists every pin on the
+  net. Both sides are filtered to statements and what was dropped is counted
+  as `K`.
+- **a statement that reads what it writes** — the hold path of `if (en) q <= d`
+  reads `q`. `readers` omits it, NPI reports it, and matching NPI is the
+  target, so it is waived wherever the load is the signal's own driver. All ten
+  of picorv32's were checked to be exactly that before the rule was widened.
 
-| design | why |
+Every difference is printed, including the ones only counted before: a count
+says how many to look at without saying which, and the ten above turned out to
+be one class rather than ten claims.
+
+## Run it on a design nobody shaped
+
+A hand-written fixture tests whether a decoding rule is right. It cannot test
+whether a table was read at all, because the fixture has nothing in the tables
+the reader ignores. Every one of these was found by running the check over a
+whole SoC, and none of them shows up on `dut.sv`, picorv32 or tinyriscv — all
+three answer with nothing missing both before and after each fix:
+
+| what the reader had wrong | how it looked |
 |:--|:--|
-| `dut.sv` | the shaped cases above |
-| picorv32 | real RTL, wide buses, generate blocks |
-| a full SoC | hierarchy depth and port crossing |
+| `inst_tbl` taken as the list of instances; it names about half of them | the answer stopped one level above the `always_ff` and came back as port hops |
+| a statement inside a generate block is spelled with the block by `shape_tbl` and without it by `rw_process_tbl` | every statement in every generate block unreachable from the statement view |
+| the walk to the enclosing statement stopped below the module, not at the statement | a generate block reported in place of the `always_ff` inside it |
+| `PROCESS-CAUTION` and `PROCESS-MEMACESS` are statements too | as above, for those |
+| `shape_tbl` holds a node only where elaboration needed one — on a large design, half the statements have none | those statements dropped entirely, though `rw_process_tbl` gives their file and line |
+| a bus can arrive at a leaf module with no `port_tbl` row of its own | the walk stopped at the last instance that had one |
+| a struct or array is recorded a member at a time, and the whole-object row is empty | nothing found for the object |
+| the reader/writer lists are Tcl, so an element with a bit-select is braced | every vector reference in the module dropped |
+| a `for` generate replicates a statement and each branch is a separate shape | all branches refused as an ambiguous name |
+| `signal_tbl` carries a second pair of columns naming the primitive under the statement | the loop header reported instead of the assignment |
+
+The differential is the only thing that finds these: each one produces a
+confident wrong answer, not an error.
 
 ## Cross-backend parity
 
