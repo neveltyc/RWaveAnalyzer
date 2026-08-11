@@ -117,6 +117,11 @@ struct Module {
     /// Statement name -> where it is, for the statements whose shape records no
     /// line of its own.
     proc_loc: HashMap<String, (i64, Option<u32>)>,
+    /// Bare statement name -> the name with the block label the process table
+    /// records for it. `shape_tbl` names the same statement `#p#129` where
+    /// `rw_process_tbl` calls it `#p#129(input_translation)`, and the label is
+    /// what someone reading the RTL recognises.
+    labelled: HashMap<String, String>,
     /// The names the source declares. Anything else in this module is a `vopt`
     /// temporary: real to the netlist, absent from the RTL and from the
     /// waveform, and not something to hand back as an endpoint.
@@ -510,10 +515,25 @@ impl Design {
                     touched.entry(w).or_default().1.push(p.name.clone());
                 }
             }
+            let labelled: HashMap<String, String> = proc_loc
+                .keys()
+                .filter(|n| n.ends_with(')'))
+                .map(|n| (label_stripped(n).to_string(), n.clone()))
+                .collect();
             let declared = schema::declared(&db)?.into_iter().collect();
             self.modules.insert(
                 duid,
-                Module { signals, shapes, files, by_name, by_tail, touched, proc_loc, declared },
+                Module {
+                    signals,
+                    shapes,
+                    files,
+                    by_name,
+                    by_tail,
+                    touched,
+                    proc_loc,
+                    labelled,
+                    declared,
+                },
             );
         }
         Ok(&self.modules[&duid])
@@ -749,25 +769,21 @@ impl Design {
 
                 let (shape_ids, shapeless) = {
                     let m = self.module(duid)?;
-                    // A struct or an array is recorded a member at a time —
-                    // `slv_req_i.aw` and `slv_req_i.ar` carry the shapes and
-                    // `slv_req_i` itself carries none — so a question about the
-                    // whole object is a question about all of its parts. Only
-                    // when the name itself has nothing: where a module records
-                    // both, the exact name is the answer.
-                    let names = match m.signals.get(&local) {
-                        Some((r, w)) if !r.is_empty() || !w.is_empty() => vec![local.clone()],
-                        _ => {
-                            let mut v: Vec<String> = m
-                                .signals
-                                .keys()
-                                .filter(|k| member_of(k, &local))
-                                .cloned()
-                                .collect();
-                            v.sort();
-                            if v.is_empty() { vec![local.clone()] } else { v }
-                        }
-                    };
+                    // A struct or an array is recorded a member at a time, and
+                    // a module may record both: `fu_data_i` carries the shapes
+                    // that read it whole, `fu_data_i.operation` those that read
+                    // that field, and the two sets are different statements. A
+                    // question about the object is a question about all of it,
+                    // so the members are added to the name rather than used
+                    // only when it has nothing of its own — asking about
+                    // `fu_data_i` and being told only about the assignments
+                    // that take it whole is a missing answer, not a precise
+                    // one.
+                    let mut names = vec![local.clone()];
+                    let mut members: Vec<String> =
+                        m.signals.keys().filter(|k| member_of(k, &local)).cloned().collect();
+                    members.sort();
+                    names.append(&mut members);
                     let mut ids = Vec::new();
                     for n in &names {
                         if let Some((readers, writers)) = m.signals.get(n) {
@@ -902,13 +918,19 @@ impl Design {
                 }
             }
         }
-        // Nothing at all from the module tables. That happens for a variable
-        // declared inside a named block, which gets no `signal_tbl` row and so
-        // cannot be looked up by name anywhere; the top level records the pair
-        // directly. Only as a last resort: where the module tables answer they
-        // give the statement's operands and its place in the netlist, and this
-        // gives a name and a line.
-        if hops.is_empty() {
+        // What the module tables cannot be asked about. Two things end up
+        // here. A variable declared inside a named block gets no `signal_tbl`
+        // row, so no name reaches it. And a hierarchical reference —
+        // `tb.u_hier_target.deep` read inside a sibling module — is recorded
+        // by the reading module under that whole path, which is not a local
+        // name of any scope the net sits in, so walking up from the net never
+        // arrives at the module doing the reading.
+        //
+        // The top level records the pair directly, so it answers both. It is
+        // consulted always rather than only when nothing else answered: a
+        // statement it names is one Questa says touches this net, and the two
+        // views of a statement collapse in the pass above.
+        {
             let want_writer = matches!(dir, Direction::Driver);
             let touching: Vec<(i64, bool)> = group
                 .iter()
@@ -935,6 +957,23 @@ impl Design {
                 hops.push(process_hop(m, &name, file, line, &inst_path, crossed));
             }
         }
+        // One statement, one hop. The two tables spell a statement
+        // differently — `shape_tbl` gives `#p#379` where `rw_process_tbl`
+        // gives `#p#379(exception_handling)` — and a signal reachable both as
+        // itself and through a member is found down both paths, so the same
+        // assignment can arrive twice under two names. The label is the better
+        // name of the two, so the labelled hop is the one kept.
+        hops.sort_by_key(|h| std::cmp::Reverse(h.statement.len()));
+        let mut kept = HashSet::default();
+        hops.retain(|h| {
+            kept.insert((
+                h.scope.clone(),
+                h.file.clone(),
+                h.line,
+                label_stripped(&h.statement).to_string(),
+            ))
+        });
+
         // A port hop says only "the value comes from the other side of this
         // boundary". That is worth reporting when it is all there is — which is
         // what `boundary_only` means — and is noise once the statement itself
@@ -995,6 +1034,17 @@ fn hop_of(
         .filter(|f| !f.is_empty())
         .cloned();
 
+    // The statement's own name, with the block label when the process table
+    // has one: `shape_tbl` drops it, and it is how the RTL names the block.
+    // A statement inside a generate block is spelled with the branch in
+    // front; that prefix is not part of the name the other table keys on, and
+    // it does not belong on the scope either — the scope qualifies the
+    // operands, and a signal a generate block reads is declared in the module
+    // around it, so `uut.genblk3.reg_op1` would name nothing.
+    let bare = identifier(&s.spec2);
+    let tail = bare.rsplit('/').next().unwrap_or(bare);
+    let named = m.labelled.get(tail).map(String::as_str).unwrap_or(bare);
+
     // A driver's operands are what it reads; a load's are what it writes.
     let mut signals: Vec<String> = match dir {
         Direction::Driver => schema::operands(&s.inputs),
@@ -1022,14 +1072,10 @@ fn hop_of(
     Hop {
         group: 0,
         kind: kind_of(&s.kind, &s.spec2),
-        raw_kind: if s.spec2.is_empty() {
-            s.kind.clone()
-        } else {
-            identifier(&s.spec2).to_string()
-        },
+        raw_kind: if s.spec2.is_empty() { s.kind.clone() } else { named.to_string() },
         // The database records a location but no text; the caller fills this in
         // from the source file when it can read it.
-        statement: identifier(&s.spec2).to_string(),
+        statement: named.to_string(),
         scope,
         file,
         line,
@@ -1155,6 +1201,16 @@ fn construct_name(name: &str) -> String {
         _ => return name.to_string(),
     };
     format!("#{tag}#{rest}")
+}
+
+/// A statement name without the block label Questa appends to it:
+/// `#p#379(exception_handling)` and `#p#379` are the same statement, named by
+/// the two tables that record it.
+fn label_stripped(name: &str) -> &str {
+    match name.split_once('(') {
+        Some((base, _)) => base,
+        None => name,
+    }
 }
 
 /// Whether `name` is a part of `whole` — `slv_req_i.aw` of `slv_req_i`, or
@@ -1306,6 +1362,7 @@ mod tests {
             by_tail: HashMap::default(),
             touched: HashMap::default(),
             proc_loc: HashMap::default(),
+            labelled: HashMap::default(),
             declared: HashSet::default(),
             files: vec!["dut.sv".into()],
             shapes: HashMap::from_iter([
@@ -1338,6 +1395,7 @@ mod tests {
             by_tail: HashMap::default(),
             touched: HashMap::default(),
             proc_loc: HashMap::default(),
+            labelled: HashMap::default(),
             declared: HashSet::default(),
             files: vec![],
             shapes: HashMap::from_iter([(1, mk(1, 2)), (2, mk(2, 1))]),
