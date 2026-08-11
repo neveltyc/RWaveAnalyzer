@@ -358,6 +358,10 @@ signals each endpoint touches, so `--at` annotates either direction. `--control`
 adds the gating conditions. `--kdb` and `--top` name parts of a Verdi design
 library and are refused here rather than ignored.
 
+Ask about a whole signal: part of one (`bus[3]`, `s.field`) is refused, because
+the database records no bit range and the only answer available would be what
+drives the whole object.
+
 ### FSDB
 
 rwave supports two ways to read `.fsdb` files. Both are experimental and

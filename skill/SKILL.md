@@ -133,6 +133,8 @@ failure, so do not retry it on another file format.
 - A `.wlf` needs Questa's `.dbg` beside it and the library it was optimised in
   (`work/` by default) reachable; rwave reads the database itself, so there is no
   `vsim` and no licence involved. Drivers and loads both carry `file:line`.
+- Name a whole signal. A bit or field of one (`bus[3]`, `s.field`) is refused,
+  not answered — do not retry it as the whole object without saying so.
 - Read `status` before trusting the list: `resolved`, `boundary_only` (the
   driver is outside the traced hierarchy), `no_driver_found`.
 - Clock, reset, and enclosing `if`/`case` are excluded unless you pass

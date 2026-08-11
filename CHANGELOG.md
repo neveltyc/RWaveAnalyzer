@@ -4,193 +4,71 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-08-11
 
-Two new commands for questions a waveform alone cannot answer: where am I in
-the hierarchy, and who drives this signal.
-
-`tree` browses the hierarchy on every format. It builds its own scope index
-rather than reusing the flat scope list, which records only scopes that
-directly hold a signal, leaving a module of nothing but sub-modules invisible.
-`tree --of SIGNAL` prints a signal's full ancestor chain, the one-shot way back
-up from a deep leaf.
-
-`trace` reports drivers and loads with the driving statement's source text and
-`file:line`, and with `--at T` gives each endpoint its value then. Experimental,
-and it needs a design database beside the waveform, because connectivity is not
-in the dump: an FSDB with Verdi's KDB, read through the built-in NPI backend, or
-a WLF with QuestaSim's post-simulation debug database. Every other format says so
-and stops.
-
-WLF point queries stop replaying the run. `snapshot --at` and `compare` on
-`.wlf` now seek: libwlf's range scan starts at the window and supplies each
-signal's carried value at scan start, so a query reads the instant, not the
-history before it. On a 48 MB Questa capture of 20 M time steps that is ~2 ms
-at flat memory where the full decode took ~600 ms. One deviation, documented
-on the backend: the carried value is tagged one tick before the window,
-because libwlf cannot report when it last changed.
+Two new commands for questions a waveform alone cannot answer — where am I in
+the hierarchy, and who drives this signal — and WLF point queries that seek
+instead of replaying the run.
 
 ### Added
-- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
+- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format. It builds its
+  own scope index rather than reusing the flat scope list, so a module of nothing
+  but sub-modules is not invisible; `--of` prints a signal's ancestor chain.
 - `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`.
-  `--control` adds the enclosing `if`/`case`/clock-edge dependencies; both design
-  databases record them, so `first_valid` is never mistaken for a reset by a name
-  match.
-- `trace` reads the design library location from the FSDB header, so the normal
-  case needs no argument. `--kdb` overrides it, and is taken literally. There is
-  no directory scan: a neighbouring build is not evidence that it is the right
-  build, so an unresolvable location is refused rather than guessed at.
+  Drivers and loads come back with the statement's source text and `file:line`,
+  `--at T` gives each endpoint its value then, and `--control` adds the
+  `if`/`case`/clock-edge conditions that gate the assignment. Experimental.
+
+  Connectivity is not in a waveform, so this needs the design database beside it:
+  an FSDB with Verdi's KDB, or a WLF with QuestaSim's post-simulation `.dbg`
+  (`vopt +acc -debugdb`). Every other format says so and stops.
+
+  The `.dbg` is read directly, in process — no `vsim`, no licence, a query in
+  milliseconds — which is what lets loads carry locations and `--control` be
+  answered at all: Questa's own post-simulation commands print neither. The file
+  is only ever read. A database whose schema version or column meanings are not
+  the ones this reader knows is refused rather than read as though the layout had
+  held; an endpoint with no source location is not reported; and a question about
+  part of an object (`bus[3]`, `s.field`) is refused, because the only answer
+  available would be what drives the whole thing.
 - `$RWAVE_NPI_L1_LIB`, for a Verdi install whose `libnpiL1.so` does not sit next
   to `libNPI.so`.
-- **`trace` on a `.wlf`, read from Questa's debug database.** The `.dbg` that
-  `vopt -debugdb` writes is SQLite behind a replaced 16-byte header, and it holds
-  more than QuestaSim's post-simulation commands will print: which statements
-  read a signal and which write it, each with a source location, and the
-  conditions that gate them. rwave reads it in process — no `vsim`, no licence,
-  a query in milliseconds — so drivers *and* loads carry `file:line`, the source
-  statement, and their operands, and `--control` is answered rather than refused.
-  The file is only ever read; its header is corrected in memory. Each database
-  states its own schema version, and an unrecognised one is refused rather than
-  read as though the layout had held.
-
-  The reader was taken from answering a shaped fixture to answering two SoCs
-  whose hierarchies nobody arranged for it. Fifteen ways of missing an answer
-  came out of that, none of which a fixture can produce, because a fixture has
-  nothing in the tables a reader ignores: `inst_tbl` is not the list of
-  instances; `shape_tbl` holds a node only where elaboration needed one, and
-  `rw_process_tbl` is the only record of the rest; the reader and writer lists
-  are Tcl, so a bit-select arrives braced; a `for` generate replicates one
-  statement into a node per branch and every branch is an answer; a struct is
-  recorded a member at a time; a bus can reach a leaf module with no port row
-  of its own, and `simnet_tbl` is what says so; a variable declared inside a
-  named block has no signal row anywhere and only `proc_net_tbl` names it. Each
-  was found by asking QuestaSim the same question and comparing, and each
-  produced a confident wrong answer rather than an error.
-
-  Two more came from a large SoC testbench's own wiring. Questa writes an
-  interface port's pin rows for one instantiation of a module and not the
-  rest, so a pinless port is bound by asking which interface's members
-  elaboration collapsed into its module — and left unbound when two
-  candidates qualify. And `new_simnet_tbl` rows with a handle of 0 are
-  tie-offs, not aliases: read as edges they glued 76 031 nets into one,
-  which is why unrelated config signals once shared one seventy-thousand-
-  endpoint answer.
-
-  The remaining over-reporting had one shape: a vector's node joining
-  every bit's net — through its alias rows, and through the object-level
-  port edge a gathering vector shares with each branch's scalar. Bits now
-  stay apart. Scalar aliases and same-slice rows remain edges, each
-  simulation net's scalars are chained bit-exact in their place, and a
-  vector is consulted for the bit in hand rather than walked through:
-  one generate branch no longer answers with the other's statements.
-
-  Three more answers came from `verify/questa/constructs.sv`, a fixture
-  holding one instance of every kind of connectivity the language can
-  express rather than one design's worth of the ones it happened to use.
-  A struct field's readers were dropped whenever the whole object also
-  carried shapes; a hierarchical reference was invisible, because the
-  module doing the reading records it under the whole path and no walk
-  from the net arrives there; and a statement found down two paths was
-  reported twice, once with the block label and once without.
-
-  Opening is now paged rather than read whole — a custom read-only VFS corrects
-  the header as SQLite asks for the first page — and the hierarchy is indexed by
-  descent instead of by writing out every full path. On a 1.3 GB database that
-  is 3 s off a cold query and 1.3 GB off its peak memory. `$RWAVE_DBG_OPEN=memory`
-  restores the old path.
-
-### Fixed
-- **A `.dbg` whose columns have stopped meaning what they did is refused rather
-  than read.** The schema version says which layout a database is, not that its
-  columns still hold what they held, and a handle column that has become
-  something else would be read as a handle anyway — producing endpoints
-  indistinguishable from correct ones. Six assumptions are now measured against
-  the data at open (the handle columns of `port_tbl`, `new_simnet_tbl`,
-  `proc_net_tbl` and `context_tbl`; `signal_tbl`'s shape lists; `shape_tbl`'s
-  parent, file index and line list), each costing nothing because it runs over
-  structures already in memory. The floor is 90%: across seven designs those
-  hold for 96.6%–100% of rows, and a changed layout collapses rather than
-  degrades.
-- **An endpoint with no source location is no longer reported.** It is a
-  statement the reader believes in without being able to show it; a query where
-  that is all there was now says so instead of printing blanks.
-- `--batch` ended a command at the first unquoted `#`, taking the rest as the
-  result's label. Questa names an unnamed generate block after the pointer it
-  elaborated to (`genblk#116507296#57`), so every signal under one was
-  unaskable. A label is a word of its own now.
 
 ### Changed
 - **Options are scoped to the command that defines them.** `--kdb`, `--top`,
-  `--driver`, `--load`, and `--control` are `trace`'s; `--of` is `tree`'s; using
+  `--driver`, `--load` and `--control` are `trace`'s; `--of` is `tree`'s; using
   one elsewhere is a usage error rather than silently ignored. The seven original
-  commands keep their existing tolerance for the original flags they ignore.
+  commands keep their existing tolerance for the flags they ignore.
 - `--depth` may be given without `--scope` for `tree` alone, measured from the
-  root. It counts levels below the matched scope, as elsewhere, with `tree`
-  counting scopes where `list` counts signals.
-- `trace` and `tree` take a second positional argument. Other commands reject
-  extra positionals with the message they always had.
+  root, counting scopes where `list` counts signals.
+- `trace` and `tree` take a second positional argument; other commands still
+  reject extra positionals.
 
 ### Performance
-- **WLF seeks with `wlfReadDataOverRange`.** The windowed vtable slot is now
-  filled; scan cost is proportional to the window's time steps, independent of
-  where in the file the window sits.
+- **WLF point queries seek.** `snapshot --at` and `compare` on a `.wlf` scan only
+  the window rather than the run before it: ~2 ms where a full decode took
+  ~600 ms, on a 48 MB capture of 20 M time steps. The carried value is tagged one
+  tick before the window, because libwlf cannot report when it last changed.
 
 ### Fixed
-- **Plugin traces are folded to one net entry per tick**, last write wins,
-  with consecutive duplicates suppressed as in the wellen decode; events are
-  exempt. The per-tick collapse is stricter than wellen because the vendor
-  libraries report transport granularity, not user-visible writes: libwlf
-  delivers a wide vector one 32-bit word per callback, which made a 256-bit
-  bus count 8 `summary` changes per real transition and put 7 transient
-  partial rows per instant in `dump`, and its end-of-scan ENDLOG marker
-  appended a fake trailing change to every signal. FSDB same-tick glitch VCs
-  collapse to their net value the same way.
-- WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
-  `-nowlfcollapse` keep their end-tick delta events; default delta-collapsed
-  captures are unaffected.
-
-### Internal
-- Design connectivity is a Rust trait (`DesignQuery`) reached through a
-  defaulted `WaveformBackend::design_query`, **not** a C vtable slot. Appending
-  slots is what makes a newer host read past the end of an older plugin's
-  vtable, so the ABI stays frozen and external plugins are unaffected.
-- `libNPI.so` references `shm_unlink` without declaring a dependency on librt,
-  so it is preloaded `RTLD_GLOBAL`; `libnpiL1.so` calls into libNPI without
-  declaring that either, so libNPI is promoted into the global scope before L1
-  loads. Both confirmed against the shipped libraries.
-- The NPI dump parser sits outside the linux-x86_64 gate, so its tests run
-  everywhere rather than only where the vendor library loads.
-- Design-side NPI symbols resolve lazily, on the first `trace`. Binding them
-  with the reader made them a hard requirement for every FSDB command: Verdi
-  2018 has no `npi_waveform_info`, so `rwave info file.fsdb` stopped working
-  there entirely.
-- `trace` captures NPI's output through `open_memstream`, which grows, rather
-  than a fixed buffer. A clock's load list runs to megabytes and `--limit`
-  cannot bound it, since the total is only known after the parse.
-- A file rwave cannot open now reports the FSDB format version from its header,
-  because a Verdi older than the dump is otherwise indistinguishable from a
-  licence or environment problem.
-
-- The Questa reader is checked by differential against QuestaSim itself rather
-  than by assertion: `verify/questa/diff.py` asks vsim the same questions, in
-  every form it will answer in, and compares. Every decoding rule that was wrong
-  was wrong plausibly and was found there — a path naming several contexts, a
-  statement's line versus its primitive's, `signal_tbl` not being the only record
-  of what touches a signal. Across 1134 signals of three designs (a shaped
-  fixture, picorv32, a tinyriscv SoC) there is now nothing vsim reports that
-  rwave does not.
-- `rusqlite` is pinned exactly and bundled, the first C in the tree. All four
-  release targets build it, including the musl-static arm64 one under
-  `crt-static`, `panic = "abort"` and LTO, and linux-amd64 still tops out at
-  `GLIBC_2.17`. Default features are off, which keeps rusqlite's wasm branch out
-  of the dependency graph and the licence file.
-- The licence generator gained a section for C compiled into the binary. SQLite
-  states its terms inside `sqlite3.c` rather than in a `LICENSE` file, so the
-  file-name scan cannot see them; emitting the note from the generator keeps
-  regeneration idempotent instead of inviting a hand edit CI would overwrite.
+- **Plugin traces are folded to one net entry per tick**, last write wins, with
+  consecutive duplicates suppressed; events are exempt. The vendor libraries
+  report transport granularity rather than user-visible writes — libwlf delivers
+  a wide vector one 32-bit word per callback, which made a 256-bit bus count
+  eight `summary` changes per real transition — and its end-of-scan marker
+  appended a fake trailing change to every signal.
+- WLF scans pass `endDelta = WLF_LAST_DELTA`, so captures logged with
+  `-nowlfcollapse` keep their end-tick delta events.
+- `--batch` ended a command at the first unquoted `#`, taking the rest as the
+  result's label, which made every signal under an unnamed generate block
+  unaskable.
 
 ### Compatibility
 - Plugin ABI unchanged (still version 1); no vtable field added or reordered.
+  Design connectivity is a Rust trait reached through a defaulted method rather
+  than a new vtable slot, so external plugins are unaffected.
+- `rusqlite` is pinned and bundled, the first C in the tree. All four release
+  targets build it, and linux-amd64 still tops out at `GLIBC_2.17`.
 
 ## [0.1.7] — 2026-08-06
 
