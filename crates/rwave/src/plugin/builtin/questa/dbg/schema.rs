@@ -104,6 +104,28 @@ pub fn instance_handles(db: &Db) -> Result<Vec<i64>, String> {
     )
 }
 
+/// `(instance, what it instantiates)`.
+pub fn instance_defs(db: &Db) -> Result<Vec<(i64, i64)>, String> {
+    rows(
+        db,
+        "SELECT inst_id, defn_du_id FROM inst_tbl \
+         WHERE defn_du_id IS NOT NULL AND defn_du_id != 0",
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+/// `(instance, port, the net that port is tied to)`.
+///
+/// An interface reached through a port is a second instance of the interface's
+/// design unit, tied to the same nets through the same ports as the instance it
+/// was passed. That pair of facts is what identifies the two as one thing —
+/// nothing else in the database says so.
+pub fn pins(db: &Db) -> Result<Vec<(i64, i64, i64)>, String> {
+    rows(db, "SELECT inst_id, port_id, net_id FROM pin_tbl", |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+}
+
 pub fn port_links(db: &Db) -> Result<Vec<PortLink>, String> {
     rows(
         db,
@@ -117,6 +139,39 @@ pub fn port_links(db: &Db) -> Result<Vec<PortLink>, String> {
 pub fn simnet_links(db: &Db) -> Result<Vec<(i64, i64)>, String> {
     rows(db, "SELECT anet_handle, fnet_handle FROM new_simnet_tbl", |r| {
         Ok((r.get(0)?, r.get(1)?))
+    })
+}
+
+/// `((net elaboration made, which bit of the named object), one name it has)`.
+///
+/// `port_tbl` records a connection per port, and following it level by level
+/// reaches most of the hierarchy — but not all of it: a bus arriving at a leaf
+/// module can have no row of its own, and the walk then stops one instance
+/// short of the statement that reads it. This table is the flattened net, the
+/// thing the simulator actually schedules, and every name it carries anywhere
+/// in the design is listed against it.
+///
+/// A name can be a whole net in one row and bit 3 of a bus in another, so one
+/// handle belongs to as many nets as the bus has bits. That is why this is not
+/// an edge in the walk: joining bit 3's net to the handle and the handle to
+/// bit 0's net merges two nets that share nothing but a name.
+pub fn simnet_members(db: &Db) -> Result<Vec<(i64, i64)>, String> {
+    rows(db, "SELECT simnet_id, net_handle FROM simnet_tbl", |r| Ok((r.get(0)?, r.get(1)?)))
+}
+
+/// `(statement, net it touches, whether it writes it)`, from the top level.
+///
+/// The per-module tables answer for anything the module declares, and that is
+/// almost everything — but not a variable declared inside a named block, which
+/// gets no `signal_tbl` row at all. This table names the pair directly and is
+/// the only record of those.
+///
+/// The direction is the low bit of `flags`: odd writes, even reads. Established
+/// against the module tables over half a million rows where they give a
+/// definite answer, agreeing everywhere except on statements that do both.
+pub fn proc_nets(db: &Db) -> Result<Vec<(i64, i64, bool)>, String> {
+    rows(db, "SELECT proc_handle, net_handle, flags FROM proc_net_tbl", |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? & 1 == 1))
     })
 }
 
@@ -171,17 +226,36 @@ fn lines_of(s: &str) -> Vec<u32> {
 }
 
 pub fn signals(db: &Db, duid: i64) -> Result<Vec<Signal>, String> {
+    // Both pairs of columns, unioned. The `incr` one names the node the value
+    // arrives at, which for an assignment inside a loop is the loop — reporting
+    // it gives the reader the `for` header instead of the line that does the
+    // work. The `caus` one names the primitive underneath, which carries the
+    // assignment's own lines. Neither is a superset: a signal can have a node
+    // in one and not the other.
+    let union = |a: &str, b: &str| {
+        let mut v = shape_ids(a);
+        for id in shape_ids(b) {
+            if !v.contains(&id) {
+                v.push(id);
+            }
+        }
+        v
+    };
     rows(
         db,
         &format!(
-            "SELECT name, reader_incr_shapes, writer_incr_shapes \
+            "SELECT name, reader_incr_shapes, writer_incr_shapes, \
+                    reader_caus_shapes, writer_caus_shapes \
              FROM signal_tbl WHERE du_id = {duid}"
         ),
         |r| {
+            let t = |i: usize| -> rusqlite::Result<String> {
+                Ok(r.get::<_, Option<String>>(i)?.unwrap_or_default())
+            };
             Ok(Signal {
-                name: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                readers: shape_ids(&r.get::<_, Option<String>>(1)?.unwrap_or_default()),
-                writers: shape_ids(&r.get::<_, Option<String>>(2)?.unwrap_or_default()),
+                name: t(0)?,
+                readers: union(&t(1)?, &t(3)?),
+                writers: union(&t(2)?, &t(4)?),
             })
         },
     )
@@ -241,11 +315,20 @@ pub struct Process {
 fn names(list: &str, known: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for tok in list.split_whitespace() {
-        let name = if known(tok) {
-            tok
-        } else if tok.len() > 1 && known(&tok[1..]) {
-            &tok[1..]
-        } else {
+        // The list is Tcl: an element holding a bit-select is braced, so
+        // `cam_inv_reset_val[0]` arrives as `{tcam_inv_reset_val[0]}`. Reading
+        // it as one word drops it, and with it every vector reference in the
+        // module — which is most of them.
+        let tok = tok.strip_prefix('{').unwrap_or(tok);
+        let tok = tok.strip_suffix('}').unwrap_or(tok);
+        // Whole name first, then without the one-character kind prefix, then
+        // the same two without the select. Trying the select last matters:
+        // a signal can be declared with brackets in its name.
+        let base = tok.split_once('[').map(|(b, _)| b).unwrap_or(tok);
+        let Some(name) = [tok, &tok[1.min(tok.len())..], base, &base[1.min(base.len())..]]
+            .into_iter()
+            .find(|c| !c.is_empty() && known(c))
+        else {
             continue;
         };
         if !out.iter().any(|x| x == name) {

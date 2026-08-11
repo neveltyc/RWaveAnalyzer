@@ -12,6 +12,7 @@
 pub mod design;
 pub mod open;
 pub mod schema;
+pub mod vfs;
 
 pub use design::Design;
 pub use open::{Db, Kind};

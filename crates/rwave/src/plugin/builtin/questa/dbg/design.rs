@@ -18,7 +18,10 @@
 //! Step 2 is what makes `tb.u_core.out` answer with a statement in `u_alu`: the
 //! two are one net across a port, and only the inner module writes it.
 
-use std::collections::HashMap;
+// Handles are raw 64-bit pointers and the name maps are hot: SipHash on an
+// 8-byte key is most of the cost of building the index, and this file never
+// hashes anything an outsider chose. Same reason `model` uses it.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::backend::design::{Direction, Hop, HopKind};
@@ -37,20 +40,49 @@ pub struct Design {
     modules: HashMap<i64, Module>,
 
     ctx: HashMap<i64, Ctx>,
-    /// Full path (as Questa spells it) to every context with that path.
+    /// Scope handle -> the contexts directly inside it, and the handles no
+    /// enclosing scope names.
     ///
-    /// One name has several: a port declaration and the net behind it are
-    /// separate contexts sharing a path, and the wiring tables reference
-    /// whichever one they please. Keeping only the first silently loses every
-    /// driver reached through a port.
-    by_path: HashMap<String, Vec<i64>>,
+    /// A path is resolved by walking these down one component at a time rather
+    /// than by looking up a string. The design has one context per named thing,
+    /// and on a large one that is 1.7 million of them; spelling out every full
+    /// path costs 300 MB of strings to build and 215 MB to keep, which is more
+    /// than the rest of the index put together and buys nothing a descent does
+    /// not do. Several contexts can share a path — a port declaration and the
+    /// net behind it are separate, and the wiring tables reference whichever
+    /// they please — so a walk keeps every match at each level.
+    children: HashMap<i64, Vec<i64>>,
+    roots: Vec<i64>,
+    /// Last component -> the contexts with that name, for the suffix match.
+    by_leaf: HashMap<String, Vec<i64>>,
     /// context handle -> the design unit its scope belongs to.
     du_of_ctx: HashMap<i64, i64>,
+    /// design-unit handle -> the `vopt` id the per-module databases key on.
+    /// Built once: a trace asks this per instance it walks through, and on a
+    /// design with a thousand units a scan each time is the cost of the query.
+    duid_of_handle: HashMap<i64, i64>,
     /// Handles that are module instances rather than processes.
-    instances: std::collections::HashSet<i64>,
+    instances: HashSet<i64>,
     /// Net aliasing: handle -> the handles naming the same net, and whether
     /// reaching them crossed a port.
     links: HashMap<i64, Vec<(i64, bool)>>,
+    /// handle -> the elaborated nets it takes part in, and each net -> every
+    /// name it has. Consulted for the signal a query names, not walked.
+    simnet_of: HashMap<i64, Vec<i64>>,
+    simnet_members: HashMap<i64, Vec<i64>>,
+    /// net handle -> the statements touching it and whether they write it.
+    /// The last resort, for what the module tables do not record at all.
+    proc_of_net: HashMap<i64, Vec<(i64, bool)>>,
+    /// `(design unit, statement name)` -> every place it sits, as a path of
+    /// blocks relative to the module. The module databases name a statement
+    /// without them, and a nested generate runs the same statement once per
+    /// branch combination — `gen_a[1]/gen_b[2]` — so this is a list.
+    block_of: HashMap<(i64, String), Vec<String>>,
+    /// An interface port -> the interface instance it was passed, and back.
+    /// The port is a context of its own with no members under it; the members
+    /// are under the instance, so a path through the port has to change name
+    /// halfway down.
+    alias_of: HashMap<i64, Vec<i64>>,
 }
 
 struct Ctx {
@@ -65,6 +97,11 @@ struct Module {
     /// Statement name (`#p#1402`) -> its shape. `rw_process_tbl` names
     /// statements; `shape_tbl` holds them.
     by_name: HashMap<String, i64>,
+    /// The same, for the statements `shape_tbl` names with the generate block
+    /// they sit in. One trailing name can belong to several shapes — a `for`
+    /// generate replicates the statement once per branch — and all of them are
+    /// that statement.
+    by_tail: HashMap<String, Vec<i64>>,
     /// Signal name -> the statements that read it, and that write it. A second
     /// view of the same fact, because a signal can carry no shape of its own
     /// and still be read.
@@ -75,7 +112,7 @@ struct Module {
     /// The names the source declares. Anything else in this module is a `vopt`
     /// temporary: real to the netlist, absent from the RTL and from the
     /// waveform, and not something to hand back as an endpoint.
-    declared: std::collections::HashSet<String>,
+    declared: HashSet<String>,
 }
 
 impl Design {
@@ -87,31 +124,75 @@ impl Design {
     pub fn open(top_dbg: &Path, lib_hint: Option<&Path>) -> Result<Design, String> {
         let top = Db::open(top_dbg, Kind::Top)?;
 
-        let mut ctx = HashMap::new();
-        let mut du_of_ctx = HashMap::new();
+        let mut ctx = HashMap::default();
+        let mut du_of_ctx = HashMap::default();
         for c in schema::contexts(&top)? {
             du_of_ctx.insert(c.handle, c.du);
             ctx.insert(c.handle, Ctx { parent: c.parent, name: c.name });
         }
+        let duid_of_handle = schema::design_units(&top)?
+            .into_iter()
+            .map(|u| (u.handle, u.vopt_duid))
+            .collect();
         let mut d = Design {
             top,
-            du_paths: HashMap::new(),
-            modules: HashMap::new(),
+            du_paths: HashMap::default(),
+            modules: HashMap::default(),
             ctx,
-            by_path: HashMap::new(),
+            children: HashMap::default(),
+            roots: Vec::new(),
+            by_leaf: HashMap::default(),
             du_of_ctx,
-            instances: std::collections::HashSet::new(),
-            links: HashMap::new(),
+            duid_of_handle,
+            instances: HashSet::default(),
+            links: HashMap::default(),
+            simnet_of: HashMap::default(),
+            simnet_members: HashMap::default(),
+            proc_of_net: HashMap::default(),
+            block_of: HashMap::default(),
+            alias_of: HashMap::default(),
         };
 
-        // Paths are built once: a design has one hierarchy and every lookup
-        // wants the same spelling of it.
-        let handles: Vec<i64> = d.ctx.keys().copied().collect();
-        for h in handles {
-            let p = d.path_of(h);
-            d.by_path.entry(p).or_default().push(h);
+        // The hierarchy index: which contexts sit inside which, and which name
+        // no enclosing one. A context whose parent is absent, or whose parent
+        // is the unnamed root, is where a path starts — the same condition
+        // `path_of` stops climbing on.
+        for (&h, c) in &d.ctx {
+            if c.name.is_empty() || c.name == "/" {
+                continue;
+            }
+            match d.ctx.get(&c.parent) {
+                Some(p) if !p.name.is_empty() && p.name != "/" => {
+                    d.children.entry(c.parent).or_default().push(h)
+                }
+                _ => d.roots.push(h),
+            }
+            d.by_leaf.entry(c.name.clone()).or_default().push(h);
         }
         d.instances = schema::instance_handles(&d.top)?.into_iter().collect();
+        // `inst_tbl` does not list every instance. On a design that leans on
+        // parameterised leaf modules it names well under half of them, and what
+        // it leaves out are ordinary instances — `rvdff dffs (...)` inside
+        // `rvdffs`, the flop every VeeR register is built from. A context whose
+        // design unit is not its parent's is an instance boundary by
+        // construction, which is the fact a name lookup needs: without it the
+        // signal inside can only be named from the level above, as `dffs/dout`,
+        // and the module holding the statement that drives it does not know
+        // that name. The answer comes back as a chain of port hops that stops
+        // one level short of the `always_ff`.
+        let boundaries: Vec<i64> = d
+            .ctx
+            .iter()
+            .filter(|(h, c)| {
+                !c.name.is_empty()
+                    && c.name != "/"
+                    && d.du_of_ctx.get(*h).is_some_and(|&du| {
+                        du != 0 && d.du_of_ctx.get(&c.parent).is_some_and(|&p| p != du)
+                    })
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        d.instances.extend(boundaries);
 
         for l in schema::port_links(&d.top)? {
             d.links.entry(l.inner).or_default().push((l.outer, true));
@@ -122,6 +203,74 @@ impl Design {
             // same signal in the same module.
             d.links.entry(a).or_default().push((b, false));
             d.links.entry(b).or_default().push((a, false));
+        }
+        // The elaborated net, which names the connection the port table stops
+        // short of. Kept as a lookup rather than folded into `links`: a bus
+        // handle belongs to one net per bit, so an edge through it would join
+        // every one of those nets to every other. Asked about the signal in
+        // hand it answers correctly; walked transitively it does not.
+        for (id, net) in schema::simnet_members(&d.top)? {
+            d.simnet_of.entry(net).or_default().push(id);
+            d.simnet_members.entry(id).or_default().push(net);
+        }
+        for (proc, net, writes) in schema::proc_nets(&d.top)? {
+            d.proc_of_net.entry(net).or_default().push((proc, writes));
+        }
+        // Instances of one design unit tied to the same nets through the same
+        // ports are one elaborated thing under two names — an interface and the
+        // port some module received it on. Pins are what distinguishes them
+        // from two ordinary instances of the same module, so an instance with
+        // none is not matched on at all.
+        let mut pins: HashMap<i64, Vec<(i64, i64)>> = HashMap::default();
+        for (inst, port, net) in schema::pins(&d.top)? {
+            pins.entry(inst).or_default().push((port, net));
+        }
+        let mut same: HashMap<(i64, Vec<(i64, i64)>), Vec<i64>> = HashMap::default();
+        for (inst, defn) in schema::instance_defs(&d.top)? {
+            let Some(p) = pins.get(&inst) else { continue };
+            let mut p = p.clone();
+            p.sort_unstable();
+            p.dedup();
+            same.entry((defn, p)).or_default().push(inst);
+        }
+        for (_, group) in same {
+            if group.len() < 2 {
+                continue;
+            }
+            for &a in &group {
+                d.alias_of.entry(a).or_default().extend(group.iter().copied().filter(|&b| b != a));
+            }
+        }
+        // Which blocks a statement sits inside, as a path relative to the
+        // module. The module databases name a statement on its own; the design
+        // spells it with the generate branch in front, and that branch is the
+        // same in every instance of the module, so this is keyed by the design
+        // unit rather than by instance. Walking up stops where the design unit
+        // changes, which is the instance boundary.
+        let statements: Vec<(i64, i64, String)> = d
+            .ctx
+            .iter()
+            .filter(|(_, c)| c.name.starts_with('#'))
+            .filter_map(|(&h, c)| d.du_of_ctx.get(&h).map(|&du| (h, du, construct_name(&c.name))))
+            .collect();
+        for (h, du, name) in statements {
+            let mut parts: Vec<&str> = Vec::new();
+            let mut cur = d.ctx[&h].parent;
+            while let Some(c) = d.ctx.get(&cur) {
+                if d.du_of_ctx.get(&cur) != Some(&du) || d.du_of_ctx.get(&c.parent) != Some(&du) {
+                    break;
+                }
+                parts.push(&c.name);
+                cur = c.parent;
+            }
+            if !parts.is_empty() {
+                parts.reverse();
+                let at = parts.join("/");
+                let seen = d.block_of.entry((du, name)).or_default();
+                if !seen.contains(&at) {
+                    seen.push(at);
+                }
+            }
         }
 
         // The design-unit id is the join between the two files, and the module
@@ -193,7 +342,7 @@ impl Design {
                 .ok_or_else(|| err(format!("no database recorded for design unit {duid}")))?
                 .clone();
             let db = Db::open(&p, Kind::Unit)?;
-            let mut signals: HashMap<String, (Vec<i64>, Vec<i64>)> = HashMap::new();
+            let mut signals: HashMap<String, (Vec<i64>, Vec<i64>)> = HashMap::default();
             for s in schema::signals(&db, duid)? {
                 // One name can have a row per bit range; a query about the
                 // signal means all of it.
@@ -209,9 +358,31 @@ impl Design {
                 .filter(|s| !s.spec2.is_empty())
                 .map(|s| (s.spec2.clone(), s.id))
                 .collect();
-            let known: std::collections::HashSet<String> = signals.keys().cloned().collect();
-            let mut touched: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
-            let mut proc_loc = HashMap::new();
+            // The two tables spell a statement inside a generate block
+            // differently: `shape_tbl` puts the block in front of it,
+            // `gen_counters[0]/#p#643`, and `rw_process_tbl` names it `#p#643`.
+            // The statement view looks statements up by what the process table
+            // calls them, so without this the shapes in every generate block
+            // are unreachable from that direction.
+            //
+            // Several shapes can share the trailing name, and that is not an
+            // ambiguity to refuse: a `for` generate writes the statement once
+            // and elaboration keeps a node per branch, so `mem_bank[0]/#a#105`
+            // through `mem_bank[7]/#a#105` are eight places the same source
+            // line runs and all eight are answers. Each carries its own branch
+            // in the name it is reported under.
+            let mut by_tail: HashMap<String, Vec<i64>> = HashMap::default();
+            for s in shapes.values() {
+                if let Some((_, t)) = s.spec2.rsplit_once('/') {
+                    by_tail.entry(t.to_string()).or_default().push(s.id);
+                }
+            }
+            for ids in by_tail.values_mut() {
+                ids.sort_unstable();
+            }
+            let known: HashSet<String> = signals.keys().cloned().collect();
+            let mut touched: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::default();
+            let mut proc_loc = HashMap::default();
             for p in schema::processes(&db, duid, &|n| known.contains(n))? {
                 proc_loc.insert(p.name.clone(), (p.file, p.line));
                 for r in p.reads {
@@ -224,7 +395,7 @@ impl Design {
             let declared = schema::declared(&db)?.into_iter().collect();
             self.modules.insert(
                 duid,
-                Module { signals, shapes, files, by_name, touched, proc_loc, declared },
+                Module { signals, shapes, files, by_name, by_tail, touched, proc_loc, declared },
             );
         }
         Ok(&self.modules[&duid])
@@ -233,7 +404,8 @@ impl Design {
     /// Every name for the same electrical net, with whether reaching it crossed
     /// a port. Breadth-first so the nearest names come first.
     fn net_group(&self, start: i64) -> Vec<(i64, bool)> {
-        let mut seen = HashMap::from([(start, false)]);
+        let mut seen = HashMap::default();
+        seen.insert(start, false);
         let mut queue = std::collections::VecDeque::from([start]);
         let mut out = vec![(start, false)];
         while let Some(h) = queue.pop_front() {
@@ -262,26 +434,85 @@ impl Design {
     fn by_suffix(&self, questa_path: &str) -> Option<Vec<i64>> {
         let segs: Vec<&str> = questa_path.trim_start_matches('/').split('/').collect();
         for take in (2..segs.len()).rev() {
-            let tail = format!("/{}", segs[segs.len() - take..].join("/"));
-            let hits: Vec<&String> = self
-                .by_path
-                .keys()
-                .filter(|p| p.ends_with(&tail) && *p != questa_path)
+            let tail = &segs[segs.len() - take..];
+            // Candidates come from the last component, which is what makes this
+            // a lookup rather than a scan of every path in the design.
+            let hits: Vec<i64> = self
+                .by_leaf
+                .get(tail[tail.len() - 1])
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .filter(|&h| self.ends_with(h, tail))
                 .collect();
-            if hits.len() == 1 {
-                return self.by_path.get(hits[0]).cloned();
+            let mut paths: Vec<String> = hits.iter().map(|&h| self.path_of(h)).collect();
+            paths.sort();
+            paths.dedup();
+            paths.retain(|p| p != questa_path);
+            if paths.len() == 1 {
+                let want = &paths[0];
+                return Some(hits.into_iter().filter(|&h| self.path_of(h) == *want).collect());
             }
-            if hits.len() > 1 {
+            if paths.len() > 1 {
                 return None;
             }
         }
         None
     }
 
+    /// Whether `h`'s own path ends with these components.
+    fn ends_with(&self, mut h: i64, tail: &[&str]) -> bool {
+        for seg in tail.iter().rev() {
+            match self.ctx.get(&h) {
+                Some(c) if c.name == *seg => h = c.parent,
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Every context whose path is exactly this, walking the hierarchy down one
+    /// component at a time.
+    fn resolve(&self, questa_path: &str) -> Vec<i64> {
+        let mut segs = questa_path.trim_start_matches('/').split('/');
+        let Some(first) = segs.next() else { return Vec::new() };
+        let mut cur: Vec<i64> =
+            self.roots.iter().copied().filter(|h| self.ctx[h].name == first).collect();
+        for seg in segs {
+            let mut next = self.step(&cur, seg);
+            if next.is_empty() {
+                // The name may be a port the interface was passed on, which
+                // holds no members of its own; they are under the instance.
+                let aliases: Vec<i64> =
+                    cur.iter().filter_map(|h| self.alias_of.get(h)).flatten().copied().collect();
+                next = self.step(&aliases, seg);
+            }
+            if next.is_empty() {
+                return Vec::new();
+            }
+            cur = next;
+        }
+        cur
+    }
+
+    /// The contexts named `seg` directly inside any of `from`.
+    fn step(&self, from: &[i64], seg: &str) -> Vec<i64> {
+        let mut out = Vec::new();
+        for h in from {
+            for &c in self.children.get(h).map(Vec::as_slice).unwrap_or_default() {
+                if self.ctx.get(&c).is_some_and(|x| x.name == seg) {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
     /// Whether the design knows this path at all — the difference between "no
     /// drivers" and "no such signal", which an empty answer cannot express.
     pub fn resolves(&self, questa_path: &str) -> bool {
-        self.by_path.contains_key(questa_path) || self.by_suffix(questa_path).is_some()
+        !self.resolve(questa_path).is_empty() || self.by_suffix(questa_path).is_some()
     }
 
     /// Drivers or loads of `questa_path`.
@@ -291,63 +522,156 @@ impl Design {
         dir: Direction,
         control: bool,
     ) -> Result<Vec<Hop>, String> {
-        let starts = self
-            .by_path
-            .get(questa_path)
-            .cloned()
+        let starts = Some(self.resolve(questa_path))
+            .filter(|v| !v.is_empty())
             .or_else(|| self.by_suffix(questa_path))
             .ok_or_else(|| err(format!("{questa_path} is not in the design database")))?;
 
         // Every context with this path, since the wiring may hang off any of
         // them; nearer names win when both reach the same statement.
         let mut group: Vec<(i64, bool)> = Vec::new();
-        let mut have = std::collections::HashSet::new();
-        for s in starts {
-            for (h, crossed) in self.net_group(s) {
+        let mut have = HashSet::default();
+        for s in &starts {
+            for (h, crossed) in self.net_group(*s) {
                 if have.insert(h) {
                     group.push((h, crossed));
                 }
             }
         }
+        // Every other name the elaborated net has, for the signal that was
+        // asked about. This is where a connection the port table never spells
+        // out comes from — a bus arriving at a leaf module — and it is applied
+        // to the query's own handles only, never followed onward: the net a
+        // handle belongs to depends on which bit of it is meant, and one more
+        // step would leave that behind.
+        for s in &starts {
+            for id in self.simnet_of.get(s).into_iter().flatten() {
+                for &h in self.simnet_members.get(id).into_iter().flatten() {
+                    if have.insert(h) {
+                        group.push((h, true));
+                    }
+                }
+            }
+        }
 
         let mut hops = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (handle, crossed) in group {
+        let mut seen = HashSet::default();
+        let mut seen_bare = HashSet::default();
+        for &(handle, crossed) in &group {
             for (inst, local) in self.owners(handle) {
                 let Some(&du_handle) = self.du_of_ctx.get(&inst) else { continue };
                 let Some(duid) = self.duid_of(du_handle) else { continue };
                 let inst_path = self.path_of(inst);
 
-                let shape_ids = {
+                let (shape_ids, shapeless) = {
                     let m = self.module(duid)?;
-                    let mut ids = match m.signals.get(&local) {
-                        Some((readers, writers)) => match dir {
-                            Direction::Driver => writers.clone(),
-                            Direction::Load => readers.clone(),
-                        },
-                        None => Vec::new(),
+                    // A struct or an array is recorded a member at a time —
+                    // `slv_req_i.aw` and `slv_req_i.ar` carry the shapes and
+                    // `slv_req_i` itself carries none — so a question about the
+                    // whole object is a question about all of its parts. Only
+                    // when the name itself has nothing: where a module records
+                    // both, the exact name is the answer.
+                    let names = match m.signals.get(&local) {
+                        Some((r, w)) if !r.is_empty() || !w.is_empty() => vec![local.clone()],
+                        _ => {
+                            let mut v: Vec<String> = m
+                                .signals
+                                .keys()
+                                .filter(|k| member_of(k, &local))
+                                .cloned()
+                                .collect();
+                            v.sort();
+                            if v.is_empty() { vec![local.clone()] } else { v }
+                        }
                     };
-                    // The statement view catches what the shape lists leave
-                    // out: a signal with no shape recorded against it is still
-                    // read by whatever statement names it.
-                    if let Some((reads, writes)) = m.touched.get(&local) {
-                        let names = match dir {
-                            Direction::Driver => writes,
-                            Direction::Load => reads,
-                        };
-                        for n in names {
-                            if let Some(&id) = m.by_name.get(n)
-                                && !ids.contains(&id)
-                            {
-                                ids.push(id);
+                    let mut ids = Vec::new();
+                    for n in &names {
+                        if let Some((readers, writers)) = m.signals.get(n) {
+                            let add = match dir {
+                                Direction::Driver => writers,
+                                Direction::Load => readers,
+                            };
+                            for &id in add {
+                                if !ids.contains(&id) {
+                                    ids.push(id);
+                                }
                             }
                         }
                     }
-                    if ids.is_empty() {
+                    // The statement view catches what the shape lists leave
+                    // out: a signal with no shape recorded against it is still
+                    // read by whatever statement names it.
+                    let mut bare: Vec<&str> = Vec::new();
+                    for touched in names.iter().filter_map(|n| m.touched.get(n)) {
+                        let (reads, writes) = touched;
+                        let named = match dir {
+                            Direction::Driver => writes,
+                            Direction::Load => reads,
+                        };
+                        for n in named {
+                            match m.by_name.get(n).map(std::slice::from_ref).or_else(|| {
+                                m.by_tail.get(n).map(Vec::as_slice)
+                            }) {
+                                Some(found) => {
+                                    for &id in found {
+                                        if !ids.contains(&id) {
+                                            ids.push(id);
+                                        }
+                                    }
+                                }
+                                // `shape_tbl` does not hold every statement —
+                                // on a large design it holds barely half of
+                                // them, and `rw_process_tbl` is the only record
+                                // of the rest. It names the file and line, so
+                                // the statement can still be reported; dropping
+                                // it because no netlist node was kept for it
+                                // loses a real answer.
+                                None => bare.push(n),
+                            }
+                        }
+                    }
+                    if ids.is_empty() && bare.is_empty() {
                         continue;
                     }
-                    ids
+                    (ids, bare.into_iter().map(str::to_string).collect::<Vec<_>>())
                 };
+                for name in shapeless {
+                    let m = &self.modules[&duid];
+                    let Some(&(file, line)) = m.proc_loc.get(&name) else { continue };
+                    // Questa's own statement names carry the block's label in
+                    // brackets (`#p#47(label)`) or a second line after a comma
+                    // (`#i#125,185`); the identifier test would refuse both and
+                    // lose the statement, so a `#tag#` name is judged by its
+                    // tag. An implicit wire is the exception: it is elaboration
+                    // naming a connection, not a statement anyone wrote, and
+                    // reporting it as an endpoint is noise.
+                    let tagged = name.split('#').nth(1);
+                    if tagged == Some("w") || (tagged.is_none() && !reportable(&name)) {
+                        continue;
+                    }
+                    // The process table names a statement without the block it
+                    // sits in, so a generate branch comes back as `#a#86#3`
+                    // where the design spells it `gen_lane[3]/#a#86#3`. The
+                    // hierarchy has a context for the statement, and its parent
+                    // is that block.
+                    let scopes: Vec<String> = match self
+                        .du_of_ctx
+                        .get(&inst)
+                        .and_then(|du| self.block_of.get(&(*du, name.clone())))
+                    {
+                        Some(blocks) => {
+                            blocks.iter().map(|b| format!("{inst_path}/{b}")).collect()
+                        }
+                        None => vec![inst_path.clone()],
+                    };
+                    for scope in scopes {
+                        if !seen_bare.insert((duid, name.clone(), scope.clone())) {
+                            continue;
+                        }
+                        let m = &self.modules[&duid];
+                        hops.push(process_hop(m, &name, file, line, &scope, crossed));
+                    }
+                }
                 for sid in shape_ids {
                     let m = &self.modules[&duid];
                     let Some(shape) = m.shapes.get(&sid) else { continue };
@@ -373,7 +697,14 @@ impl Design {
                         // Neither shape records one: the statement table does,
                         // as an integer. A hop with a file and no line prints an
                         // empty location, which is worse than looking it up.
-                        m.proc_loc.get(&stmt.spec2).and_then(|(_, l)| *l).map(Some).into_iter().collect()
+                        // Keyed by the process table's spelling, which drops the
+                        // generate block the shape names.
+                        let named = |n: &str| m.proc_loc.get(n).and_then(|(_, l)| *l);
+                        named(&stmt.spec2)
+                            .or_else(|| stmt.spec2.rsplit_once('/').and_then(|(_, t)| named(t)))
+                            .map(Some)
+                            .into_iter()
+                            .collect()
                     };
                     if lines.is_empty() {
                         lines.push(None);
@@ -385,6 +716,39 @@ impl Design {
                         hops.push(hop_of(m, stmt, shape, line, &inst_path, dir, control, crossed));
                     }
                 }
+            }
+        }
+        // Nothing at all from the module tables. That happens for a variable
+        // declared inside a named block, which gets no `signal_tbl` row and so
+        // cannot be looked up by name anywhere; the top level records the pair
+        // directly. Only as a last resort: where the module tables answer they
+        // give the statement's operands and its place in the netlist, and this
+        // gives a name and a line.
+        if hops.is_empty() {
+            let want_writer = matches!(dir, Direction::Driver);
+            let touching: Vec<(i64, bool)> = group
+                .iter()
+                .filter_map(|(h, crossed)| self.proc_of_net.get(h).map(|v| (v, *crossed)))
+                .flat_map(|(v, crossed)| {
+                    v.iter().filter(|(_, w)| *w == want_writer).map(move |(p, _)| (*p, crossed))
+                })
+                .collect();
+            for (proc, crossed) in touching {
+                let Some(c) = self.ctx.get(&proc) else { continue };
+                let (name, parent) = (construct_name(&c.name), c.parent);
+                let inst_path = self.path_of(parent);
+                if !seen_bare.insert((0, name.clone(), inst_path.clone())) {
+                    continue;
+                }
+                let Some(duid) = self.du_of_ctx.get(&parent).and_then(|&h| self.duid_of(h)) else {
+                    continue;
+                };
+                if self.module(duid).is_err() {
+                    continue;
+                }
+                let m = &self.modules[&duid];
+                let Some(&(file, line)) = m.proc_loc.get(&name) else { continue };
+                hops.push(process_hop(m, &name, file, line, &inst_path, crossed));
             }
         }
         // A port hop says only "the value comes from the other side of this
@@ -402,12 +766,7 @@ impl Design {
     }
 
     fn duid_of(&self, du_handle: i64) -> Option<i64> {
-        // Cached on first use; a design has a handful of units.
-        schema::design_units(&self.top)
-            .ok()?
-            .into_iter()
-            .find(|u| u.handle == du_handle)
-            .map(|u| u.vopt_duid)
+        self.duid_of_handle.get(&du_handle).copied()
     }
 }
 
@@ -417,6 +776,15 @@ impl Design {
 fn statement_of(m: &Module, mut id: i64) -> Option<&schema::Shape> {
     for _ in 0..64 {
         let s = m.shapes.get(&id)?;
+        // Stop at the statement rather than at whatever is directly below the
+        // module: a generate block sits between the two, and climbing through
+        // it returns the block — `gen_counters`, at the line the `for` is on —
+        // in place of the `always_ff` inside it. The kind carries a qualifier
+        // on some statements (`PROCESS-CAUTION`, `PROCESS-MEMACESS`), which
+        // says something about the statement rather than making it not one.
+        if s.kind.starts_with("PROCESS") {
+            return Some(s);
+        }
         match m.shapes.get(&s.parent) {
             Some(p) if p.kind != "MODULE" => id = p.id,
             _ => return Some(s),
@@ -488,11 +856,68 @@ fn hop_of(
     }
 }
 
+/// A statement the process table names and the shape table does not hold.
+///
+/// `shape_tbl` is a netlist, and elaboration keeps a node only for what it
+/// needs one for; `rw_process_tbl` is the list of statements, and on a large
+/// design it names roughly twice as many. Its row carries the file and the
+/// line, which is the answer — there is no primitive to read operands or a
+/// clock edge off, so those stay empty rather than being guessed at.
+fn process_hop(
+    m: &Module,
+    name: &str,
+    file: i64,
+    line: Option<u32>,
+    inst_path: &str,
+    crossed: bool,
+) -> Hop {
+    Hop {
+        group: 0,
+        kind: kind_of("", name),
+        raw_kind: name.to_string(),
+        statement: name.to_string(),
+        scope: inst_path.trim_start_matches('/').replace('/', "."),
+        file: m.files.get(file.saturating_sub(1) as usize).filter(|f| !f.is_empty()).cloned(),
+        line,
+        boundary: crossed,
+        signals: Vec::new(),
+    }
+}
+
 /// A module-local name as a full rwave path. Interface members arrive with
 /// their own separator, which becomes rwave's.
 fn join(scope: &str, local: &str) -> String {
     let local = local.replace('/', ".");
     if scope.is_empty() { local } else { format!("{scope}.{local}") }
+}
+
+/// A statement's name as the module databases spell it.
+///
+/// The hierarchy names a statement by its construct — `#ALWAYS#47` — and the
+/// module databases by a tag — `#p#47`. Same statement, two spellings, and the
+/// location lookup goes through the second.
+fn construct_name(name: &str) -> String {
+    let mut parts = name.splitn(3, '#');
+    let (Some(""), Some(word), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return name.to_string();
+    };
+    let tag = match word {
+        "ALWAYS" => "p",
+        "ASSIGN" => "a",
+        "INITIAL" => "i",
+        "IMPLICIT-WIRE" => "w",
+        _ => return name.to_string(),
+    };
+    format!("#{tag}#{rest}")
+}
+
+/// Whether `name` is a part of `whole` — `slv_req_i.aw` of `slv_req_i`, or
+/// `cpuregs[3]` of `cpuregs`. A longer name that merely starts the same way is
+/// a different signal, so the separator has to be there.
+fn member_of(name: &str, whole: &str) -> bool {
+    name.len() > whole.len()
+        && name.starts_with(whole)
+        && matches!(name.as_bytes()[whole.len()], b'.' | b'[')
 }
 
 /// Whether a shape names something a reader can act on.
@@ -630,13 +1055,14 @@ mod tests {
             lines: vec![33],
         };
         let m = Module {
-            signals: HashMap::new(),
-            by_name: HashMap::new(),
-            touched: HashMap::new(),
-            proc_loc: HashMap::new(),
-            declared: std::collections::HashSet::new(),
+            signals: HashMap::default(),
+            by_name: HashMap::default(),
+            by_tail: HashMap::default(),
+            touched: HashMap::default(),
+            proc_loc: HashMap::default(),
+            declared: HashSet::default(),
             files: vec!["dut.sv".into()],
-            shapes: HashMap::from([
+            shapes: HashMap::from_iter([
                 (1, mk(1, 0, "MODULE", "alu")),
                 (11, mk(11, 1, "PROCESS", "#a#33")),
                 (12, mk(12, 11, "GATE", "")),
@@ -661,13 +1087,14 @@ mod tests {
             lines: Vec::new(),
         };
         let m = Module {
-            signals: HashMap::new(),
-            by_name: HashMap::new(),
-            touched: HashMap::new(),
-            proc_loc: HashMap::new(),
-            declared: std::collections::HashSet::new(),
+            signals: HashMap::default(),
+            by_name: HashMap::default(),
+            by_tail: HashMap::default(),
+            touched: HashMap::default(),
+            proc_loc: HashMap::default(),
+            declared: HashSet::default(),
             files: vec![],
-            shapes: HashMap::from([(1, mk(1, 2)), (2, mk(2, 1))]),
+            shapes: HashMap::from_iter([(1, mk(1, 2)), (2, mk(2, 1))]),
         };
         assert!(statement_of(&m, 1).is_none(), "a malformed tree must not hang");
     }

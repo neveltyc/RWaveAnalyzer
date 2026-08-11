@@ -8,10 +8,12 @@
 //! bytes is stock SQLite, so the only thing standing between rwave and the
 //! data is the magic.
 //!
-//! The user's file is never written to. The bytes are read into memory with the
-//! header corrected on the way in, and handed to SQLite through
-//! `deserialize_read_exact` as a read-only database — no temp copy on disk, no
-//! chance of touching a simulation output.
+//! The user's file is never written to. It is opened where it lies, read-only,
+//! through the VFS in [`super::vfs`], which corrects the header one read at a
+//! time — no copy in memory, no temp copy on disk, no chance of touching a
+//! simulation output. `RWAVE_DBG_OPEN=memory` selects the older path, which read
+//! the whole file into memory with the header corrected on the way in and handed
+//! it to `deserialize_read_exact`; it is kept for comparison.
 //!
 //! Every database carries its own schema version, and this reader was written
 //! against exactly one. An unrecognised version is refused rather than parsed
@@ -23,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+use super::vfs;
 use crate::plugin::builtin::questa::err;
 
 const QUESTA_MAGIC: &[u8; 16] = b"Modelsim dbg 1 \0";
@@ -92,6 +95,17 @@ impl Db {
             )));
         }
 
+        // The file itself, read through a VFS that corrects the header a read at
+        // a time. Nothing is copied: SQLite pages the database off disk and
+        // resident memory is its page cache. `RWAVE_DBG_OPEN=memory` selects the
+        // older path — the whole file in memory — so the two can be compared on
+        // the same database.
+        if !matches!(std::env::var("RWAVE_DBG_OPEN").as_deref(), Ok("memory")) {
+            let db = Self::open_through_vfs(path)?;
+            db.check_version(kind)?;
+            return Ok(db);
+        }
+
         // The corrected header followed by the rest of the file, as one stream.
         // SQLite owns the allocation and frees it with the connection.
         let mut conn = Connection::open_in_memory()
@@ -108,6 +122,39 @@ impl Db {
         let db = Db { conn, path: path.to_path_buf() };
         db.check_version(kind)?;
         Ok(db)
+    }
+
+    /// Open the file where it lies, through the header-correcting VFS.
+    ///
+    /// SQLite opens lazily, so the first page is not touched until something
+    /// asks for it. A file that is not a database would otherwise be reported by
+    /// whichever query happened to run first, in that query's words; the read is
+    /// forced here so the diagnosis stays where it was.
+    fn open_through_vfs(path: &Path) -> Result<Db, String> {
+        let vfs = vfs::register()
+            .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+        // An absolute path, so SQLite cannot read the name as one of the URIs it
+        // accepts in a filename's place.
+        let real = std::fs::canonicalize(path)
+            .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?;
+        let conn = Connection::open_with_flags_and_vfs(
+            &real,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            vfs,
+        )
+        .and_then(|c| {
+            // Forces page 1 through the VFS, which is where a file that is not
+            // SQLite behind the header stops being one.
+            c.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)).map(|_| c)
+        })
+        .map_err(|e| {
+            err(format!(
+                "{} did not open as a database: {e}. It should be SQLite behind a \
+                 Questa header; a truncated or in-progress file is the usual cause.",
+                path.display()
+            ))
+        })?;
+        Ok(Db { conn, path: path.to_path_buf() })
     }
 
     fn check_version(&self, kind: Kind) -> Result<(), String> {
