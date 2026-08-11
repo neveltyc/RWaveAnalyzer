@@ -108,9 +108,9 @@ because libwlf cannot report when it last changed.
   the data at open (the handle columns of `port_tbl`, `new_simnet_tbl`,
   `proc_net_tbl` and `context_tbl`; `signal_tbl`'s shape lists; `shape_tbl`'s
   parent, file index and line list), each costing nothing because it runs over
-  structures already in memory, and a failure names the assumption and what was
-  measured. The floor is 90%: across seven designs those hold for 96.6%–100% of
-  rows, and a changed layout collapses rather than degrades.
+  structures already in memory. The floor is 90%: across seven designs those
+  hold for 96.6%–100% of rows, and a changed layout collapses rather than
+  degrades.
 - **An endpoint with no source location is no longer reported.** It is a
   statement the reader believes in without being able to show it; a query where
   that is all there was now says so instead of printing blanks.

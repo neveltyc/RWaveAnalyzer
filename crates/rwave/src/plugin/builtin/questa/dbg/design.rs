@@ -11,12 +11,18 @@
 //! 2. port links and elaboration collapses give every other name for the same
 //!    electrical net, in whatever modules it reaches;
 //! 3. each of those names is looked up in its own module's database, where
-//!    `signal_tbl` says which shapes write it and which read it;
+//!    `signal_tbl` says which shapes write it and which read it, and
+//!    `rw_process_tbl` says which statements name it;
 //! 4. a shape is a primitive, so the walk goes up to the statement containing
-//!    it, which is what a reader wants named.
+//!    it, which is what a reader wants named;
+//! 5. the top level's own `proc_net_tbl` adds what no module-local name
+//!    reaches.
 //!
 //! Step 2 is what makes `tb.u_core.out` answer with a statement in `u_alu`: the
 //! two are one net across a port, and only the inner module writes it.
+//!
+//! What the columns are taken to mean is checked against the data rather than
+//! assumed from the schema version — see [`holds`].
 
 // Handles are raw 64-bit pointers and the name maps are hot: SipHash on an
 // 8-byte key is most of the cost of building the index, and this file never
@@ -79,7 +85,9 @@ pub struct Design {
     vector_bits: HashMap<i64, Vec<i64>>,
     vector_of: HashMap<i64, Vec<i64>>,
     /// net handle -> the statements touching it and whether they write it.
-    /// The last resort, for what the module tables do not record at all.
+    /// The top level's own record, which reaches what no module-local name
+    /// does: a variable inside a named block, and a hierarchical reference
+    /// made from a scope the net does not sit in.
     proc_of_net: HashMap<i64, Vec<(i64, bool)>>,
     /// `(design unit, statement name)` -> every place it sits, as a path of
     /// blocks relative to the module. The module databases name a statement
