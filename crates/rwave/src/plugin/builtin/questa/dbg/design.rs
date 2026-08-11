@@ -242,7 +242,26 @@ impl Design {
         // both. The bit's real neighbours are its simulation net, chained
         // below, so the mixed edge is dropped wherever that net is recorded
         // — and kept where it is not, as the only record there is.
-        for l in schema::port_links(&d.top)? {
+        // Everything below reads a column as a context handle. Whether it still
+        // is one is checked here, against the hierarchy just loaded, rather
+        // than assumed from the schema version.
+        let path = d.top.path().to_path_buf();
+        let ports = schema::port_links(&d.top)?;
+        let resolves = |h: &i64| d.ctx.contains_key(h);
+        holds(
+            &path,
+            "port_tbl.loconn_net and .hiconn_net name a context",
+            ports.iter().filter(|l| resolves(&l.inner) && resolves(&l.outer)).count(),
+            ports.len(),
+        )?;
+        let named = d.ctx.values().filter(|c| !c.name.is_empty() && c.name != "/").count();
+        holds(
+            &path,
+            "context_tbl.scope_handle names another context",
+            d.ctx.values().filter(|c| d.ctx.contains_key(&c.parent)).count(),
+            named,
+        )?;
+        for l in ports {
             if multibit.contains(&l.inner) != multibit.contains(&l.outer) {
                 let scalar = if multibit.contains(&l.inner) { l.outer } else { l.inner };
                 if d.simnet_of.contains_key(&scalar) {
@@ -270,8 +289,14 @@ impl Design {
         // are one thing. A vector alias is many things, one per bit, and its
         // rows must not become edges of one node; `split_aliases` says which
         // are which.
-        let (plain, vector_bits, vector_of) =
-            split_aliases(schema::simnet_links(&d.top)?, &multibit);
+        let aliases = schema::simnet_links(&d.top)?;
+        holds(
+            &path,
+            "new_simnet_tbl.anet_handle and .fnet_handle name a context",
+            aliases.iter().filter(|(a, _, _, f)| resolves(a) && resolves(f)).count(),
+            aliases.len(),
+        )?;
+        let (plain, vector_bits, vector_of) = split_aliases(aliases, &multibit);
         for (a, b) in plain {
             if multibit.contains(&a) != multibit.contains(&b) {
                 let scalar = if multibit.contains(&a) { b } else { a };
@@ -284,7 +309,14 @@ impl Design {
         }
         d.vector_bits = vector_bits;
         d.vector_of = vector_of;
-        for (proc, net, writes) in schema::proc_nets(&d.top)? {
+        let procs = schema::proc_nets(&d.top)?;
+        holds(
+            &path,
+            "proc_net_tbl.proc_handle and .net_handle name a context",
+            procs.iter().filter(|(p, n, _)| resolves(p) && resolves(n)).count(),
+            procs.len(),
+        )?;
+        for (proc, net, writes) in procs {
             d.proc_of_net.entry(net).or_default().push((proc, writes));
         }
         // Instances of one design unit tied to the same nets through the same
@@ -481,6 +513,41 @@ impl Design {
             let shapes: HashMap<i64, schema::Shape> =
                 schema::shapes(&db, duid)?.into_iter().map(|s| (s.id, s)).collect();
             let files = schema::files(&db)?;
+
+            // The same question asked of this database: are the columns still
+            // what they were? Every one of these is exactly 100% on the seven
+            // designs measured, so a shortfall is a changed layout rather than
+            // a design's peculiarity.
+            let refs: Vec<i64> =
+                signals.values().flat_map(|(r, w)| r.iter().chain(w)).copied().collect();
+            holds(
+                db.path(),
+                "signal_tbl's shape lists name a shape in shape_tbl",
+                refs.iter().filter(|id| shapes.contains_key(id)).count(),
+                refs.len(),
+            )?;
+            holds(
+                db.path(),
+                "shape_tbl.parent_shape_id names a shape or the root",
+                shapes
+                    .values()
+                    .filter(|s| s.parent == 0 || shapes.contains_key(&s.parent))
+                    .count(),
+                shapes.len(),
+            )?;
+            let with_file: Vec<&schema::Shape> = shapes.values().filter(|s| s.file != 0).collect();
+            holds(
+                db.path(),
+                "shape_tbl.file indexes rw_file_tbl",
+                with_file.iter().filter(|s| s.file as usize <= files.len()).count(),
+                with_file.len(),
+            )?;
+            holds(
+                db.path(),
+                "shape_tbl.line is a list of line numbers",
+                shapes.values().filter(|s| !s.line_unreadable).count(),
+                shapes.len(),
+            )?;
             let by_name: HashMap<String, i64> = shapes
                 .values()
                 .filter(|s| !s.spec2.is_empty())
@@ -1006,6 +1073,24 @@ impl Design {
             ))
         });
 
+        // An endpoint nobody can go and look at is not an answer. Every hop
+        // names a statement, and a statement the database cannot place in a
+        // file and a line is one this reader believes exists without being
+        // able to show it — which is the shape of a wrong answer as much as a
+        // right one. Across four designs and 263 000 endpoints exactly one
+        // came out this way, so this costs nothing and removes the only class
+        // of answer that cannot be checked.
+        let located = hops.len();
+        hops.retain(|h| h.file.is_some() && h.line.is_some());
+        if hops.is_empty() && located > 0 {
+            return Err(err(format!(
+                "{questa_path}: the database records {located} statement(s) touching this \
+                 signal and no source location for any of them. Reporting them would name \
+                 endpoints that cannot be looked at; the design was probably optimised \
+                 without `+acc`, which is what keeps the locations."
+            )));
+        }
+
         // A port hop says only "the value comes from the other side of this
         // boundary". That is worth reporting when it is all there is — which is
         // what `boundary_only` means — and is noise once the statement itself
@@ -1245,6 +1330,41 @@ fn label_stripped(name: &str) -> &str {
     }
 }
 
+/// How much of a table has to hold for the reader's assumption about it to be
+/// believable.
+///
+/// The schema version says which layout this is; it does not say that the
+/// columns still mean what they meant. A handle column that has stopped being
+/// a handle would otherwise be read as one and answered from, which is the
+/// failure this reader can least afford — a wrong endpoint is indistinguishable
+/// from a right one to whoever reads it.
+///
+/// Measured on seven databases, from a 234-signal core to a 370 000-signal SoC:
+/// the top-level handle columns resolve for 96.6% to 100% of rows (VeeRwolf's
+/// `port_tbl` is the low one, and its stragglers are real — nets optimisation
+/// removed), and every per-module invariant is exactly 100%. A layout that has
+/// changed underneath does not degrade to 90%; it collapses. The floor is set
+/// where nothing observed comes near it and nothing broken could pass.
+const FLOOR: f64 = 0.90;
+
+/// Check one such assumption, naming what was measured rather than only that
+/// something was wrong.
+fn holds(db: &Path, what: &str, ok: usize, total: usize) -> Result<(), String> {
+    if total == 0 || (ok as f64) >= FLOOR * (total as f64) {
+        return Ok(());
+    }
+    Err(err(format!(
+        "{}: {what} holds for {ok} of {total} rows ({:.1}%, expected at least {:.0}%). \
+         The database is the schema version this reader knows, so a column has \
+         changed meaning rather than moved. Refusing to answer from it: an \
+         endpoint derived from a column that no longer means what it did cannot \
+         be told apart from a correct one.",
+        db.display(),
+        100.0 * ok as f64 / total as f64,
+        100.0 * FLOOR,
+    )))
+}
+
 /// What follows a statement name's tag: `399` of `#FORCE#399` and of
 /// `#f#399`. The two tables tag the same statement differently and agree on
 /// everything after it, which is what lets one be found from the other
@@ -1399,6 +1519,7 @@ mod tests {
             spec2: spec2.into(),
             file: 1,
             lines: vec![33],
+            line_unreadable: false,
         };
         let m = Module {
             signals: HashMap::default(),
@@ -1433,6 +1554,7 @@ mod tests {
             spec2: String::new(),
             file: 1,
             lines: Vec::new(),
+            line_unreadable: false,
         };
         let m = Module {
             signals: HashMap::default(),
@@ -1478,6 +1600,21 @@ mod tests {
         // An interface member is `b/vld` inside its module.
         assert_eq!(join("tb.u_core", "b/vld"), "tb.u_core.b.vld");
         assert_eq!(join("", "clk"), "clk");
+    }
+
+    #[test]
+    fn a_changed_column_is_refused_rather_than_read() {
+        let p = Path::new("run.dbg");
+        // What a healthy table looks like: the observed floor is 96.6%.
+        assert!(holds(p, "x", 966, 1000).is_ok());
+        assert!(holds(p, "x", 900, 1000).is_ok());
+        // What a column that stopped being a handle looks like.
+        let e = holds(p, "port_tbl.loconn_net names a context", 3, 1000).unwrap_err();
+        assert!(e.contains("3 of 1000"), "{e}");
+        assert!(e.contains("0.3%"), "{e}");
+        assert!(e.contains("port_tbl.loconn_net"), "the message names the assumption: {e}");
+        // An empty table is not evidence of anything.
+        assert!(holds(p, "x", 0, 0).is_ok());
     }
 
     #[test]

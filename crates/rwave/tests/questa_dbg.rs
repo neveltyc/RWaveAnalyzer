@@ -85,4 +85,21 @@ fn a_real_database_answers_the_questions_questa_answers() {
     // drivers, and the difference has to survive.
     assert!(!d.resolves("/tb/u_core/no_such_signal"));
     assert!(d.resolves("/tb/u_core/out"));
+
+    // Part of an object is not an object this reader answers about, and the
+    // refusal is the point rather than an omission. slang attributes every
+    // driver to the longest static prefix of what it assigns, with the bit
+    // range it covers; this database records neither, so a question about one
+    // bit or one field can only be answered with what drives the whole thing —
+    // which would be a wrong answer wearing a right one's clothes. Answering
+    // the whole object when asked about a part is the failure this pins shut:
+    // whoever later makes the path lookup lenient has to see this fail.
+    for part in [
+        "/tb/u_core/out[3]",
+        "/tb/u_core/out[3:1]",
+        "/tb/u_core/u_alu/res_q[0]",
+    ] {
+        assert!(!d.resolves(part), "{part} names part of an object, which is not answerable");
+        assert!(d.trace(part, Direction::Driver, false).is_err(), "{part} must be refused");
+    }
 }

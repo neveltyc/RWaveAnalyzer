@@ -227,6 +227,10 @@ pub struct Shape {
     /// feeding it, which is what a reader wants named — the `always_ff` header
     /// above them is not where the value comes from.
     pub lines: Vec<u32>,
+    /// The column held something, and none of it was a line number. Kept so
+    /// the caller can tell a shape that records no line from a column that has
+    /// stopped being a list of them.
+    pub line_unreadable: bool,
 }
 
 fn shape_ids(s: &str) -> Vec<i64> {
@@ -306,6 +310,10 @@ pub fn shapes(db: &Db, duid: i64) -> Result<Vec<Shape>, String> {
                 file: r.get::<_, Option<i64>>(8)?.unwrap_or_default(),
                 // Text, not an integer, and sometimes a list.
                 lines: lines_of(&text(9, r)?),
+                line_unreadable: {
+                    let raw = text(9, r)?;
+                    !raw.trim().is_empty() && lines_of(&raw).is_empty()
+                },
             })
         },
     )

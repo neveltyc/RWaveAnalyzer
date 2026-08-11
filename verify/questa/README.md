@@ -98,6 +98,38 @@ covers only the first scope: veerwolf's first 60 signals disagree nowhere, and
 1852 spread across it disagreed in 160 places. The N shards together cover every
 signal.
 
+## What this reader means by a driver
+
+QuestaSim is the oracle for whether an answer is right, which leaves open what
+the question is. [slang](https://github.com/MikePopoloski/slang) states one, as
+a front end that computes drivers from the source rather than reading somebody
+else's elaboration, and comparing the two models says where this one stops.
+
+slang's `ValueDriver` carries four things: a **kind** (procedural or
+continuous), a **source** (`initial`, `final`, `always`, `always_comb`,
+`always_latch`, `always_ff`, subroutine), **flags** (input port, output port,
+clocking variable, initializer, via an indirect port such as a modport), and a
+**path** — the longest statically known prefix of what is assigned, with the
+**bit range** it covers. Two drivers conflict when their ranges overlap.
+
+A `Hop` here carries the kind, the statement and where it is, the scope, and
+whether reaching it crossed a port. It does **not** carry a bit range, and it
+folds `initial` in with the other procedural sources. That has one consequence
+worth stating plainly rather than discovering: **a question about part of an
+object is refused, not answered.** `trace tb.u.bus[3]` and `trace tb.u.s.field`
+do not resolve, because the only answer available would be what drives the
+whole object, and that answer would look exactly like a correct one. The whole
+object is answerable, and a query about it unions the statements that assign
+its members — which is what slang's overlap rule gives for a whole-object
+prefix. `questa_dbg.rs` pins the refusal so that making the path lookup lenient
+has to fail a test first.
+
+The other gaps against that model, none of which produce a wrong answer today:
+the port flag says "a boundary was crossed" without saying which direction; an
+initializer (`wire w = a & b`) is reported as the continuous assignment it
+elaborates to; and a driver's source is visible only through the statement text
+and the `#tag#` in `raw_kind` rather than as its own field.
+
 ## Answers vsim does not give
 
 `M` is not a defect count. vsim declines to answer questions it is asked, and
