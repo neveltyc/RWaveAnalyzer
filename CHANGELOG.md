@@ -76,6 +76,14 @@ because libwlf cannot report when it last changed.
   which is why unrelated config signals once shared one seventy-thousand-
   endpoint answer.
 
+  The remaining over-reporting had one shape: a vector's node joining
+  every bit's net — through its alias rows, and through the object-level
+  port edge a gathering vector shares with each branch's scalar. Bits now
+  stay apart. Scalar aliases and same-slice rows remain edges, each
+  simulation net's scalars are chained bit-exact in their place, and a
+  vector is consulted for the bit in hand rather than walked through:
+  one generate branch no longer answers with the other's statements.
+
   Opening is now paged rather than read whole — a custom read-only VFS corrects
   the header as SQLite asks for the first page — and the hierarchy is indexed by
   descent instead of by writing out every full path. On a 1.3 GB database that
