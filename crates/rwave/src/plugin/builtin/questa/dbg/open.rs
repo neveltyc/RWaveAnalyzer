@@ -113,8 +113,8 @@ impl Db {
         conn.deserialize_read_exact(rusqlite::MAIN_DB, SQLITE_MAGIC.chain(f), len, true)
             .map_err(|e| {
                 err(format!(
-                    "{} did not open as a database: {e}. It should be SQLite behind a \
-                     Questa header; a truncated or in-progress file is the usual cause.",
+                    "{} did not open as a database: {e}. A truncated or \
+                     in-progress file is the usual cause.",
                     path.display()
                 ))
             })?;
@@ -149,8 +149,8 @@ impl Db {
         })
         .map_err(|e| {
             err(format!(
-                "{} did not open as a database: {e}. It should be SQLite behind a \
-                 Questa header; a truncated or in-progress file is the usual cause.",
+                "{} did not open as a database: {e}. A truncated or \
+                 in-progress file is the usual cause.",
                 path.display()
             ))
         })?;
@@ -192,14 +192,12 @@ impl Db {
         match got {
             Some(v) if v == known => Ok(()),
             Some(v) => Err(err(format!(
-                "{} is schema version {v}; rwave reads version {known}{}. \
-                 Refusing rather than reading it as though the layout were unchanged.",
+                "{} is schema version {v}; rwave reads version {known}{}.",
                 self.path.display(),
-                self.writer().map(|w| format!(" (this file was written by {w})")).unwrap_or_default()
+                self.writer().map(|w| format!(" (written by {w})")).unwrap_or_default()
             ))),
             None => Err(err(format!(
-                "{} carries no schema version in {table}; it is not a database this \
-                 reader recognises.",
+                "{} carries no schema version; it is not a database rwave reads.",
                 self.path.display()
             ))),
         }

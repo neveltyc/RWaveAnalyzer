@@ -250,14 +250,14 @@ impl Design {
         let resolves = |h: &i64| d.ctx.contains_key(h);
         holds(
             &path,
-            "port_tbl.loconn_net and .hiconn_net name a context",
+            "02",
             ports.iter().filter(|l| resolves(&l.inner) && resolves(&l.outer)).count(),
             ports.len(),
         )?;
         let named = d.ctx.values().filter(|c| !c.name.is_empty() && c.name != "/").count();
         holds(
             &path,
-            "context_tbl.scope_handle names another context",
+            "01",
             d.ctx.values().filter(|c| d.ctx.contains_key(&c.parent)).count(),
             named,
         )?;
@@ -292,7 +292,7 @@ impl Design {
         let aliases = schema::simnet_links(&d.top)?;
         holds(
             &path,
-            "new_simnet_tbl.anet_handle and .fnet_handle name a context",
+            "03",
             aliases.iter().filter(|(a, _, _, f)| resolves(a) && resolves(f)).count(),
             aliases.len(),
         )?;
@@ -312,7 +312,7 @@ impl Design {
         let procs = schema::proc_nets(&d.top)?;
         holds(
             &path,
-            "proc_net_tbl.proc_handle and .net_handle name a context",
+            "04",
             procs.iter().filter(|(p, n, _)| resolves(p) && resolves(n)).count(),
             procs.len(),
         )?;
@@ -522,13 +522,13 @@ impl Design {
                 signals.values().flat_map(|(r, w)| r.iter().chain(w)).copied().collect();
             holds(
                 db.path(),
-                "signal_tbl's shape lists name a shape in shape_tbl",
+                "05",
                 refs.iter().filter(|id| shapes.contains_key(id)).count(),
                 refs.len(),
             )?;
             holds(
                 db.path(),
-                "shape_tbl.parent_shape_id names a shape or the root",
+                "06",
                 shapes
                     .values()
                     .filter(|s| s.parent == 0 || shapes.contains_key(&s.parent))
@@ -538,13 +538,13 @@ impl Design {
             let with_file: Vec<&schema::Shape> = shapes.values().filter(|s| s.file != 0).collect();
             holds(
                 db.path(),
-                "shape_tbl.file indexes rw_file_tbl",
+                "07",
                 with_file.iter().filter(|s| s.file as usize <= files.len()).count(),
                 with_file.len(),
             )?;
             holds(
                 db.path(),
-                "shape_tbl.line is a list of line numbers",
+                "08",
                 shapes.values().filter(|s| !s.line_unreadable).count(),
                 shapes.len(),
             )?;
@@ -1084,10 +1084,8 @@ impl Design {
         hops.retain(|h| h.file.is_some() && h.line.is_some());
         if hops.is_empty() && located > 0 {
             return Err(err(format!(
-                "{questa_path}: the database records {located} statement(s) touching this \
-                 signal and no source location for any of them. Reporting them would name \
-                 endpoints that cannot be looked at; the design was probably optimised \
-                 without `+acc`, which is what keeps the locations."
+                "{questa_path}: the database records no source location for anything that \
+                 touches this signal. Optimise with `+acc`, which is what keeps them."
             )));
         }
 
@@ -1347,22 +1345,25 @@ fn label_stripped(name: &str) -> &str {
 /// where nothing observed comes near it and nothing broken could pass.
 const FLOOR: f64 = 0.90;
 
-/// Check one such assumption, naming what was measured rather than only that
-/// something was wrong.
-fn holds(db: &Path, what: &str, ok: usize, total: usize) -> Result<(), String> {
+/// Check one such assumption. The code goes in the message and its meaning
+/// stays here: whoever hits this cannot fix it in their own design, so the
+/// message says the file is unusable and nothing more. The codes:
+///
+/// | code | the column that stopped holding |
+/// |------|--------------------------------|
+/// | 01 | `context_tbl.scope_handle` names another context |
+/// | 02 | `port_tbl.loconn_net` / `.hiconn_net` name contexts |
+/// | 03 | `new_simnet_tbl.anet_handle` / `.fnet_handle` name contexts |
+/// | 04 | `proc_net_tbl.proc_handle` / `.net_handle` name contexts |
+/// | 05 | `signal_tbl`'s shape lists name shapes in `shape_tbl` |
+/// | 06 | `shape_tbl.parent_shape_id` names a shape or the root |
+/// | 07 | `shape_tbl.file` indexes `rw_file_tbl` |
+/// | 08 | `shape_tbl.line` is a list of line numbers |
+fn holds(db: &Path, code: &str, ok: usize, total: usize) -> Result<(), String> {
     if total == 0 || (ok as f64) >= FLOOR * (total as f64) {
         return Ok(());
     }
-    Err(err(format!(
-        "{}: {what} holds for {ok} of {total} rows ({:.1}%, expected at least {:.0}%). \
-         The database is the schema version this reader knows, so a column has \
-         changed meaning rather than moved. Refusing to answer from it: an \
-         endpoint derived from a column that no longer means what it did cannot \
-         be told apart from a correct one.",
-        db.display(),
-        100.0 * ok as f64 / total as f64,
-        100.0 * FLOOR,
-    )))
+    Err(err(format!("{}: not a debug database this rwave can read [DBG-{code}]", db.display())))
 }
 
 /// What follows a statement name's tag: `399` of `#FORCE#399` and of
@@ -1606,15 +1607,18 @@ mod tests {
     fn a_changed_column_is_refused_rather_than_read() {
         let p = Path::new("run.dbg");
         // What a healthy table looks like: the observed floor is 96.6%.
-        assert!(holds(p, "x", 966, 1000).is_ok());
-        assert!(holds(p, "x", 900, 1000).is_ok());
-        // What a column that stopped being a handle looks like.
-        let e = holds(p, "port_tbl.loconn_net names a context", 3, 1000).unwrap_err();
-        assert!(e.contains("3 of 1000"), "{e}");
-        assert!(e.contains("0.3%"), "{e}");
-        assert!(e.contains("port_tbl.loconn_net"), "the message names the assumption: {e}");
+        assert!(holds(p, "02", 966, 1000).is_ok());
+        assert!(holds(p, "02", 900, 1000).is_ok());
+        // What a column that stopped being a handle looks like. The reader of
+        // this message cannot fix it in their own design, so it says the file
+        // is unusable and carries the code that says which column to whoever
+        // can.
+        let e = holds(p, "02", 3, 1000).unwrap_err();
+        assert!(e.contains("not a debug database this rwave can read"), "{e}");
+        assert!(e.contains("[DBG-02]"), "{e}");
+        assert!(!e.contains("1000"), "the row counts are for the log, not the message: {e}");
         // An empty table is not evidence of anything.
-        assert!(holds(p, "x", 0, 0).is_ok());
+        assert!(holds(p, "02", 0, 0).is_ok());
     }
 
     #[test]
