@@ -241,6 +241,63 @@ impl Design {
                 d.alias_of.entry(a).or_default().extend(group.iter().copied().filter(|&b| b != a));
             }
         }
+        // An interface port with no pins to match on. Questa writes a port's
+        // `inst_tbl` and `pin_tbl` rows for only one of a module's
+        // instantiations — where one module is instantiated twice, the port
+        // exists under both and only one has them — so the pass above cannot
+        // see the other. The binding is still in the database: elaboration collapses
+        // an interface's member nets into nets of the module that received
+        // it, so the members of the interface actually passed share a
+        // simulation net with something inside this port's module, and the
+        // members of every other instance of that interface do not.
+        //
+        // Only a childless instance boundary without pins is a port in
+        // absentia — a real instance keeps its pins even when optimisation
+        // empties it — and only a unique candidate is taken: two interfaces
+        // of one type wired into the same module cannot be told apart
+        // without pins, and a wrong binding is worse than no answer.
+        let mut orphans: Vec<(i64, i64, i64)> = Vec::new();
+        for (&h, c) in &d.ctx {
+            if c.name.is_empty() || c.name == "/" || c.name.starts_with('#') {
+                continue;
+            }
+            if d.children.contains_key(&h) || d.alias_of.contains_key(&h) || pins.contains_key(&h)
+            {
+                continue;
+            }
+            let Some(&du) = d.du_of_ctx.get(&h) else { continue };
+            let Some(&parent_du) = d.du_of_ctx.get(&c.parent) else { continue };
+            if du == 0 || parent_du == du {
+                continue;
+            }
+            orphans.push((h, du, c.parent));
+        }
+        let wanted: HashSet<i64> = orphans.iter().map(|&(_, du, _)| du).collect();
+        let mut elaborated: HashMap<i64, Vec<i64>> = HashMap::default();
+        for (&h, c) in &d.ctx {
+            let Some(&du) = d.du_of_ctx.get(&h) else { continue };
+            if !wanted.contains(&du) || !d.children.contains_key(&h) {
+                continue;
+            }
+            if d.du_of_ctx.get(&c.parent).is_some_and(|&p| p != du) {
+                elaborated.entry(du).or_default().push(h);
+            }
+        }
+        for (h, du, scope) in orphans {
+            let hits: Vec<i64> = elaborated
+                .get(&du)
+                .into_iter()
+                .flatten()
+                .copied()
+                // An enclosing scope is where the port lives, not what it
+                // was passed.
+                .filter(|&cand| !d.encloses(cand, h) && d.collapsed_into(cand, scope))
+                .collect();
+            if let &[target] = hits.as_slice() {
+                d.alias_of.entry(h).or_default().push(target);
+                d.alias_of.entry(target).or_default().push(h);
+            }
+        }
         // Which blocks a statement sits inside, as a path relative to the
         // module. The module databases name a statement on its own; the design
         // spells it with the generate branch in front, and that branch is the
@@ -470,6 +527,44 @@ impl Design {
             }
         }
         true
+    }
+
+    /// Whether `anc` is `h` or a scope enclosing it.
+    fn encloses(&self, anc: i64, mut h: i64) -> bool {
+        loop {
+            if h == anc {
+                return true;
+            }
+            match self.ctx.get(&h) {
+                Some(c) => h = c.parent,
+                None => return false,
+            }
+        }
+    }
+
+    /// Whether elaboration collapsed a net inside `inst` with one inside
+    /// `scope`. This is the fact that binds an interface to the port it was
+    /// passed on, recorded net by net rather than as a row about either: the
+    /// receiving module wires members to its own contents, and those joins
+    /// all land in the simulation-net table.
+    fn collapsed_into(&self, inst: i64, scope: i64) -> bool {
+        let mut stack = vec![inst];
+        while let Some(x) = stack.pop() {
+            if let Some(kids) = self.children.get(&x) {
+                stack.extend(kids);
+            }
+            if x == inst {
+                continue;
+            }
+            for id in self.simnet_of.get(&x).into_iter().flatten() {
+                for &m in self.simnet_members.get(id).into_iter().flatten() {
+                    if self.encloses(scope, m) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Every context whose path is exactly this, walking the hierarchy down one
