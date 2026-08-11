@@ -253,6 +253,15 @@ impl Design {
         // Everything below reads a column as a context handle. Whether it still
         // is one is checked here, against the hierarchy just loaded, rather
         // than assumed from the schema version.
+        // Two separate things: whether the column still means what it did,
+        // and whether one row is usable. The first is the check below; the
+        // second is the filter that follows it, and skipping it was a way to
+        // invent connectivity. A handle no context claims can never be walked
+        // to a name, so a row holding one contributes nothing except as a node
+        // the walk passes through — and every row that mentions it is joined
+        // to every other. VeeRwolf has one such handle in 148 port rows, and
+        // six of them span nets that are otherwise unrelated. This is the
+        // shape the zero handle had, with a value that looks like a pointer.
         let path = d.top.path().to_path_buf();
         let ports = schema::port_links(&d.top)?;
         let resolves = |h: &i64| d.ctx.contains_key(h);
@@ -262,6 +271,8 @@ impl Design {
             ports.iter().filter(|l| resolves(&l.inner) && resolves(&l.outer)).count(),
             ports.len(),
         )?;
+        let ports: Vec<schema::PortLink> =
+            ports.into_iter().filter(|l| resolves(&l.inner) && resolves(&l.outer)).collect();
         let named = d.ctx.values().filter(|c| !c.name.is_empty() && c.name != "/").count();
         holds(
             &path,
@@ -304,6 +315,8 @@ impl Design {
             aliases.iter().filter(|(a, _, _, f)| resolves(a) && resolves(f)).count(),
             aliases.len(),
         )?;
+        let aliases: Vec<(i64, Option<i64>, Option<i64>, i64)> =
+            aliases.into_iter().filter(|(a, _, _, f)| resolves(a) && resolves(f)).collect();
         let (plain, vector_bits, vector_of) = split_aliases(aliases, &multibit);
         for (a, b) in plain {
             if multibit.contains(&a) != multibit.contains(&b) {
@@ -325,6 +338,9 @@ impl Design {
             procs.len(),
         )?;
         for (proc, net, writes) in procs {
+            if !resolves(&proc) || !resolves(&net) {
+                continue;
+            }
             d.proc_of_net.entry(net).or_default().push((proc, writes));
         }
         // Instances of one design unit tied to the same nets through the same
