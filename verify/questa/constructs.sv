@@ -309,6 +309,9 @@ module cx_hier_target (input logic clk, output logic [7:0] visible);
   logic [7:0] deep;
   always_ff @(posedge clk) deep <= deep + 8'd1;
   assign visible = deep;
+  // Written from the top by hierarchical name: the only driver of this one
+  // is a statement in a scope that cannot be reached from the net either.
+  logic [7:0] poked;
 endmodule
 
 module cx_hier_reader (input logic clk, output logic [7:0] copied);
@@ -319,6 +322,98 @@ endmodule
 // A module a `bind` attaches to the design from outside.
 module cx_bound (input logic clk, input logic [7:0] watched, output logic seen_hi);
   always_ff @(posedge clk) seen_hi <= watched[7];
+endmodule
+
+// ------------------------------------------------- the second sweep of forms
+//
+// Everything above is what the four faults found so far were about. These are
+// the rest of the families in the syntax table that can put a name on a net or
+// hide a statement: the ones a design is less likely to contain, which is
+// exactly why a fixture has to.
+
+// A user-defined primitive: a table, not a statement, driving a net.
+primitive cx_udp (out, a, b);
+  output out;
+  input  a, b;
+  table
+    // a b : out
+       0 0 : 0;
+       0 1 : 1;
+       1 0 : 1;
+       1 1 : 0;
+  endtable
+endprimitive
+
+module cx_prim_user (input logic a, input logic b, output logic y);
+  cx_udp u_udp (y, a, b);
+endmodule
+
+// A parameter overridden by `defparam` rather than by the instantiation.
+module cx_param (input logic [7:0] d, output logic [7:0] q);
+  parameter int SHIFT = 0;
+  assign q = d << SHIFT;
+endmodule
+
+// Unpacked types, and a multi-dimensional packed array, as ports.
+typedef struct {
+  logic [7:0] a;
+  logic [7:0] b;
+} cx_unpacked_t;
+
+module cx_shapes (
+    input  cx_unpacked_t     up_in,      // unpacked struct port
+    input  logic [3:0][7:0]  md_in,      // multi-dimensional packed array
+    input  logic [7:0]       arr_in [2], // unpacked array port
+    output logic [7:0]       up_sum,
+    output logic [7:0]       md_pick,
+    output logic [7:0]       arr_pick
+);
+  assign up_sum = up_in.a + up_in.b;
+  assign md_pick = md_in[2];
+  assign arr_pick = arr_in[1];
+endmodule
+
+// A named block inside a process, with a variable of its own: the variable
+// gets no `signal_tbl` row anywhere, and only the top level records who
+// touches it.
+module cx_named_block (input logic clk, input logic [7:0] d, output logic [7:0] q);
+  always_ff @(posedge clk) begin : accumulate
+    logic [7:0] local_acc;
+    local_acc = d + 8'd3;
+    q <= local_acc;
+  end
+endmodule
+
+// A `for` loop inside a process writing an array, and a streaming operator.
+module cx_loops (input logic [31:0] d, output logic [7:0] bytes [4], output logic [31:0] rev);
+  always_comb begin
+    for (int i = 0; i < 4; i++) bytes[i] = d[i*8 +: 8];
+  end
+  assign rev = {<<8{d}};                            // streaming concatenation
+endmodule
+
+// Procedural continuous assignment, and force/release from a process.
+module cx_forced (input logic clk, input logic sel, input logic [7:0] d, output logic [7:0] q);
+  logic [7:0] held;
+  always @(posedge clk) begin
+    if (sel) force held = d;
+    else     release held;
+  end
+  assign q = held;
+endmodule
+
+// An interface with a method, called across the port.
+interface cx_meth_if;
+  logic [7:0] store;
+  function automatic logic [7:0] peek();
+    return store;
+  endfunction
+  modport user (import peek, output store);
+endinterface
+
+module cx_meth_user (cx_meth_if.user bus, input logic [7:0] d, output logic [7:0] got);
+  assign bus.store = d;
+  assign got = bus.peek();
 endmodule
 
 // ------------------------------------------------------------------- top
@@ -427,6 +522,50 @@ module tb;
   assign i_wire = stim[9];
   assign i_vec = stim[15:8];
   cx_ansi u_wildcard (.*);
+
+  // -- the second sweep
+  wire prim_y;
+  cx_prim_user u_prim (.a(stim[0]), .b(stim[1]), .y(prim_y));
+
+  wire [7:0] param_q;
+  cx_param u_param (.d(stim[7:0]), .q(param_q));
+  defparam u_param.SHIFT = 2;
+
+  cx_unpacked_t up_in;
+  logic [3:0][7:0] md_in;
+  logic [7:0] arr_in [2];
+  wire [7:0] up_sum, md_pick, arr_pick;
+  always_comb begin
+    up_in.a = stim[7:0];
+    up_in.b = stim[15:8];
+    md_in = {stim[7:0], stim[15:8], stim[7:0], stim[15:8]};
+    arr_in[0] = stim[7:0];
+    arr_in[1] = stim[15:8];
+  end
+  cx_shapes u_shapes (
+      .up_in(up_in), .md_in(md_in), .arr_in(arr_in),
+      .up_sum(up_sum), .md_pick(md_pick), .arr_pick(arr_pick)
+  );
+
+  wire [7:0] nb_q;
+  cx_named_block u_named_block (.clk(clk), .d(stim[7:0]), .q(nb_q));
+
+  wire [7:0] loop_bytes [4];
+  wire [31:0] loop_rev;
+  cx_loops u_loops (.d({stim, stim}), .bytes(loop_bytes), .rev(loop_rev));
+
+  wire [7:0] forced_q;
+  cx_forced u_forced (.clk(clk), .sel(stim[3]), .d(stim[7:0]), .q(forced_q));
+
+  cx_meth_if meth ();
+  wire [7:0] meth_got;
+  cx_meth_user u_meth (.bus(meth), .d(stim[7:0]), .got(meth_got));
+
+  // A hierarchical reference written from here rather than read: the driver
+  // of `u_hier_target.forced_from_tb` is a statement in another scope.
+  initial begin
+    #50 tb.u_hier_target.poked = 8'h11;
+  end
 endmodule
 
 // A bound instance: connectivity created from outside the target module.

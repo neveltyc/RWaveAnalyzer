@@ -122,6 +122,11 @@ struct Module {
     /// `rw_process_tbl` calls it `#p#129(input_translation)`, and the label is
     /// what someone reading the RTL recognises.
     labelled: HashMap<String, String>,
+    /// What follows the tag in a statement's name -> the one statement with
+    /// that suffix, where there is only one. The hierarchy and the module
+    /// tables tag a statement differently and agree on everything after it,
+    /// so this finds a construct the tag rewrite has never seen.
+    proc_by_rest: HashMap<String, (String, (i64, Option<u32>))>,
     /// The names the source declares. Anything else in this module is a `vopt`
     /// temporary: real to the netlist, absent from the RTL and from the
     /// waveform, and not something to hand back as an endpoint.
@@ -520,6 +525,19 @@ impl Design {
                 .filter(|n| n.ends_with(')'))
                 .map(|n| (label_stripped(n).to_string(), n.clone()))
                 .collect();
+            let mut by_rest: HashMap<String, Vec<(String, (i64, Option<u32>))>> =
+                HashMap::default();
+            for (n, &loc) in &proc_loc {
+                if let Some(rest) = rest_of(n) {
+                    by_rest.entry(rest.to_string()).or_default().push((n.clone(), loc));
+                }
+            }
+            // Two statements can share a suffix — a line with both an assign
+            // and a process on it — and then it identifies neither.
+            let proc_by_rest: HashMap<String, (String, (i64, Option<u32>))> = by_rest
+                .into_iter()
+                .filter_map(|(k, mut v)| (v.len() == 1).then(|| (k, v.remove(0))))
+                .collect();
             let declared = schema::declared(&db)?.into_iter().collect();
             self.modules.insert(
                 duid,
@@ -532,6 +550,7 @@ impl Design {
                     touched,
                     proc_loc,
                     labelled,
+                    proc_by_rest,
                     declared,
                 },
             );
@@ -953,7 +972,20 @@ impl Design {
                     continue;
                 }
                 let m = &self.modules[&duid];
-                let Some(&(file, line)) = m.proc_loc.get(&name) else { continue };
+                // The tag rewrite covers the constructs it was built from; a
+                // design brings others — `#FORCE#`, and the primitive names
+                // `#BUF#`/`#AND#` a gate-level netlist is full of. What both
+                // spellings share is everything after the tag, so a name the
+                // rewrite did not recognise is looked up by that instead of
+                // guessed at, and only when it names one statement.
+                let Some((name, &(file, line))) = m
+                    .proc_loc
+                    .get_key_value(&name)
+                    .or_else(|| m.proc_by_rest.get(rest_of(&name)?).map(|(k, v)| (k, v)))
+                else {
+                    continue;
+                };
+                let name = name.clone();
                 hops.push(process_hop(m, &name, file, line, &inst_path, crossed));
             }
         }
@@ -1213,6 +1245,18 @@ fn label_stripped(name: &str) -> &str {
     }
 }
 
+/// What follows a statement name's tag: `399` of `#FORCE#399` and of
+/// `#f#399`. The two tables tag the same statement differently and agree on
+/// everything after it, which is what lets one be found from the other
+/// without a table of tags to keep up to date.
+fn rest_of(name: &str) -> Option<&str> {
+    let mut parts = name.splitn(3, '#');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(""), Some(_), Some(rest)) if !rest.is_empty() => Some(rest),
+        _ => None,
+    }
+}
+
 /// Whether `name` is a part of `whole` — `slv_req_i.aw` of `slv_req_i`, or
 /// `cpuregs[3]` of `cpuregs`. A longer name that merely starts the same way is
 /// a different signal, so the separator has to be there.
@@ -1363,6 +1407,7 @@ mod tests {
             touched: HashMap::default(),
             proc_loc: HashMap::default(),
             labelled: HashMap::default(),
+            proc_by_rest: HashMap::default(),
             declared: HashSet::default(),
             files: vec!["dut.sv".into()],
             shapes: HashMap::from_iter([
@@ -1396,6 +1441,7 @@ mod tests {
             touched: HashMap::default(),
             proc_loc: HashMap::default(),
             labelled: HashMap::default(),
+            proc_by_rest: HashMap::default(),
             declared: HashSet::default(),
             files: vec![],
             shapes: HashMap::from_iter([(1, mk(1, 2)), (2, mk(2, 1))]),

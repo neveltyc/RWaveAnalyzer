@@ -113,7 +113,8 @@ def to_questa(path):
 
 # vsim prints a process by its construct, the database stores it by a tag.
 # Comparing them means saying so once rather than at each call site.
-TAG = {"ALWAYS": "p", "ASSIGN": "a", "INITIAL": "i", "IMPLICIT-WIRE": "w"}
+TAG = {"ALWAYS": "p", "ASSIGN": "a", "INITIAL": "i", "IMPLICIT-WIRE": "w",
+       "FORCE": "f"}
 
 
 def norm_proc(name):
