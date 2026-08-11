@@ -996,22 +996,28 @@ impl Design {
                     }
                     // The primitive says which lines the value comes from; the
                     // statement above it says what kind of construct it is.
-                    let mut lines: Vec<Option<u32>> = if !shape.lines.is_empty() {
-                        shape.lines.iter().copied().map(Some).collect()
+                    //
+                    // Both halves of a location come from whichever of them
+                    // supplied it. A file id indexes `rw_file_tbl`; it is not
+                    // a measure of how good a location is, so picking the
+                    // larger of two and pairing it with a line chosen
+                    // separately can name a file:line that exists in neither
+                    // row. Where the value comes from decides both.
+                    let (file_id, mut lines): (i64, Vec<Option<u32>>) = if !shape.lines.is_empty()
+                    {
+                        (shape.file, shape.lines.iter().copied().map(Some).collect())
                     } else if !stmt.lines.is_empty() {
-                        stmt.lines.iter().copied().map(Some).collect()
+                        (stmt.file, stmt.lines.iter().copied().map(Some).collect())
                     } else {
                         // Neither shape records one: the statement table does,
-                        // as an integer. A hop with a file and no line prints an
-                        // empty location, which is worse than looking it up.
-                        // Keyed by the process table's spelling, which drops the
-                        // generate block the shape names.
-                        let named = |n: &str| m.proc_loc.get(n).and_then(|(_, l)| *l);
+                        // and it records the pair. Keyed by the process table's
+                        // spelling, which drops the generate block the shape
+                        // names.
+                        let named = |n: &str| m.proc_loc.get(n).copied();
                         named(&stmt.spec2)
                             .or_else(|| stmt.spec2.rsplit_once('/').and_then(|(_, t)| named(t)))
-                            .map(Some)
-                            .into_iter()
-                            .collect()
+                            .map(|(f, l)| (f, l.map(Some).into_iter().collect()))
+                            .unwrap_or((0, Vec::new()))
                     };
                     if lines.is_empty() {
                         lines.push(None);
@@ -1020,7 +1026,9 @@ impl Design {
                         if !seen.insert((duid, stmt.id, inst_path.clone(), line)) {
                             continue;
                         }
-                        hops.push(hop_of(m, stmt, shape, line, &inst_path, dir, control, crossed));
+                        hops.push(hop_of(
+                            m, stmt, shape, file_id, line, &inst_path, dir, control, crossed,
+                        ));
                     }
                 }
             }
@@ -1157,6 +1165,8 @@ fn hop_of(
     m: &Module,
     s: &schema::Shape,
     prim: &schema::Shape,
+    // The file the line came from, chosen with it rather than beside it.
+    file_id: i64,
     line: Option<u32>,
     inst_path: &str,
     dir: Direction,
@@ -1166,7 +1176,7 @@ fn hop_of(
     let scope = inst_path.trim_start_matches('/').replace('/', ".");
     let file = m
         .files
-        .get(prim.file.max(s.file).saturating_sub(1) as usize)
+        .get(file_id.saturating_sub(1) as usize)
         .filter(|f| !f.is_empty())
         .cloned();
 
