@@ -70,6 +70,14 @@ pub struct Design {
     /// name it has. Consulted for the signal a query names, not walked.
     simnet_of: HashMap<i64, Vec<i64>>,
     simnet_members: HashMap<i64, Vec<i64>>,
+    /// A vector alias -> the per-bit nets it was split or gathered into, and
+    /// each of those nets -> the vectors naming it. The bits are different
+    /// nets, so these are not edges: a walk entering the vector on one bit
+    /// would leave on every other. The vector's bits are walked when the
+    /// vector itself is asked about, and the vector is consulted — name and
+    /// neighbours, one hop — when one of its bits is.
+    vector_bits: HashMap<i64, Vec<i64>>,
+    vector_of: HashMap<i64, Vec<i64>>,
     /// net handle -> the statements touching it and whether they write it.
     /// The last resort, for what the module tables do not record at all.
     proc_of_net: HashMap<i64, Vec<(i64, bool)>>,
@@ -148,6 +156,8 @@ impl Design {
             links: HashMap::default(),
             simnet_of: HashMap::default(),
             simnet_members: HashMap::default(),
+            vector_bits: HashMap::default(),
+            vector_of: HashMap::default(),
             proc_of_net: HashMap::default(),
             block_of: HashMap::default(),
             alias_of: HashMap::default(),
@@ -194,25 +204,76 @@ impl Design {
             .collect();
         d.instances.extend(boundaries);
 
+        // The elaborated net, which names the connection the port table stops
+        // short of. The groups come first because they carry two facts the
+        // edges below turn on: which handles are more than one bit wide, and
+        // which nets have a group at all.
+        let mut seen_bit: HashMap<i64, i64> = HashMap::default();
+        let mut multibit: HashSet<i64> = HashSet::default();
+        for (id, net, bit) in schema::simnet_members(&d.top)? {
+            d.simnet_of.entry(net).or_default().push(id);
+            d.simnet_members.entry(id).or_default().push(net);
+            if let Some(b) = bit {
+                match seen_bit.get(&net) {
+                    Some(&prev) if prev != b => {
+                        multibit.insert(net);
+                    }
+                    Some(_) => {}
+                    None => {
+                        seen_bit.insert(net, b);
+                    }
+                }
+            }
+        }
+        // Ports connect objects, and where one end is a vector and the other
+        // a bit of it, the object edge joins every bit's net through the
+        // vector node — two generate branches each drive their own net, the
+        // parent gathers the pair, and either branch used to answer with
+        // both. The bit's real neighbours are its simulation net, chained
+        // below, so the mixed edge is dropped wherever that net is recorded
+        // — and kept where it is not, as the only record there is.
         for l in schema::port_links(&d.top)? {
+            if multibit.contains(&l.inner) != multibit.contains(&l.outer) {
+                let scalar = if multibit.contains(&l.inner) { l.outer } else { l.inner };
+                if d.simnet_of.contains_key(&scalar) {
+                    continue;
+                }
+            }
             d.links.entry(l.inner).or_default().push((l.outer, true));
             d.links.entry(l.outer).or_default().push((l.inner, true));
         }
-        for (a, b) in schema::simnet_links(&d.top)? {
-            // Not a port: an implicit wire and the net it stands for are the
-            // same signal in the same module.
+        // The scalars of one simulation net are one electrical net, however
+        // far apart the hierarchy put them. The vector members stay out — a
+        // vector belongs to one net per bit — and are consulted at query
+        // time instead.
+        for members in d.simnet_members.values() {
+            let mut sc: Vec<i64> =
+                members.iter().copied().filter(|h| !multibit.contains(h)).collect();
+            sc.sort_unstable();
+            sc.dedup();
+            for w in sc.windows(2) {
+                d.links.entry(w[0]).or_default().push((w[1], true));
+                d.links.entry(w[1]).or_default().push((w[0], true));
+            }
+        }
+        // An alias and the net it stands for are the same signal — when they
+        // are one thing. A vector alias is many things, one per bit, and its
+        // rows must not become edges of one node; `split_aliases` says which
+        // are which.
+        let (plain, vector_bits, vector_of) =
+            split_aliases(schema::simnet_links(&d.top)?, &multibit);
+        for (a, b) in plain {
+            if multibit.contains(&a) != multibit.contains(&b) {
+                let scalar = if multibit.contains(&a) { b } else { a };
+                if d.simnet_of.contains_key(&scalar) {
+                    continue;
+                }
+            }
             d.links.entry(a).or_default().push((b, false));
             d.links.entry(b).or_default().push((a, false));
         }
-        // The elaborated net, which names the connection the port table stops
-        // short of. Kept as a lookup rather than folded into `links`: a bus
-        // handle belongs to one net per bit, so an edge through it would join
-        // every one of those nets to every other. Asked about the signal in
-        // hand it answers correctly; walked transitively it does not.
-        for (id, net) in schema::simnet_members(&d.top)? {
-            d.simnet_of.entry(net).or_default().push(id);
-            d.simnet_members.entry(id).or_default().push(net);
-        }
+        d.vector_bits = vector_bits;
+        d.vector_of = vector_of;
         for (proc, net, writes) in schema::proc_nets(&d.top)? {
             d.proc_of_net.entry(net).or_default().push((proc, writes));
         }
@@ -632,6 +693,15 @@ impl Design {
                     group.push((h, crossed));
                 }
             }
+            // The bits of a vector asked about by name are the signal in
+            // hand: each one's net is walked like the vector's own.
+            for f in self.vector_bits.get(s).into_iter().flatten() {
+                for (h, crossed) in self.net_group(*f) {
+                    if have.insert(h) {
+                        group.push((h, crossed));
+                    }
+                }
+            }
         }
         // Every other name the elaborated net has, for the signal that was
         // asked about. This is where a connection the port table never spells
@@ -646,6 +716,25 @@ impl Design {
                         group.push((h, true));
                     }
                 }
+            }
+        }
+        // The vector a net in hand is a bit of, and that vector's immediate
+        // neighbours — the same vector on the far side of its ports. Their
+        // statements touch this bit whenever they touch the vector, so both
+        // are consulted; their other bits are other nets, so neither is
+        // walked.
+        let mut consult: Vec<(i64, bool)> = Vec::new();
+        for &(h, crossed) in &group {
+            for &a in self.vector_of.get(&h).into_iter().flatten() {
+                consult.push((a, crossed));
+                for &(nb, _) in self.links.get(&a).into_iter().flatten() {
+                    consult.push((nb, true));
+                }
+            }
+        }
+        for (h, crossed) in consult {
+            if have.insert(h) {
+                group.push((h, crossed));
             }
         }
 
@@ -986,6 +1075,68 @@ fn join(scope: &str, local: &str) -> String {
     if scope.is_empty() { local } else { format!("{scope}.{local}") }
 }
 
+/// Sort elaboration's alias rows into edges and vector lookups.
+///
+/// A scalar alias is one signal under several names, however many rows it
+/// has — an init fanned out to thirty-five synchronisers is still one net —
+/// and every row stays an edge the walk may pass through. A vector alias
+/// names a different net per slice. Rows carrying the same explicit slice
+/// are one net and stay edges among themselves; across slices, and across
+/// the unranged rows of a vector, which do not say which bit they are, the
+/// only relations kept are the two lookups: bits of, and vector of.
+///
+/// What makes an alias a vector is the simulation-net table (`multibit`:
+/// handles seen with two different bit numbers) or a row whose own slice is
+/// wider than one bit; the rows alone cannot say, because a vector split
+/// bit by bit is written with no ranges at all, exactly like a fanned-out
+/// scalar.
+#[allow(clippy::type_complexity)]
+fn split_aliases(
+    rows: Vec<(i64, Option<i64>, Option<i64>, i64)>,
+    multibit: &HashSet<i64>,
+) -> (Vec<(i64, i64)>, HashMap<i64, Vec<i64>>, HashMap<i64, Vec<i64>>) {
+    let mut by_alias: HashMap<i64, Vec<(Option<i64>, Option<i64>, i64)>> = HashMap::default();
+    for (a, m, l, f) in rows {
+        by_alias.entry(a).or_default().push((m, l, f));
+    }
+    let mut plain = Vec::new();
+    let mut bits: HashMap<i64, Vec<i64>> = HashMap::default();
+    let mut of: HashMap<i64, Vec<i64>> = HashMap::default();
+    for (a, rows) in by_alias {
+        let mut fnets: Vec<i64> = rows.iter().map(|&(_, _, f)| f).collect();
+        fnets.sort_unstable();
+        fnets.dedup();
+        let vector = multibit.contains(&a)
+            || rows.iter().any(|&(m, l, _)| matches!((m, l), (Some(m), Some(l)) if m != l));
+        if fnets.len() == 1 || !vector {
+            for &f in &fnets {
+                plain.push((a, f));
+            }
+            continue;
+        }
+        // One net per explicit slice: chain its nets, which the walk's
+        // transitivity makes a clique of.
+        let mut by_slice: HashMap<(i64, i64), Vec<i64>> = HashMap::default();
+        for &(m, l, f) in &rows {
+            if let (Some(m), Some(l)) = (m, l) {
+                by_slice.entry((m, l)).or_default().push(f);
+            }
+        }
+        for (_, mut fs) in by_slice {
+            fs.sort_unstable();
+            fs.dedup();
+            for w in fs.windows(2) {
+                plain.push((w[0], w[1]));
+            }
+        }
+        for &f in &fnets {
+            of.entry(f).or_default().push(a);
+        }
+        bits.insert(a, fnets);
+    }
+    (plain, bits, of)
+}
+
 /// A statement's name as the module databases spell it.
 ///
 /// The hierarchy names a statement by its construct — `#ALWAYS#47` — and the
@@ -1223,5 +1374,41 @@ mod tests {
         // An interface member is `b/vld` inside its module.
         assert_eq!(join("tb.u_core", "b/vld"), "tb.u_core.b.vld");
         assert_eq!(join("", "clk"), "clk");
+    }
+
+    #[test]
+    fn a_scalar_fanned_out_stays_one_net() {
+        // An init driven to three synchronisers under three implicit names:
+        // every row unranged and the alias one bit wide. One signal, so all
+        // rows stay edges the walk may pass through.
+        let rows = vec![(9, None, None, 1), (9, None, None, 2), (9, None, None, 3)];
+        let (plain, bits, of) = split_aliases(rows, &HashSet::default());
+        assert_eq!(plain.len(), 3);
+        assert!(bits.is_empty() && of.is_empty());
+    }
+
+    #[test]
+    fn a_vectors_bits_are_kept_apart() {
+        // A vector split into per-bit nets, rows unranged as Questa writes
+        // them: only the simulation-net table says the alias is wide. No
+        // edges — a walk through the name would join bit 0 to bit 1.
+        let rows = vec![(9, None, None, 1), (9, None, None, 2)];
+        let multibit = HashSet::from_iter([9]);
+        let (plain, bits, of) = split_aliases(rows, &multibit);
+        assert!(plain.is_empty());
+        assert_eq!(bits[&9], vec![1, 2]);
+        assert_eq!(of[&1], vec![9]);
+        assert_eq!(of[&2], vec![9]);
+    }
+
+    #[test]
+    fn nets_on_the_same_slice_of_a_vector_are_one_net() {
+        // A four-bit state crossing a module boundary whole: both sides map
+        // to [3:0], so they are one net. The [0:0] tap is not part of it.
+        let rows =
+            vec![(9, Some(3), Some(0), 1), (9, Some(3), Some(0), 2), (9, Some(0), Some(0), 3)];
+        let (plain, bits, _) = split_aliases(rows, &HashSet::default());
+        assert_eq!(plain, vec![(1, 2)]);
+        assert_eq!(bits[&9], vec![1, 2, 3]);
     }
 }

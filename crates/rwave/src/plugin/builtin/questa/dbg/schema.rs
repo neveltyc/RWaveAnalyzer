@@ -135,19 +135,25 @@ pub fn port_links(db: &Db) -> Result<Vec<PortLink>, String> {
 }
 
 /// Nets collapsed into one by elaboration — an implicit wire and the net it
-/// stands for. Not a port crossing, so it does not make a hop a boundary.
+/// stands for — as `(alias, msb, lsb, net)`. Not a port crossing, so it does
+/// not make a hop a boundary.
+///
+/// The range is the alias's own: `NULL` for a scalar, a slice when one row
+/// maps one part of a vector. The caller needs it because a vector alias's
+/// rows name a *different* net per slice, and treating those rows as edges
+/// of one node would join every bit of the vector to every other.
 ///
 /// Rows with a handle of `0` are placeholders, not aliases: a handle names a
 /// context and `0` names none. On a large design there are thousands of them,
 /// and taking them as edges makes `0` a hub joining every net they mention —
 /// one 76 031-net "electrical net", which is where a config signal used to
 /// come back with seventy thousand endpoints it had nothing to do with.
-pub fn simnet_links(db: &Db) -> Result<Vec<(i64, i64)>, String> {
+pub fn simnet_links(db: &Db) -> Result<Vec<(i64, Option<i64>, Option<i64>, i64)>, String> {
     rows(
         db,
-        "SELECT anet_handle, fnet_handle FROM new_simnet_tbl \
+        "SELECT anet_handle, amsb, alsb, fnet_handle FROM new_simnet_tbl \
          WHERE anet_handle != 0 AND fnet_handle != 0",
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
 }
 
@@ -164,8 +170,14 @@ pub fn simnet_links(db: &Db) -> Result<Vec<(i64, i64)>, String> {
 /// handle belongs to as many nets as the bus has bits. That is why this is not
 /// an edge in the walk: joining bit 3's net to the handle and the handle to
 /// bit 0's net merges two nets that share nothing but a name.
-pub fn simnet_members(db: &Db) -> Result<Vec<(i64, i64)>, String> {
-    rows(db, "SELECT simnet_id, net_handle FROM simnet_tbl", |r| Ok((r.get(0)?, r.get(1)?)))
+/// The third element is which bit of the named object this net is: `NULL`
+/// for a scalar or a whole object, `N` for one bit of a vector. A handle
+/// that appears with two different bit numbers is more than one bit wide,
+/// which is the fact the alias classification above turns on.
+pub fn simnet_members(db: &Db) -> Result<Vec<(i64, i64, Option<i64>)>, String> {
+    rows(db, "SELECT simnet_id, net_handle, bus_index FROM simnet_tbl", |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
 }
 
 /// `(statement, net it touches, whether it writes it)`, from the top level.
@@ -562,6 +574,6 @@ mod tests {
                INSERT INTO new_simnet_tbl VALUES (11, NULL, NULL, 22, NULL, NULL, 4);"],
         );
         let db = Db::open(&p, Kind::Top).unwrap();
-        assert_eq!(simnet_links(&db).unwrap(), vec![(11, 22)]);
+        assert_eq!(simnet_links(&db).unwrap(), vec![(11, None, None, 22)]);
     }
 }
