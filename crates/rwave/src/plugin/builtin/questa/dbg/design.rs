@@ -445,7 +445,9 @@ impl Design {
             Some(p) => p.to_path_buf(),
             None => resolve_library(&d.top, top_dbg)?,
         };
-        let mti = find_mti(&lib_root.join("_dbcontainer"))?;
+        // Where this database says its own index is, relative to the library.
+        let recorded = schema::library(&d.top)?.map(|(_, p)| p);
+        let mti = find_mti(&lib_root, recorded.as_deref())?;
         let mti_db = Db::open(&mti, Kind::Index)?;
         for f in schema::du_files(&mti_db)? {
             d.du_paths.insert(f.duid, lib_root.join(&f.path));
@@ -1488,20 +1490,45 @@ fn library_from_ini(ini: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_mti(container: &Path) -> Result<PathBuf, String> {
-    let entries = std::fs::read_dir(container)
-        .map_err(|e| err(format!("cannot read {}: {e}", container.display())))?;
-    for e in entries.flatten() {
-        let p = e.path().join("__mti.dbg");
+/// The index database, which says where each design unit's own database is.
+///
+/// A library holds one container per optimised design, and from the outside
+/// they are indistinguishable — same name, same shape, design-unit ids that
+/// start at 1 in each. Picking one by looking is picking one at random: with a
+/// second `vopt` in the same library, the ids of the design in hand resolve
+/// against the other design's index and name its modules instead. The answer
+/// that comes back then cites another design's source file, and nothing about
+/// it looks wrong.
+///
+/// So the database's own record of where its index lives is what is used.
+/// Scanning is the fallback for a library that has been moved since, and it
+/// refuses to choose when there is more than one container.
+fn find_mti(lib_root: &Path, recorded: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(rel) = recorded {
+        let p = lib_root.join(rel);
         if p.is_file() {
             return Ok(p);
         }
     }
-    Err(err(format!(
-        "{} holds no __mti.dbg, so the per-module databases cannot be found. \
-         It is written by `vopt -debugdb` into the library the design was optimised in.",
-        container.display()
-    )))
+    let container = lib_root.join("_dbcontainer");
+    let entries = std::fs::read_dir(&container)
+        .map_err(|e| err(format!("cannot read {}: {e}", container.display())))?;
+    let mut found: Vec<PathBuf> =
+        entries.flatten().map(|e| e.path().join("__mti.dbg")).filter(|p| p.is_file()).collect();
+    match found.len() {
+        1 => Ok(found.pop().expect("length checked")),
+        0 => Err(err(format!(
+            "{} holds no __mti.dbg, so the per-module databases cannot be found. \
+             It is written by `vopt -debugdb` into the library the design was optimised in.",
+            container.display()
+        ))),
+        n => Err(err(format!(
+            "{} holds {n} optimised designs and this database does not say which is \
+             its own. Optimise into a library of its own, or keep the one the design \
+             was optimised into.",
+            container.display()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -1596,6 +1623,40 @@ mod tests {
         assert_eq!(kind_of("GATE", ""), HopKind::Gate);
         assert_eq!(kind_of("FLOP", ""), HopKind::Procedural);
         assert_eq!(kind_of("MODULE", "alu"), HopKind::Port);
+    }
+
+    #[test]
+    fn the_index_is_the_one_the_database_names() {
+        // Two `vopt` runs into one library leave two containers, alike from
+        // the outside and each numbering its design units from 1. Choosing by
+        // looking answers a question about one design with the other's
+        // modules, so the database's own record decides.
+        let root = super::super::open::tests::tmp("two-containers");
+        let lib = root.join("work");
+        for top in ["cx_opt", "tb_opt"] {
+            let d = lib.join("_dbcontainer").join(top);
+            std::fs::create_dir_all(&d).unwrap();
+            super::super::open::tests::write_dbg(
+                &d.join("__mti.dbg"),
+                Kind::Index,
+                1,
+                &["CREATE TABLE rw_du_tbl (duid, dbPath);"],
+            );
+        }
+        let mine = "_dbcontainer/tb_opt/__mti.dbg";
+        assert_eq!(find_mti(&lib, Some(mine)).unwrap(), lib.join(mine));
+
+        // Without that record there is nothing to choose on, and choosing
+        // wrongly is silent, so it refuses.
+        let e = find_mti(&lib, None).unwrap_err();
+        assert!(e.contains("holds 2 optimised designs"), "{e}");
+        // A record pointing at something that is no longer there falls back to
+        // the scan, which is unambiguous once the other container is gone.
+        std::fs::remove_dir_all(lib.join("_dbcontainer").join("cx_opt")).unwrap();
+        assert_eq!(
+            find_mti(&lib, Some("_dbcontainer/moved/__mti.dbg")).unwrap(),
+            lib.join(mine)
+        );
     }
 
     #[test]
