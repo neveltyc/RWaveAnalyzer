@@ -32,6 +32,35 @@ vsim -c -postsimdataflow -debugdb=run.dbg -wlf run.wlf tb_opt \
 `+acc` and `-debugdb` are both required, and `-postsimdataflow` is what makes
 the dataset usable afterwards. The `.dbg` must keep the `.wlf`'s basename.
 
+### The construct fixture
+
+`constructs.sv` is the other half of the check, and the more useful one.
+`dut.sv` and the open-source designs are RTL somebody wrote for their own
+reasons; whether they happen to contain the construct that breaks the reader is
+luck, and every fault found on them was found by accident. This file contains
+one instance of each *kind* of connectivity SystemVerilog can express, taken
+from slang's syntax node table rather than from memory: port forms (ANSI,
+non-ANSI, concatenated, wildcard, empty), instantiation (arrays, gate
+primitives, `bind`), generate (`for`, `if`, `case`, unnamed, nested),
+interfaces (modport, whole, arrays), packed structs and unions and their
+members, every assignment form, `wand`/`wor`/`tri` and implicit nets, memories,
+functions and tasks, and a hierarchical reference across instances.
+
+```bash
+vlib work && vlog -sv -mfcu constructs.sv
+vopt +acc tb -o tb_opt -debugdb
+vsim -c -postsimdataflow -debugdb=cx.dbg -wlf cx.wlf tb_opt \
+     -do 'add log -r /*; run -all; quit -f'
+python3 verify/questa/diff.py --wlf cx.wlf --rwave ./rwave
+```
+
+141 signals, a few seconds a run, and each construct sits in a scope named
+after it — a disagreement names the construct rather than a line number. It
+found two faults the day it was written: a struct member's readers were lost
+whenever the whole object also had shapes of its own, and a hierarchical
+reference was invisible because the reading module records it under the full
+path, which is not a local name of any scope the net sits in.
+
 ## Run
 
 ```bash
