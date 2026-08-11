@@ -84,6 +84,15 @@ because libwlf cannot report when it last changed.
   vector is consulted for the bit in hand rather than walked through:
   one generate branch no longer answers with the other's statements.
 
+  Three more answers came from `verify/questa/constructs.sv`, a fixture
+  holding one instance of every kind of connectivity the language can
+  express rather than one design's worth of the ones it happened to use.
+  A struct field's readers were dropped whenever the whole object also
+  carried shapes; a hierarchical reference was invisible, because the
+  module doing the reading records it under the whole path and no walk
+  from the net arrives there; and a statement found down two paths was
+  reported twice, once with the block label and once without.
+
   Opening is now paged rather than read whole — a custom read-only VFS corrects
   the header as SQLite asks for the first page — and the hierarchy is indexed by
   descent instead of by writing out every full path. On a 1.3 GB database that
