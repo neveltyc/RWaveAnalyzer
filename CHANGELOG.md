@@ -67,6 +67,15 @@ because libwlf cannot report when it last changed.
   was found by asking QuestaSim the same question and comparing, and each
   produced a confident wrong answer rather than an error.
 
+  Two more came from a large SoC testbench's own wiring. Questa writes an
+  interface port's pin rows for one instantiation of a module and not the
+  rest, so a pinless port is bound by asking which interface's members
+  elaboration collapsed into its module — and left unbound when two
+  candidates qualify. And `new_simnet_tbl` rows with a handle of 0 are
+  tie-offs, not aliases: read as edges they glued 76 031 nets into one,
+  which is why unrelated config signals once shared one seventy-thousand-
+  endpoint answer.
+
   Opening is now paged rather than read whole — a custom read-only VFS corrects
   the header as SQLite asks for the first page — and the hierarchy is indexed by
   descent instead of by writing out every full path. On a 1.3 GB database that
