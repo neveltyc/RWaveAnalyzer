@@ -700,6 +700,15 @@ impl Design {
             paths.retain(|p| p != questa_path);
             if paths.len() == 1 {
                 let want = &paths[0];
+                // Shorter, and only shorter. This exists for a scope the
+                // waveform names and the design does not, so the match has
+                // fewer components than the query. One of the same depth is a
+                // different instance of the same thing — `core1` where `core0`
+                // was asked for — and being the only candidate says nothing
+                // about being the right one.
+                if want.trim_start_matches('/').split('/').count() >= segs.len() {
+                    return None;
+                }
                 return Some(hits.into_iter().filter(|&h| self.path_of(h) == *want).collect());
             }
             if paths.len() > 1 {
