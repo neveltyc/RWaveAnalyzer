@@ -354,19 +354,17 @@ impl Design {
         }
         // An interface port with no pins to match on. Questa writes a port's
         // `inst_tbl` and `pin_tbl` rows for only one of a module's
-        // instantiations — where one module is instantiated twice, the port
-        // exists under both and only one has them — so the pass above cannot
-        // see the other. The binding is still in the database: elaboration collapses
-        // an interface's member nets into nets of the module that received
-        // it, so the members of the interface actually passed share a
-        // simulation net with something inside this port's module, and the
-        // members of every other instance of that interface do not.
+        // instantiations, so where a module appears twice the pass above sees
+        // one of the two ports and not the other. The binding is still in the
+        // database: elaboration collapses an interface's member nets into nets
+        // of the module that received it, so the interface actually passed
+        // shares a simulation net with something inside this port's module and
+        // every other instance of that interface does not.
         //
         // Only a childless instance boundary without pins is a port in
         // absentia — a real instance keeps its pins even when optimisation
-        // empties it — and only a unique candidate is taken: two interfaces
-        // of one type wired into the same module cannot be told apart
-        // without pins, and a wrong binding is worse than no answer.
+        // empties it — and only a unique candidate is taken: a wrong binding
+        // is worse than no answer.
         let mut orphans: Vec<(i64, i64, i64)> = Vec::new();
         for (&h, c) in &d.ctx {
             if c.name.is_empty() || c.name == "/" || c.name.starts_with('#') {
@@ -864,15 +862,12 @@ impl Design {
                 let (shape_ids, shapeless) = {
                     let m = self.module(duid)?;
                     // A struct or an array is recorded a member at a time, and
-                    // a module may record both: `fu_data_i` carries the shapes
-                    // that read it whole, `fu_data_i.operation` those that read
-                    // that field, and the two sets are different statements. A
-                    // question about the object is a question about all of it,
-                    // so the members are added to the name rather than used
-                    // only when it has nothing of its own — asking about
-                    // `fu_data_i` and being told only about the assignments
-                    // that take it whole is a missing answer, not a precise
-                    // one.
+                    // a module may record both: `req` carries the shapes that
+                    // read it whole and `req.addr` those that read that field,
+                    // and the two sets are different statements. A question
+                    // about the object is a question about all of it, so the
+                    // members are added to the name rather than used only when
+                    // it has nothing of its own.
                     let mut names = vec![local.clone()];
                     let mut members: Vec<String> =
                         m.signals.keys().filter(|k| member_of(k, &local)).cloned().collect();

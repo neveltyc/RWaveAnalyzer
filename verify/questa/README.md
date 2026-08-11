@@ -3,10 +3,10 @@
 `trace` on a `.wlf` reads Questa's post-simulation debug database (`.dbg`)
 directly. That database is undocumented, so a misread column gives a wrong
 answer rather than an error. QuestaSim can answer the same questions from the
-same file, so `diff.py` asks both and compares — this is the check that the
+same file, so `diff.py` asks both and compares. That is the check that the
 reader is right, and it is worth more than any assertion written from the
-outside. It has earned that: every decoding rule in the reader that was wrong
-was wrong plausibly, and each was found here rather than by reading the schema.
+outside: a decoding rule that is wrong is wrong plausibly, and shows up here
+rather than in a schema nobody has.
 
 Needs a machine with QuestaSim and `python3`. `verify/run.sh` cannot cover any
 of it.
@@ -60,19 +60,9 @@ vsim -c -postsimdataflow -debugdb=cx.dbg -wlf cx.wlf tb_opt \
 python3 verify/questa/diff.py --wlf cx.wlf --rwave ./rwave
 ```
 
-239 signals, a few seconds a run, and each construct sits in a scope named
-after it — a disagreement names the construct rather than a line number. It
-found four faults in its first two days: a struct member's readers were lost
-whenever the whole object also had shapes of its own; a hierarchical reference
-was invisible because the reading module records it under the full path, which
-is not a local name of any scope the net sits in; a statement reachable both
-ways was reported twice under the two tables' spellings of it; and the tag
-rewrite between those spellings was a table of four, so a `force` — `#FORCE#`
-against `#f#` — went missing.
-
-The mixed-language half found nothing, which is also worth knowing: a VHDL
-unit's processes, its component instantiation and its generate branches are
-found the same way Verilog's are.
+239 signals and a few seconds a run, against forty minutes for a shard of a
+real SoC. Each construct sits in a scope named after it, so a disagreement
+names the construct rather than a line number.
 
 ## Run
 
