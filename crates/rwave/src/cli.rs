@@ -878,12 +878,13 @@ pub fn split_line(line: &str) -> Result<(Vec<String>, Option<String>), String> {
                 }
                 i += 1;
             }
-            '#' => {
-                // Unquoted '#': the rest of the line is the trailing label. We
-                // return immediately, so there's no need to reset `in_token`.
-                if in_token {
-                    tokens.push(std::mem::take(&mut cur));
-                }
+            // A '#' that starts a word is the trailing label; one inside a word
+            // is part of it. Questa names an unnamed block for the pointer it
+            // elaborated to — `genblk#116507296#57` — and a signal underneath
+            // one cannot be asked about at all if its name ends at the '#'.
+            '#' if !in_token => {
+                // The rest of the line is the label. We return immediately, so
+                // there's no need to reset `in_token`.
                 let rest: String = chars[i + 1..].iter().collect();
                 let trimmed = rest.trim();
                 if !trimmed.is_empty() {
@@ -1362,6 +1363,16 @@ mod tests {
         // Blank and comment-only lines yield no tokens.
         assert!(split_line("   ").unwrap().0.is_empty());
         assert!(split_line("   # just a comment").unwrap().0.is_empty());
+        // A '#' inside a word belongs to the word. Questa names an unnamed
+        // block after the pointer it elaborated to, so this is what a real
+        // signal under one is called.
+        let (t, l) = split_line("trace /tb/genblk#116507296#57.show_mem_paths").unwrap();
+        assert_eq!(t, vec!["trace", "/tb/genblk#116507296#57.show_mem_paths"]);
+        assert_eq!(l, None);
+        // The label still works after such a name.
+        let (t, l) = split_line("trace a#b   #id7").unwrap();
+        assert_eq!(t, vec!["trace", "a#b"]);
+        assert_eq!(l.as_deref(), Some("id7"));
         // Quotes group and are stripped; quoted '#' is literal.
         let (t, _) = split_line(r#"search --condition "a=1,b=2" --show "x#y""#).unwrap();
         assert_eq!(t, vec!["search", "--condition", "a=1,b=2", "--show", "x#y"]);
