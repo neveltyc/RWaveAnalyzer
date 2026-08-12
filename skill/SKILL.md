@@ -71,7 +71,7 @@ User wants to know...
 ├─ "Where am I?" / "What's under tb.dut?"
 │   └─ tree           hierarchy; --of SIGNAL gives its full ancestor chain
 └─ "Who drives this signal?" / "What reads it?"
-    └─ trace          drivers/loads with file:line; FSDB + built-in NPI only
+    └─ trace          drivers/loads with file:line; .fsdb (NPI) or .wlf (Questa)
 ```
 
 `search`'s JSON top-level key depends on the mode: `intervals` /
@@ -118,16 +118,23 @@ fields you'll usually parse out.
 | `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
 | `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
 | `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `roots[]`, `root_signals`, `scopes[]`/`chain[]` with `.path`, `.name`, `.level`, `.signals`, `.children` |
-| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
+| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.raw_kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
 
-`tree` works on every format. `trace` works only on `.fsdb` via the built-in NPI
-backend; elsewhere it exits 1. That is a capability limit, not a transient
+`tree` works on every format. `trace` needs a design database beside the
+waveform: `.fsdb` with Verdi's KDB, or `.wlf` with Questa's `.dbg`. Elsewhere it
+exits 1. That is a capability limit, not a transient
 failure, so do not retry it on another file format.
 
 `trace` rules:
 
 - Never pass `--kdb` unless rwave asks for it. The design library is read from
-  the FSDB header; if that fails, use only a path the user supplies.
+  the FSDB header; if that fails, use only a path the user supplies. On a `.wlf`
+  it is refused outright — Questa finds its own `.dbg` by basename.
+- A `.wlf` needs Questa's `.dbg` beside it and the library it was optimised in
+  (`work/` by default) reachable; rwave reads the database itself, so there is no
+  `vsim` and no licence involved. Drivers and loads both carry `file:line`.
+- Name a whole signal. A bit or field of one (`bus[3]`, `s.field`) is refused,
+  not answered — do not retry it as the whole object without saying so.
 - Read `status` before trusting the list: `resolved`, `boundary_only` (the
   driver is outside the traced hierarchy), `no_driver_found`.
 - Clock, reset, and enclosing `if`/`case` are excluded unless you pass

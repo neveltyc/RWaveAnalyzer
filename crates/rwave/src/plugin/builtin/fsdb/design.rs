@@ -178,6 +178,7 @@ impl DesignQuery for FsdbBackend {
     fn trace(
         &mut self,
         signal: &str,
+        _scope: &str,
         dir: Direction,
         control: bool,
     ) -> Result<TraceOutcome, String> {

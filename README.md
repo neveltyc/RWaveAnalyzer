@@ -166,7 +166,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 | `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
-| `trace`    | *(experimental)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only |
+| `trace`    | *(experimental)* Who drives a signal, or what it drives, with `file:line` — needs a design database beside the waveform: an FSDB with Verdi's KDB, or a WLF with Questa's `.dbg` |
 
 Every command except `info`, `tree`, and `trace` accepts the four selection
 options described in [Selecting signals](#selecting-signals); `tree` takes
@@ -337,6 +337,30 @@ rwave info run.wlf
 
 The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
 at runtime and does not ship it.
+
+**`trace` on a WLF** needs Questa's post-simulation debug database, which the
+waveform does not contain. Build one alongside the `.wlf`:
+
+```sh
+vopt +acc top -o top_opt -debugdb
+vsim -postsimdataflow -debugdb=run.dbg -wlf run.wlf top_opt -do 'add log -r /*; run -all; quit -f'
+rwave trace run.wlf top.u_core.res
+```
+
+rwave reads that database directly — it is SQLite behind a replaced 16-byte
+header — so no Questa process is started, no licence is taken, and a query costs
+milliseconds. The `.dbg` must keep the waveform's basename, and the library it
+was optimised in (`work/` by default) must be reachable, since the per-module
+databases live under `_dbcontainer` inside it. The file is only ever read.
+
+Drivers and loads both come back with `file:line`, the source statement, and the
+signals each endpoint touches, so `--at` annotates either direction. `--control`
+adds the gating conditions. `--kdb` and `--top` name parts of a Verdi design
+library and are refused here rather than ignored.
+
+Ask about a whole signal: part of one (`bus[3]`, `s.field`) is refused, because
+the database records no bit range and the only answer available would be what
+drives the whole object.
 
 ### FSDB
 

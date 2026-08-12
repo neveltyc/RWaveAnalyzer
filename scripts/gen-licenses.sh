@@ -125,6 +125,31 @@ if missing:
         lines.append(f"- `{name}` {ver} — {lic}")
     lines.append("")
 
+# C sources a crate compiles into the binary are invisible to the scan above:
+# it walks each crate's own licence files, and an amalgamation carries its terms
+# inside the .c file. SQLite is the only such case, and its terms are a
+# dedication rather than a licence, so it is stated here rather than left out.
+if any(name == "libsqlite3-sys" for (name, _v) in pkgs):
+    lines.append("### Compiled-in C sources")
+    lines.append("")
+    lines.append(
+        "`libsqlite3-sys` compiles the SQLite amalgamation into the binary. SQLite "
+        "carries no licence file: its terms live in the source itself, and are a "
+        "dedication to the public domain."
+    )
+    lines.append("")
+    lines.append("```")
+    lines.append(
+        "The author disclaims copyright to this source code.  In place of\n"
+        "a legal notice, here is a blessing:\n"
+        "\n"
+        "    May you do good and not evil.\n"
+        "    May you find forgiveness for yourself and forgive others.\n"
+        "    May you share freely, never taking more than you give."
+    )
+    lines.append("```")
+    lines.append("")
+
 lines.append("## Licence texts")
 lines.append("")
 for h in sorted(groups, key=lambda h: sorted(groups[h]["crates"])[0][0].lower()):

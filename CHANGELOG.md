@@ -4,96 +4,71 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-08-11
 
-Two new commands for questions a waveform alone cannot answer: where am I in
-the hierarchy, and who drives this signal.
-
-`tree` browses the hierarchy on every format. It builds its own scope index
-rather than reusing the flat scope list, which records only scopes that
-directly hold a signal, leaving a module of nothing but sub-modules invisible.
-`tree --of SIGNAL` prints a signal's full ancestor chain, the one-shot way back
-up from a deep leaf.
-
-`trace` reports drivers and loads with the driving statement's source text and
-`file:line`, and with `--at T` gives each endpoint its value then. Experimental,
-and only for an FSDB opened through the built-in Verdi NPI backend: connectivity
-comes from an elaborated design database, not from the waveform.
-
-WLF point queries stop replaying the run. `snapshot --at` and `compare` on
-`.wlf` now seek: libwlf's range scan starts at the window and supplies each
-signal's carried value at scan start, so a query reads the instant, not the
-history before it. On a 48 MB Questa capture of 20 M time steps that is ~2 ms
-at flat memory where the full decode took ~600 ms. One deviation, documented
-on the backend: the carried value is tagged one tick before the window,
-because libwlf cannot report when it last changed.
+Two new commands for questions a waveform alone cannot answer — where am I in
+the hierarchy, and who drives this signal — and WLF point queries that seek
+instead of replaying the run.
 
 ### Added
-- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format.
+- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format. It builds its
+  own scope index rather than reusing the flat scope list, so a module of nothing
+  but sub-modules is not invisible; `--of` prints a signal's ancestor chain.
 - `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`.
-  `--control` adds the enclosing `if`/`case`/clock-edge dependencies; NPI filters
-  them at the source, so `first_valid` is never mistaken for a reset.
-- `trace` reads the design library location from the FSDB header, so the normal
-  case needs no argument. `--kdb` overrides it, and is taken literally. There is
-  no directory scan: a neighbouring build is not evidence that it is the right
-  build, so an unresolvable location is refused rather than guessed at.
+  Drivers and loads come back with the statement's source text and `file:line`,
+  `--at T` gives each endpoint its value then, and `--control` adds the
+  `if`/`case`/clock-edge conditions that gate the assignment. Experimental.
+
+  Connectivity is not in a waveform, so this needs the design database beside it:
+  an FSDB with Verdi's KDB, or a WLF with QuestaSim's post-simulation `.dbg`
+  (`vopt +acc -debugdb`). Every other format says so and stops.
+
+  The `.dbg` is read directly, in process — no `vsim`, no licence, a query in
+  milliseconds — which is what lets loads carry locations and `--control` be
+  answered at all: Questa's own post-simulation commands print neither. The file
+  is only ever read. A database whose schema version or column meanings are not
+  the ones this reader knows is refused rather than read as though the layout had
+  held; an endpoint with no source location is not reported; and a question about
+  part of an object (`bus[3]`, `s.field`) is refused, because the only answer
+  available would be what drives the whole thing.
 - `$RWAVE_NPI_L1_LIB`, for a Verdi install whose `libnpiL1.so` does not sit next
   to `libNPI.so`.
 
 ### Changed
 - **Options are scoped to the command that defines them.** `--kdb`, `--top`,
-  `--driver`, `--load`, and `--control` are `trace`'s; `--of` is `tree`'s; using
+  `--driver`, `--load` and `--control` are `trace`'s; `--of` is `tree`'s; using
   one elsewhere is a usage error rather than silently ignored. The seven original
-  commands keep their existing tolerance for the original flags they ignore.
+  commands keep their existing tolerance for the flags they ignore.
 - `--depth` may be given without `--scope` for `tree` alone, measured from the
-  root. It counts levels below the matched scope, as elsewhere, with `tree`
-  counting scopes where `list` counts signals.
-- `trace` and `tree` take a second positional argument. Other commands reject
-  extra positionals with the message they always had.
+  root, counting scopes where `list` counts signals.
+- `trace` and `tree` take a second positional argument; other commands still
+  reject extra positionals.
 
 ### Performance
-- **WLF seeks with `wlfReadDataOverRange`.** The windowed vtable slot is now
-  filled; scan cost is proportional to the window's time steps, independent of
-  where in the file the window sits.
+- **WLF point queries seek.** `snapshot --at` and `compare` on a `.wlf` scan only
+  the window rather than the run before it: ~2 ms where a full decode took
+  ~600 ms, on a 48 MB capture of 20 M time steps. The carried value is tagged one
+  tick before the window, because libwlf cannot report when it last changed.
 
 ### Fixed
-- **Plugin traces are folded to one net entry per tick**, last write wins,
-  with consecutive duplicates suppressed as in the wellen decode; events are
-  exempt. The per-tick collapse is stricter than wellen because the vendor
-  libraries report transport granularity, not user-visible writes: libwlf
-  delivers a wide vector one 32-bit word per callback, which made a 256-bit
-  bus count 8 `summary` changes per real transition and put 7 transient
-  partial rows per instant in `dump`, and its end-of-scan ENDLOG marker
-  appended a fake trailing change to every signal. FSDB same-tick glitch VCs
-  collapse to their net value the same way.
-- WLF scans now pass `endDelta = WLF_LAST_DELTA`, so captures logged with
-  `-nowlfcollapse` keep their end-tick delta events; default delta-collapsed
-  captures are unaffected.
-
-### Internal
-- Design connectivity is a Rust trait (`DesignQuery`) reached through a
-  defaulted `WaveformBackend::design_query`, **not** a C vtable slot. Appending
-  slots is what makes a newer host read past the end of an older plugin's
-  vtable, so the ABI stays frozen and external plugins are unaffected.
-- `libNPI.so` references `shm_unlink` without declaring a dependency on librt,
-  so it is preloaded `RTLD_GLOBAL`; `libnpiL1.so` calls into libNPI without
-  declaring that either, so libNPI is promoted into the global scope before L1
-  loads. Both confirmed against the shipped libraries.
-- The NPI dump parser sits outside the linux-x86_64 gate, so its tests run
-  everywhere rather than only where the vendor library loads.
-- Design-side NPI symbols resolve lazily, on the first `trace`. Binding them
-  with the reader made them a hard requirement for every FSDB command: Verdi
-  2018 has no `npi_waveform_info`, so `rwave info file.fsdb` stopped working
-  there entirely.
-- `trace` captures NPI's output through `open_memstream`, which grows, rather
-  than a fixed buffer. A clock's load list runs to megabytes and `--limit`
-  cannot bound it, since the total is only known after the parse.
-- A file rwave cannot open now reports the FSDB format version from its header,
-  because a Verdi older than the dump is otherwise indistinguishable from a
-  licence or environment problem.
+- **Plugin traces are folded to one net entry per tick**, last write wins, with
+  consecutive duplicates suppressed; events are exempt. The vendor libraries
+  report transport granularity rather than user-visible writes — libwlf delivers
+  a wide vector one 32-bit word per callback, which made a 256-bit bus count
+  eight `summary` changes per real transition — and its end-of-scan marker
+  appended a fake trailing change to every signal.
+- WLF scans pass `endDelta = WLF_LAST_DELTA`, so captures logged with
+  `-nowlfcollapse` keep their end-tick delta events.
+- `--batch` ended a command at the first unquoted `#`, taking the rest as the
+  result's label, which made every signal under an unnamed generate block
+  unaskable.
 
 ### Compatibility
 - Plugin ABI unchanged (still version 1); no vtable field added or reordered.
+  Design connectivity is a Rust trait reached through a defaulted method rather
+  than a new vtable slot, so external plugins are unaffected.
+- `rusqlite` is pinned and bundled, the first C in the tree. All four release
+  targets build it, and linux-amd64 still tops out at `GLIBC_2.17`.
 
 ## [0.1.7] — 2026-08-06
 

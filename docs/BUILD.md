@@ -1,7 +1,9 @@
 # Building `rwave`
 
-`rwave` is pure Rust — no C code, no `build.rs`, no native dependencies — so the
-only hard requirement is a Rust toolchain (>= 1.90, edition 2024). A linker is
+`rwave` needs only a Rust toolchain: its one C component is the SQLite that
+reads Questa's debug database, vendored and compiled by `rusqlite`'s `bundled`
+feature, so there is still no system dependency to install. The requirement is a
+Rust toolchain (>= 1.90, edition 2024). A linker is
 needed only for the cross-compiled deployment binaries.
 
 ## Developing (macOS, Linux, anywhere)
