@@ -35,6 +35,14 @@ rather than merely available.
   their existing tolerance for the flags they ignore.
 - `trace` takes a second positional argument (the signal), as `tree` does.
 
+### Fixed
+- **A WLF's date is rendered, not printed as a Unix timestamp.** `info` reported
+  `1787574929` where every other format shows a date, because a WLF header
+  carries seconds since the epoch while VCD and FST carry a date string. It now
+  reads `2026-08-24 12:35:29 UTC` — UTC, and labelled, since the timestamp
+  carries no zone and the same file must not describe a different instant
+  depending on where it is opened.
+
 ### Compatibility
 - Plugin ABI unchanged (still version 1); no vtable field added or reordered.
   Design connectivity is a Rust trait reached through a defaulted method rather

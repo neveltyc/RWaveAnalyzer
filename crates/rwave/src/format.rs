@@ -509,6 +509,46 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
     format!("{}s", fmt_g(sec))
 }
 
+/// Render a Unix timestamp as `YYYY-MM-DD HH:MM:SS UTC`.
+///
+/// For backends whose header carries a numeric creation time rather than a
+/// date string: VCD and FST pass through whatever `$date` text the writer
+/// wrote, but a WLF records seconds since the epoch, and an integer is not a
+/// date to anyone reading the output.
+///
+/// UTC, and labelled as such: the timestamp carries no zone, so rendering it in
+/// the reading machine's local time would put a different instant on the page
+/// depending on where the file was opened.
+///
+/// The calendar conversion is the standard days-to-civil algorithm rather than
+/// a date crate — one field does not justify a dependency, and this keeps the
+/// tree pure Rust. Leap seconds are not modelled, as Unix time does not have
+/// them.
+pub fn fmt_unix_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02} UTC")
+}
+
+/// Days since 1970-01-01 to a `(year, month, day)` civil date, proleptic
+/// Gregorian. Shifts the epoch to 0000-03-01 so that the leap day lands at the
+/// end of the era, which is what removes the special-casing from the month and
+/// day arithmetic.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March-based
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Render a float the way Python's `%g` (default precision 6) does: up to 6
 /// significant digits, trailing zeros stripped, and exponent form for very
 /// large/small magnitudes. Used to print scaled (human-readable) times.
@@ -730,6 +770,37 @@ mod tests {
         // 17_534_700 ticks * 1ns = 1.75347e-2 s = 17.5347 ms.
         assert_eq!(fmt_time(17534700, ts), "17.5347ms");
         assert_eq!(fmt_time(100, ts), "100ns");
+    }
+
+    #[test]
+    fn fmt_unix_utc_examples() {
+        // The epoch itself, and the value the bundled stimulus carries.
+        assert_eq!(fmt_unix_utc(0), "1970-01-01 00:00:00 UTC");
+        // A real WLF creation time, cross-checked against `date -u`.
+        assert_eq!(fmt_unix_utc(1_787_574_929), "2026-08-24 12:35:29 UTC");
+        // Each field at its maximum, and the first second of the next day.
+        assert_eq!(fmt_unix_utc(86_399), "1970-01-01 23:59:59 UTC");
+        assert_eq!(fmt_unix_utc(86_400), "1970-01-02 00:00:00 UTC");
+    }
+
+    /// The cases a hand-rolled calendar gets wrong: leap days, century rules,
+    /// and the year boundary. 2000 is a leap year (divisible by 400), 1900 is
+    /// not (divisible by 100 but not 400).
+    #[test]
+    fn fmt_unix_utc_calendar_edges() {
+        assert_eq!(fmt_unix_utc(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(951_868_800), "2000-03-01 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(1_709_164_800), "2024-02-29 00:00:00 UTC");
+        // 2023 is not a leap year: Feb 28 is followed by Mar 1.
+        assert_eq!(fmt_unix_utc(1_677_542_400), "2023-02-28 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(1_677_628_800), "2023-03-01 00:00:00 UTC");
+        // Year boundary, and a date before the epoch (1900, a common-year
+        // century) to prove the floor-division path.
+        assert_eq!(fmt_unix_utc(1_704_067_199), "2023-12-31 23:59:59 UTC");
+        assert_eq!(fmt_unix_utc(1_704_067_200), "2024-01-01 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(-2_208_988_800), "1900-01-01 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(-2_203_977_600), "1900-02-28 00:00:00 UTC");
+        assert_eq!(fmt_unix_utc(-2_203_891_200), "1900-03-01 00:00:00 UTC");
     }
 
     #[test]

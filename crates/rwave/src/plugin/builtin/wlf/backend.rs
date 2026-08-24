@@ -107,8 +107,11 @@ impl WlfBackend {
             secs_per_tick,
             timescale_display: to_cstring(&display),
             end_time,
+            // A WLF header carries seconds since the epoch where VCD and FST
+            // carry a date string, so this is the one backend that has to
+            // render one.
             date_cstr: to_cstring(if creation_unix > 0 {
-                creation_unix.to_string()
+                crate::format::fmt_unix_utc(creation_unix)
             } else {
                 String::new()
             }),
