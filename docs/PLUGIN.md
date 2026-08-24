@@ -315,7 +315,10 @@ A plugin is conformant if:
       no name mangling.
 - [ ] Returns a vtable whose `abi_version` equals
       `RWAVE_BACKEND_ABI_VERSION` at build time.
-- [ ] All vtable function pointers are non-NULL.
+- [ ] All *required* vtable function pointers are non-NULL: `open`, `close`,
+      `free_err`, `timescale`, `var_decls`, `load_traces`. Optional appended
+      slots (currently `load_traces_windowed`) may be NULL, which rwave reads
+      as "this backend does not specialize that path".
 - [ ] `name` is a stable, NUL-terminated string matching the format
       token rwave routes by.
 - [ ] Survives at least one full open → query → close cycle without
