@@ -1,6 +1,6 @@
 ---
 name: waveform-debug
-description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
+description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals, or browse the design hierarchy — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
 ---
 
 # rwave — agent skill
@@ -9,8 +9,8 @@ description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively re
 terminal. It natively reads **VCD**, **FST**, and **GHW** (prefer FST — typically
 10× smaller than VCD). On linux-amd64 it also provides experimental support for
 **WLF** (Questa/ModelSim) and **FSDB** (Verdi) by calling into each vendor's own
-reader library interface. Seven query commands cover inspection, search,
-comparison, and summary. **Always pass `--json` from an agent.** This file covers
+reader library interface. Eight commands cover inspection, search, comparison,
+summary, and hierarchy. **Always pass `--json` from an agent.** This file covers
 what is unique to driving the tool from an agent — see the repo README for the
 full reference.
 
@@ -62,11 +62,13 @@ User wants to know...
 │   └─ snapshot       all known signal values at one time point
 ├─ "What changed between T1 and T2?"
 │   └─ compare        diff of signal values at two time points
-└─ "When does condition C hold?" / "Find handshakes"
-    └─ search         condition-based, three sub-modes:
-        ├─ interval   time ranges where condition is true (no --show, no changed())
-        ├─ segment    intervals + observed values         (with --show)
-        └─ event      fires when signals transition       (changed(SIG) in condition)
+├─ "When does condition C hold?" / "Find handshakes"
+│   └─ search         condition-based, three sub-modes:
+│       ├─ interval   time ranges where condition is true (no --show, no changed())
+│       ├─ segment    intervals + observed values         (with --show)
+│       └─ event      fires when signals transition       (changed(SIG) in condition)
+└─ "Where am I?" / "What's under tb.dut?"
+    └─ tree           hierarchy; --of SIGNAL gives its full ancestor chain
 ```
 
 `search`'s JSON top-level key depends on the mode: `intervals` /
@@ -112,6 +114,9 @@ fields you'll usually parse out.
 | `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
 | `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
 | `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
+| `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `roots[]`, `root_signals`, `scopes[]`/`chain[]` with `.path`, `.name`, `.level`, `.signals`, `.children` |
+
+`tree` works on every format.
 
 For `dump`, **always pass `--begin/--end` and a selection** — running it
 unbounded on a large dump streams the whole file.
@@ -235,6 +240,18 @@ sub-interval, with `--show` capturing the field values you care about.
 3. snapshot --at <first_hit>             full picture at that moment
 4. dump --begin <pre> --end <hit> --filter <relevant>
 ```
+
+### Orient in an unfamiliar hierarchy
+
+```
+1. tree                                  top-level scopes
+2. tree <scope> --depth 2                what is inside one block
+3. tree --of <signal>                    the ancestor chain of a signal you already have
+```
+
+`tree --of` is the fastest way back up from a deep leaf: every row is a path you
+can paste straight into `--scope`. `--depth` counts scopes here, where `list`
+counts signals.
 
 ### Clock/reset sanity
 

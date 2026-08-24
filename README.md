@@ -165,9 +165,11 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `snapshot` | All known signal values at one time point (`--at T`) |
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
+| `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
 
-Every command except `info` accepts the four selection options described in
-[Selecting signals](#selecting-signals). The commands that read a span of time
+Every command except `info` and `tree` accepts the four selection options
+described in [Selecting signals](#selecting-signals); `tree` takes `--scope`
+and `--depth` only. The commands that read a span of time
 — `dump`, `summary`, and `search` — also take a `--begin`/`--end` window;
 `snapshot` and `compare` take instants instead (`--at`), and `list` and `info`
 describe the file rather than a time. Times take the unit suffixes `fs`, `ps`,
@@ -233,7 +235,8 @@ the tree, and a path written out from the root works too.
 **`--depth` counts from the matched scope**, with a signal sitting directly in
 it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of
 its submodules'". It requires `--scope`, since there is nothing to count from
-otherwise.
+otherwise — except for `tree`, which counts scopes rather than signals and
+accepts `--depth` alone, counting from the root.
 
 **Selection is decided per path, not per signal.** A signal is kept when any
 one of its paths clears every option. That is what makes `--exclude` safe on a

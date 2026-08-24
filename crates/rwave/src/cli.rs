@@ -5,8 +5,8 @@
 //!
 //! The global flags are `--json`, `--limit`, `--verbose`, `--version`; the
 //! per-command flags are `--begin`, `--end`, `--scope`, `--depth`, `--filter`,
-//! `--exclude`, `--at`, `--condition`, `--show`. `--json`, `--limit`, and
-//! `--verbose` may appear either before or after the subcommand. We avoid a
+//! `--exclude`, `--at`, `--condition`, `--show`, `--of`. `--json`, `--limit`,
+//! and `--verbose` may appear either before or after the subcommand. We avoid a
 //! third-party arg parser to keep the static binary small and the error text
 //! under our control.
 
@@ -23,6 +23,7 @@ pub enum Command {
     Snapshot,
     Compare,
     Search,
+    Tree,
 }
 
 impl Command {
@@ -35,8 +36,16 @@ impl Command {
             "snapshot" => Command::Snapshot,
             "compare" => Command::Compare,
             "search" => Command::Search,
+            "tree" => Command::Tree,
             _ => return None,
         })
+    }
+
+    /// Commands that take a second positional after `<file>`: `tree <file>
+    /// [SCOPE]` (optional, equivalent to `--scope`). Every other command still
+    /// rejects extra positionals.
+    fn takes_target(&self) -> bool {
+        matches!(self, Command::Tree)
     }
 }
 
@@ -65,6 +74,11 @@ pub struct Args {
     /// (OR-of-ANDs). Empty = no `--condition` given.
     pub condition: Vec<String>,
     pub show: Option<String>,
+    /// Second positional: the starting scope for `tree`. Never inherited in
+    /// batch mode — a positional belongs to its own line.
+    pub target: Option<String>,
+    /// `tree`: print the full ancestor chain of this signal instead of a subtree.
+    pub of: Option<String>,
 }
 
 /// Global default options for a batch run, applied to every command unless a
@@ -86,6 +100,7 @@ pub struct Defaults {
     /// of its own replaces this whole group (see [`parse_batch_line`]).
     pub condition: Vec<String>,
     pub show: Option<String>,
+    pub of: Option<String>,
 }
 
 /// A fully parsed `--batch` invocation: the file to load once, the output
@@ -132,8 +147,11 @@ Commands:
   search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]
                                                 Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;
                                                 a changed(SIG) term fires at SIG's transitions (event mode)
+  tree      <file> [SCOPE] [--depth N] [--of SIGNAL]
+                                                Browse the hierarchy: child scopes of SCOPE, or --of's full ancestor chain
 
-Selection options (every command above except info):
+Selection options (all four on every command except info and tree;
+tree takes --scope and --depth only):
   --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
                     name ('*' and '?' allowed); a path matches as a segment-aligned
                     suffix of a scope path, so 'u_tx.u_fifo' finds that subtree
@@ -143,6 +161,11 @@ Selection options (every command above except info):
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
+
+tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
+N levels below the matched scope root, tree counting scopes where list counts
+signals. Unlike elsewhere, tree accepts --depth without a scope, measuring from
+the root. It ignores --filter and --exclude.
 
 Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
@@ -186,7 +209,7 @@ Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is ra
 /// for --filter", not "print version").
 const VALUE_FLAGS: &[&str] = &[
     "--limit", "--begin", "--end", "--scope", "--depth", "--filter", "--exclude",
-    "--at", "--condition", "--show",
+    "--at", "--condition", "--show", "--of",
 ];
 
 /// Parse a slice of argv tokens (excluding argv[0]).
@@ -242,6 +265,7 @@ struct Acc {
     at: Option<String>,
     condition: Vec<String>,
     show: Option<String>,
+    of: Option<String>,
     command: Option<Command>,
     positionals: Vec<String>,
 }
@@ -315,6 +339,10 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                 i += 1;
                 acc.show = Some(require_value(argv, i, "--show")?);
             }
+            "--of" => {
+                i += 1;
+                acc.of = Some(require_value(argv, i, "--of")?);
+            }
             "--changed" => {
                 return Err(
                     "--changed is not available; did you mean --condition \"changed(SIG)\"?"
@@ -338,7 +366,7 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
                         None => {
                             return Err(format!(
                                 "invalid command: '{other}' (choose from info, list, dump, \
-                                 summary, snapshot, compare, search)"
+                                 summary, snapshot, compare, search, tree)"
                             ));
                         }
                     }
@@ -373,6 +401,77 @@ fn check_required(
     }
 }
 
+/// Reject flags that do not belong to the command they were given with.
+///
+/// Scoping is per command, not global: `--of` is `tree`'s business and no
+/// concern of `list`'s. The parser keeps one global flag table, so without this
+/// a command-specific flag would be quietly accepted and ignored everywhere.
+///
+/// Applied to what *this* invocation spelled out, never to values inherited
+/// from a `--batch` line — a session-wide `--of` default is there for the
+/// `tree` lines and must not make every `list` line fail.
+///
+/// Deliberately limited to the new flag and the new command. The seven original
+/// commands still tolerate the original flags they ignore (`list … --at 5` has
+/// always been accepted); tightening that is a change to shipped behaviour and
+/// belongs in its own commit, not this one.
+fn check_command_flags(command: &Command, acc: &Acc) -> Result<(), String> {
+    let is_tree = matches!(command, Command::Tree);
+
+    if !is_tree && acc.of.is_some() {
+        return Err("--of is only valid for tree".to_string());
+    }
+    // The new command is new, so restricting what it accepts cannot break
+    // anything that already works.
+    let given = |v: &Option<String>| v.is_some();
+    if is_tree {
+        for (given_flag, name) in [
+            (given(&acc.filter), "--filter"),
+            (given(&acc.exclude), "--exclude"),
+            (given(&acc.at), "--at"),
+            (given(&acc.begin), "--begin"),
+            (given(&acc.end), "--end"),
+            (given(&acc.show), "--show"),
+            (!acc.condition.is_empty(), "--condition"),
+        ] {
+            if given_flag {
+                return Err(format!("{name} does not apply to tree"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `--of` walks up from a signal; `--scope` and `--depth` walk down from a
+/// scope. A `tree` carrying both has asked for two different listings, so the
+/// contradiction is refused rather than resolved by precedence.
+///
+/// Checked on the values that will actually be used, which for a `--batch` line
+/// means after the defaults merge: a session-wide `--of` combined with a line's
+/// own scope is the same contradiction, arriving by a different route.
+fn check_of_conflict(
+    command: &Command,
+    of: &Option<String>,
+    scope: &Option<String>,
+    depth: Option<i64>,
+    target: &Option<String>,
+) -> Result<(), String> {
+    if !matches!(command, Command::Tree) {
+        return Ok(());
+    }
+    let given = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if !given(of) {
+        return Ok(());
+    }
+    if given(scope) || given(target) {
+        return Err("--of and a scope are alternatives; give one".into());
+    }
+    if depth.is_some() {
+        return Err("--depth does not apply to --of, which walks up to the root".into());
+    }
+    Ok(())
+}
+
 fn check_limit(limit: Option<i64>) -> Result<(), String> {
     if let Some(n) = limit {
         if n < 0 {
@@ -387,13 +486,23 @@ fn check_limit(limit: Option<i64>) -> Result<(), String> {
 /// default `--depth` without ever naming a scope fails on that line — and a
 /// line clearing an inherited scope with `--scope ''` fails the same way, since
 /// a blank value means "not given" everywhere in the selection flags.
-fn check_depth(depth: Option<i64>, scope: &Option<String>) -> Result<(), String> {
+fn check_depth(
+    command: &Command,
+    depth: Option<i64>,
+    scope: &Option<String>,
+) -> Result<(), String> {
     let n = match depth {
         Some(n) => n,
         None => return Ok(()),
     };
     if n <= 0 {
         return Err(format!("depth must be positive; got {n}"));
+    }
+    // `tree` walks the hierarchy itself, so a bare `--depth` is meaningful there:
+    // it counts from the root. Every other command measures depth from a matched
+    // `--scope` and so still requires one.
+    if matches!(command, Command::Tree) {
+        return Ok(());
     }
     if !scope.as_deref().is_some_and(|s| !s.trim().is_empty()) {
         return Err("--depth requires --scope (depth is counted from the scope root)".into());
@@ -416,8 +525,8 @@ fn parse_inner(argv: &[String], batch_mode: bool) -> Result<ParseOutcome, String
 
 /// Resolve an ordinary single-command invocation.
 fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
-    let command = match acc.command {
-        Some(c) => c,
+    let command = match &acc.command {
+        Some(c) => c.clone(),
         None => return Ok(ParseOutcome::Print(help_text())),
     };
     if acc.positionals.is_empty() {
@@ -426,16 +535,24 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
             cmd_name(&command)
         ));
     }
-    if acc.positionals.len() > 1 {
+    check_command_flags(&command, &acc)?;
+    // `tree` takes one more positional (the starting scope); for every other
+    // command a second positional stays the error it has always been, with the
+    // same message.
+    let allowed = if command.takes_target() { 2 } else { 1 };
+    if acc.positionals.len() > allowed {
         return Err(format!(
             "unexpected extra arguments: {}",
-            acc.positionals[1..].join(" ")
+            acc.positionals[allowed..].join(" ")
         ));
     }
-    let file = acc.positionals.into_iter().next().unwrap();
+    let mut it = acc.positionals.into_iter();
+    let file = it.next().unwrap();
+    let target = it.next();
     check_required(&command, &acc.at, &acc.condition)?;
+    check_of_conflict(&command, &acc.of, &acc.scope, acc.depth, &target)?;
     check_limit(acc.limit)?;
-    check_depth(acc.depth, &acc.scope)?;
+    check_depth(&command, acc.depth, &acc.scope)?;
     Ok(ParseOutcome::Run(Args {
         command,
         file,
@@ -451,6 +568,8 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         at: acc.at,
         condition: acc.condition,
         show: acc.show,
+        target,
+        of: acc.of,
     }))
 }
 
@@ -499,6 +618,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
+            of: acc.of,
         },
     }))
 }
@@ -511,21 +631,31 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
 pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> Result<Args, String> {
     let mut acc = Acc::default();
     accumulate(tokens, &mut acc, false)?;
-    let command = match acc.command {
-        Some(c) => c,
+    let command = match &acc.command {
+        Some(c) => c.clone(),
         None => {
             return Err("missing command (each line must start with a subcommand: info, list, \
-                 dump, summary, snapshot, compare, search)"
+                 dump, summary, snapshot, compare, search, tree)"
                 .into());
         }
     };
-    if !acc.positionals.is_empty() {
-        return Err(format!(
-            "unexpected argument: {} (the waveform file is given once on the --batch line, \
-             not per command)",
-            acc.positionals.join(" ")
-        ));
+    // The file is injected, so a batch line carries at most the command's own
+    // target positional (`tree <scope>`); other commands take none, and keep the
+    // original message.
+    let allowed = if command.takes_target() { 1 } else { 0 };
+    if acc.positionals.len() > allowed {
+        let extra = acc.positionals[allowed..].join(" ");
+        return Err(if allowed == 0 {
+            format!(
+                "unexpected argument: {extra} (the waveform file is given once on the \
+                 --batch line, not per command)"
+            )
+        } else {
+            format!("unexpected extra arguments: {extra}")
+        });
     }
+    check_command_flags(&command, &acc)?;
+    let target = acc.positionals.into_iter().next();
     let limit = acc.limit.or(defaults.limit);
     let verbose = acc.verbose || defaults.verbose;
     let begin = acc.begin.or_else(|| defaults.begin.clone());
@@ -543,7 +673,10 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     // scope alone makes the inherited depth an error and `--depth ''` is not a
     // number. A depth the line asked for itself is kept, so `--scope '' --depth
     // 3` still reports the contradiction the user wrote.
-    let scope_cleared = acc_scope_is_blank && acc.depth.is_none();
+    // `tree` is the exception: it measures depth from the root when no scope is
+    // given, so clearing the scope there does not invalidate an inherited depth.
+    let scope_cleared =
+        acc_scope_is_blank && acc.depth.is_none() && !matches!(command, Command::Tree);
     let depth = if scope_cleared { None } else { acc.depth.or(defaults.depth) };
     let filter = acc.filter.or_else(|| defaults.filter.clone());
     let exclude = acc.exclude.or_else(|| defaults.exclude.clone());
@@ -556,9 +689,13 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         acc.condition
     };
     let show = acc.show.or_else(|| defaults.show.clone());
+    let of = acc.of.or_else(|| defaults.of.clone());
     check_required(&command, &at, &condition)?;
+    // On the merged values: a session-wide --of meeting a line's own scope is
+    // the same contradiction as writing both on one command line.
+    check_of_conflict(&command, &of, &scope, depth, &target)?;
     check_limit(limit)?;
-    check_depth(depth, &scope)?;
+    check_depth(&command, depth, &scope)?;
     Ok(Args {
         command,
         file: file.to_string(),
@@ -574,6 +711,8 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         at,
         condition,
         show,
+        target,
+        of,
     })
 }
 
@@ -687,6 +826,7 @@ fn cmd_name(c: &Command) -> &'static str {
         Command::Snapshot => "snapshot",
         Command::Compare => "compare",
         Command::Search => "search",
+        Command::Tree => "tree",
     }
 }
 
@@ -751,6 +891,24 @@ mod tests {
         match p(&["snapshot", "x.vcd"]) {
             ParseOutcome::Error(e) => assert!(e.contains("--at")),
             _ => panic!(),
+        }
+    }
+
+    /// Options introduced for one command must not become silently-ignored
+    /// noise on the others.
+    #[test]
+    fn command_specific_flags_are_rejected_elsewhere() {
+        for (cmd, flag, val) in [("summary", "--of", Some("clk")), ("list", "--of", Some("clk"))] {
+            let mut argv = vec![cmd.to_string(), "f.vcd".to_string(), flag.to_string()];
+            if let Some(v) = val {
+                argv.push(v.to_string());
+            }
+            match p(&argv.iter().map(String::as_str).collect::<Vec<_>>()) {
+                ParseOutcome::Error(m) => {
+                    assert!(m.contains("only valid for"), "{cmd} {flag}: {m}")
+                }
+                other => panic!("{cmd} {flag} was accepted: {}", outcome_kind(&other)),
+            }
         }
     }
 

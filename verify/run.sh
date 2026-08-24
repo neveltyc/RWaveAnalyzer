@@ -178,6 +178,74 @@ else
   bad "a full path bypasses --exclude"
 fi
 
+echo "== tree =="
+HF="$STIM/hier_deep.vcd"
+# tree is derived from scope strings, so it works on every format.
+$RW tree "$HF" >/dev/null 2>&1 && ok || bad "tree runs on vcd"
+# Intermediate scopes must appear even when they hold no signals of their own:
+# hier_deep.u_m0.u_a is only reachable by synthesizing path prefixes.
+$RW --json tree "$HF" --depth 3 2>/dev/null | grep -q '"path":"hier_deep.u_m0.u_a"' \
+  && ok || bad "tree synthesizes intermediate scopes"
+# --depth means the same as it does for list: N levels below the matched root,
+# tree counting scopes where list counts signals. Pinned exactly, because an
+# off-by-one here still satisfies "deeper shows more".
+d1=$($RW --json tree "$HF" 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
+[[ "$d1" -eq 3 ]] && ok || bad "tree default depth 1 = root + children (got $d1, want 3)"
+d2=$($RW --json tree "$HF" --depth 2 2>/dev/null | grep -o '"path"' | wc -l | tr -d ' ')
+[[ "$d2" -eq 7 ]] && ok || bad "tree --depth 2 reaches the grandchildren (got $d2, want 7)"
+# A leading-separator hierarchy (Questa/VHDL style, which the FSDB backend
+# passes through verbatim) must not collapse: its top level is a real scope,
+# not a child of an empty-named one.
+SL=/tmp/_rwave_slash.$$.vcd
+printf '$date x $end\n$timescale 1ps $end\n$scope module /top $end\n$var wire 1 ! clk $end\n$upscope $end\n$enddefinitions $end\n#0\n0!\n' > "$SL"
+$RW --json tree "$SL" 2>/dev/null | grep -q '"path":"/top"' \
+  && ok || bad "tree handles a leading-separator hierarchy"
+rm -f "$SL"
+# Unlike every other command, tree accepts --depth without --scope.
+$RW tree "$HF" --depth 2 >/dev/null 2>&1 && ok || bad "tree allows --depth without --scope"
+# ...and that exemption must not leak to the others.
+$RW list "$HF" --depth 2 >/dev/null 2>&1; [[ $? -eq 2 ]] \
+  && ok || bad "list still requires --scope for --depth"
+# The positional scope and --scope mean the same thing.
+a=$($RW --json tree "$HF" u_m0 --depth 2 2>/dev/null)
+b=$($RW --json tree "$HF" --scope u_m0 --depth 2 2>/dev/null)
+[[ "$a" == "$b" ]] && ok || bad "tree positional scope == --scope"
+# --of answers "what is above me", top-down and rooted at the file top.
+$RW --json tree "$HF" --of hier_deep.u_m1.u_b.cnt 2>/dev/null \
+  | grep -q '"mode":"chain"' && ok || bad "tree --of emits a chain"
+# A bad --of name is a clean error, not a panic or an empty success.
+$RW tree "$HF" --of nope_not_here >/dev/null 2>&1; [[ $? -eq 1 ]] \
+  && ok || bad "tree --of unknown signal exits 1"
+# When a name matches in several places, the rows must be distinguishable —
+# telling those instances apart is the whole point of asking.
+mr=$($RW tree "$HF" u_a --depth 3 2>/dev/null | grep -c 'hier_deep\.u_m[01]\.u_a')
+[[ "$mr" -eq 2 ]] && ok || bad "tree spells multiple roots out in full (got $mr)"
+# JSON reports the matched roots as paths, not as a display string.
+$RW --json tree "$HF" u_a 2>/dev/null \
+  | grep -q '"roots":\["hier_deep.u_m0.u_a","hier_deep.u_m1.u_a"\]' \
+  && ok || bad "tree JSON exposes roots as an array of paths"
+
+# Options belong to the command that defines them. A flag introduced for tree
+# must not become silently-ignored noise on the other seven.
+$RW summary "$HF" --of clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "summary rejects --of (tree-only)"
+# --of walks up, --scope/--depth walk down; asking for both is a contradiction,
+# and must be caught on the merged values too, not only on one command line.
+$RW tree "$HF" u_m0 --of hier_deep.clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --of together with a scope"
+$RW tree "$HF" --of hier_deep.clk --depth 2 >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --of together with --depth"
+bo=$(printf 'tree u_m0\n' | $RW --batch "$HF" --of hier_deep.clk --json 2>/dev/null)
+printf '%s' "$bo" | grep -q '"ok":false' \
+  && ok || bad "batch re-checks --of against the merged scope"
+# ...and tree only takes what it actually uses.
+$RW tree "$HF" --filter clk >/dev/null 2>&1
+[[ $? -eq 2 ]] && ok || bad "tree rejects --filter"
+# The tree exemption survives the batch merge: clearing an inherited scope must
+# not drag the inherited depth down with it, since tree measures from the root.
+bt=$(printf "tree --scope ''\n" | $RW --batch "$HF" --scope u_m0 --depth 3 2>/dev/null | sed -n 2p)
+printf '%s' "$bt" | grep -q "depth 3" && ok || bad "batch tree keeps inherited --depth ($bt)"
+
 echo "== batch mode =="
 BF="$STIM/handshake_proto.vcd"
 # Consistency (core): a batch `result` is byte-identical to the equivalent

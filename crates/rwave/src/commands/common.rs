@@ -207,6 +207,65 @@ pub(super) fn opt_time(s: Option<&str>) -> Json {
     }
 }
 
+/// Resolve one user-supplied signal name to `(canonical path, scope)`.
+///
+/// An exact full path (case-insensitive) wins outright, so a fully spelled name
+/// is never reported as ambiguous. Otherwise the shared pattern language
+/// applies, and the caller gets an error naming example matches instead of an
+/// arbitrary pick. `role` is spliced into the messages so the user knows which
+/// argument was at fault.
+///
+/// Distinct from `search`'s resolver, which resolves *within* a `--scope`
+/// selection; `tree` takes a single name and no selection.
+pub(super) fn resolve_signal_path(
+    wave: &Wave,
+    pattern: &str,
+    role: &str,
+) -> Result<(String, String), String> {
+    let pat = pattern.trim();
+    let pl = pat.to_lowercase();
+    let mut exact: Vec<(String, String)> = Vec::new();
+    for i in 0..wave.signal_count() {
+        for (path, scope) in wave.signal(i).alias_pairs() {
+            if path.to_lowercase() == pl {
+                exact.push((path.to_string(), scope.to_string()));
+            }
+        }
+    }
+    exact.sort();
+    exact.dedup();
+    if exact.len() == 1 {
+        return Ok(exact.into_iter().next().unwrap());
+    }
+    let filters = crate::filter::Filters::parse(&[pat]).map_err(|e| format!("{role}: {e}"))?;
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for i in 0..wave.signal_count() {
+        for (path, scope) in wave.signal(i).alias_pairs() {
+            if filters.matches_path_leaf(path, crate::model::leaf_of(path, scope)) {
+                hits.push((path.to_string(), scope.to_string()));
+            }
+        }
+    }
+    hits.sort();
+    hits.dedup();
+    match hits.len() {
+        0 => Err(format!(
+            "{role} matches no signals: {}",
+            crate::format::pyrepr(pat)
+        )),
+        1 => Ok(hits.into_iter().next().unwrap()),
+        n => {
+            let examples: Vec<&str> = hits.iter().take(5).map(|(p, _)| p.as_str()).collect();
+            Err(format!(
+                "{role} {} matches {n} signals; give the full hierarchical path. Examples: {}",
+                crate::format::pyrepr(pat),
+                examples.join(", ")
+            ))
+        }
+    }
+}
+
+
 /// Parse `--begin`/`--end` into a `(t0, t1)` tick window, validating order.
 pub(super) fn parse_window(args: &Args, ts: f64) -> Result<(i64, Option<i64>), String> {
     let t0 = match &args.begin {
