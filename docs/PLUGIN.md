@@ -335,3 +335,28 @@ A plugin is conformant if:
 | `fsdb` | built-in | `libNPI.so` (`$RWAVE_FSDB_LIB`) | Synopsys Verdi NPI; needs a Verdi-Ultra license; linux-amd64 |
 
 To register an external plugin, send a PR adding a row.
+
+## What is deliberately not in the ABI
+
+Design connectivity — the driver/load queries behind `rwave trace` — is **not**
+a vtable slot and is not available to external plugins. Two reasons:
+
+1. **It is not a waveform capability.** Answering "who drives this" needs an
+   elaborated design database (Verdi's KDB), a second input the plugin protocol
+   knows nothing about. A backend that reads values over time has nothing to
+   answer with.
+2. **Appending slots is not free in practice.** The append rule above is safe
+   for *old rwave / new plugin*. The reverse — new rwave reading a vtable that
+   an older plugin compiled shorter — means reading past the end of the
+   plugin's object. Every appended slot widens that window, so capabilities
+   that do not have to be in the ABI stay out of it.
+
+Inside rwave the capability is an ordinary Rust trait (`DesignQuery`) reached
+through a defaulted `WaveformBackend::design_query`, implemented only by the
+built-in NPI backend whose concrete session type the crate owns.
+
+If an external plugin ever does need to offer a capability beyond the ABI, the
+right mechanism is a **second exported symbol** (e.g. `rwave_backend_ext_v1`)
+returning its own versioned, self-describing struct: `dlsym` returning NULL is
+an unambiguous "not supported" that cannot read out of bounds. That is a
+design note, not a shipped feature.

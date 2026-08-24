@@ -29,11 +29,13 @@ use std::borrow::Cow;
 use crate::format::ValueKind;
 
 pub mod bitstr;
+pub mod design;
 mod fst_window;
 pub mod plugin_backend;
 pub mod wellen_backend;
 
 pub use bitstr::BitStr;
+pub use design::DesignQuery;
 
 /// Detected (or declared) container format of a waveform file. Kept neutral so
 /// the rest of the program never imports a backend-specific format enum.
@@ -242,5 +244,17 @@ pub trait WaveformBackend {
         _to: Option<i64>,
     ) -> Vec<SignalTrace> {
         self.load_traces(sids)
+    }
+
+    /// Design-connectivity queries, when this backend can answer them.
+    ///
+    /// Defaults to `None`, which is the honest answer for every backend that
+    /// reads only a waveform: values over time carry no connectivity. Only the
+    /// built-in Verdi NPI FSDB backend overrides this, and only it can, since
+    /// answering needs an elaborated design database. Callers must branch on
+    /// `None` and report that the format is unsupported rather than degrade to
+    /// a guess. See [`design::DesignQuery`].
+    fn design_query(&mut self) -> Option<&mut dyn DesignQuery> {
+        None
     }
 }

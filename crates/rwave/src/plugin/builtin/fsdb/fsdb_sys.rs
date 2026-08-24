@@ -86,9 +86,51 @@ impl NpiFsdbValue {
     }
 }
 
+
+/// Mirror of `npiWaveformInfo` (`npi_fsdb.h`), filled by [`LibNpi::waveform_info`].
+///
+/// Every field is a pointer or an integer, so the struct is plain C data and
+/// can be filled across the FFI boundary directly.
+///
+/// The trailing `_reserved` is deliberate. The shipped header carries twelve
+/// fields, but the *documentation* for the same release still describes the
+/// nine-field version ending at `ufeTag` — proof that this struct has grown
+/// between releases. The callee writes into storage we own, so a future
+/// library that writes more fields would otherwise smash the stack; the slack
+/// absorbs it. Nothing reads `_reserved`.
+#[repr(C)]
+pub struct NpiWaveformInfo {
+    pub version: *const c_char,
+    pub simulator_type: *const c_char,
+    pub scale_unit: *const c_char,
+    pub min_time: u64,
+    pub max_time: u64,
+    pub dump_off_count: u32,
+    pub dump_off_range: *const c_char,
+    pub has_fsdb_gate: u32,
+    pub ufe_tag: *const c_char,
+    /// Absolute path of the `simv.daidir` the dump was produced from — the
+    /// design library that holds the KDB. Written by VCS into the FSDB header.
+    pub simv_daidir_path: *const c_char,
+    /// The simulation's working directory.
+    pub simv_working_path: *const c_char,
+    pub is_completed: u32,
+    _reserved: [u64; 8],
+}
+
+impl Default for NpiWaveformInfo {
+    fn default() -> Self {
+        // SAFETY: every field is a pointer or an integer, for which all-zero is
+        // a valid (and here, meaningful: "absent") bit pattern.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
 #[allow(dead_code)]
 pub struct LibNpi {
     _library: Library,
+    /// The file `_library` was opened from. See [`loaded_path`].
+    path: PathBuf,
 
     // lifecycle
     pub fsdb_open: unsafe extern "C" fn(*const c_char) -> NpiHandle,
@@ -128,13 +170,98 @@ pub struct LibNpi {
 unsafe impl Send for LibNpi {}
 unsafe impl Sync for LibNpi {}
 
+/// The design-side NPI entry points, resolved separately from the reader.
+///
+/// Kept out of [`LibNpi`] on purpose. `fsdb::vtable()` calls
+/// [`ensure_loaded`] before any FSDB command opens a file, so a symbol
+/// resolved there is a hard requirement for `info`, `list`, `dump` and the
+/// rest. These are needed only by `trace`, and an older Verdi that lacks one
+/// must still be able to read waveforms: Verdi 2018 has the first three and
+/// not `npi_waveform_info`, so binding them eagerly took the whole FSDB
+/// backend down on that install.
+pub struct LibNpiDesign {
+    pub load_design: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
+    /// Resolves a full hierarchical name in the *design*, which is how "not in
+    /// the design database" is told apart from "no drivers".
+    pub handle_by_name: unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle,
+    pub release_handle: unsafe extern "C" fn(NpiHandle) -> c_int,
+    /// Header metadata read straight from a file, without opening a session.
+    /// `None` on a Verdi predating the call; `trace` then needs `--kdb`
+    /// instead of finding the design library on its own.
+    pub waveform_info: Option<unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int>,
+}
+
+unsafe impl Send for LibNpiDesign {}
+unsafe impl Sync for LibNpiDesign {}
+
 static LIBNPI: OnceLock<Result<LibNpi, String>> = OnceLock::new();
+static LIBNPI_DESIGN: OnceLock<Result<LibNpiDesign, String>> = OnceLock::new();
+
+/// Resolve the design-side symbols, once. `Err` means this Verdi cannot answer
+/// connectivity queries; the waveform path is unaffected either way.
+pub fn design_syms() -> Result<&'static LibNpiDesign, String> {
+    ensure_loaded()?;
+    match LIBNPI_DESIGN.get_or_init(load_design_syms) {
+        Ok(d) => Ok(d),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+fn load_design_syms() -> Result<LibNpiDesign, String> {
+    let lib = &npi()._library;
+    macro_rules! need {
+        ($mangled:expr, $sig:ty) => {{
+            let s: libloading::Symbol<$sig> = unsafe { lib.get($mangled) }.map_err(|_| {
+                bridge_err(ERR_PREFIX, format!(
+                    "this Verdi's libNPI.so has no {}, so it cannot answer design queries; \
+                     trace needs a newer Verdi",
+                    String::from_utf8_lossy(&$mangled[..$mangled.len() - 1])
+                ))
+            })?;
+            *s
+        }};
+    }
+    let load_design = need!(
+        b"_Z15npi_load_designiPPc\0",
+        unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int
+    );
+    let handle_by_name = need!(
+        b"_Z18npi_handle_by_namePKcPv\0",
+        unsafe extern "C" fn(*const c_char, NpiHandle) -> NpiHandle
+    );
+    let release_handle = need!(
+        b"_Z18npi_release_handlePv\0",
+        unsafe extern "C" fn(NpiHandle) -> c_int
+    );
+    // Optional: absent before roughly Verdi 2019, and only costs the caller the
+    // convenience of not having to pass --kdb.
+    let waveform_info = unsafe {
+        lib.get::<unsafe extern "C" fn(*const c_char, *mut NpiWaveformInfo) -> c_int>(
+            b"_Z17npi_waveform_infoPKcR15npiWaveformInfo\0",
+        )
+    }
+    .ok()
+    .map(|s| *s);
+
+    Ok(LibNpiDesign { load_design, handle_by_name, release_handle, waveform_info })
+}
 
 pub fn ensure_loaded() -> Result<(), String> {
     match LIBNPI.get_or_init(load_npi_once) {
         Ok(_) => Ok(()),
         Err(e) => Err(e.clone()),
     }
+}
+
+/// The path `libNPI.so` was actually loaded from.
+///
+/// Recorded at load rather than re-resolved, so a caller re-opening the same
+/// object cannot end up with a *different* file: resolution reads the
+/// environment and the executable's directory, and re-running it after a
+/// `chdir` or an environment change could map a second, distinct copy of
+/// libNPI whose `npi_init` never ran.
+pub fn loaded_path() -> Option<PathBuf> {
+    LIBNPI.get().and_then(|r| r.as_ref().ok()).map(|l| l.path.clone())
 }
 
 pub fn npi() -> &'static LibNpi {
@@ -153,6 +280,30 @@ fn load_npi_once() -> Result<LibNpi, String> {
     // (incl. early `?` returns); our own error strings are built here but
     // printed later by rwave, so they're unaffected.
     let _silence = StdioSilence::new();
+
+    // libNPI.so calls shm_unlink but carries no DT_NEEDED on librt (confirmed
+    // with readelf), so loading it cold fails outright with "undefined symbol:
+    // shm_unlink" on any glibc older than 2.34, where shm_unlink still lived in
+    // librt rather than libc.
+    //
+    // The preload must be RTLD_GLOBAL to have any effect: only a global-scope
+    // object contributes symbols to later dlopens. `Library::new` would use
+    // RTLD_LOCAL and silently do nothing at all here, so go through the unix
+    // API explicitly. `forget` skips Drop, so dlclose never runs and the
+    // library stays resident. Best-effort: on a newer glibc librt is a stub or
+    // absent, and libNPI resolves shm_unlink from libc regardless.
+    for name in ["librt.so.1", "librt.so"] {
+        let opened = unsafe {
+            libloading::os::unix::Library::open(
+                Some(name),
+                libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
+            )
+        };
+        if let Ok(lib) = opened {
+            std::mem::forget(lib);
+            break;
+        }
+    }
 
     let lib = unsafe { Library::new(&path) }.map_err(|e| {
         bridge_err(ERR_PREFIX, format!("failed to load libNPI.so from {}: {}", path.display(), e))
@@ -179,6 +330,9 @@ fn load_npi_once() -> Result<LibNpi, String> {
         b"_Z8npi_initRiRPPc\0",
         unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int
     );
+
+
+
 
     let fsdb_open = sym!(lib, b"_Z13npi_fsdb_openPKc\0", unsafe extern "C" fn(*const c_char) -> NpiHandle);
     let fsdb_close = sym!(lib, b"_Z14npi_fsdb_closePv\0", unsafe extern "C" fn(NpiHandle) -> c_int);
@@ -233,6 +387,7 @@ fn load_npi_once() -> Result<LibNpi, String> {
 
     Ok(LibNpi {
         _library: lib,
+        path,
         fsdb_open,
         fsdb_close,
         is_fsdb,
@@ -281,6 +436,14 @@ fn locate_npi() -> Result<PathBuf, String> {
 }
 
 const NPI_FILENAME: &str = "libNPI.so";
+
+/// Silence NPI's own writes to fd 1 & 2 until the returned guard is dropped.
+///
+/// Needed anywhere NPI is called outside the one-shot load: `npi_load_design`
+/// prints progress and license chatter, which would corrupt `--json` output.
+pub fn silence_stdio() -> Option<impl Drop> {
+    StdioSilence::new()
+}
 
 /// RAII guard that redirects fd 1 & 2 to `/dev/null` for its lifetime, then
 /// restores them on drop. Used to swallow NPI's `npi_init` banner / license

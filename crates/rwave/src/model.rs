@@ -421,6 +421,17 @@ impl Wave {
         self.backend.supports_windowed()
     }
 
+    /// Design-connectivity queries, when the backend can answer them.
+    ///
+    /// `None` for every waveform-only backend — VCD/FST/GHW, WLF, and every
+    /// external plugin (including an FFR-based `.fsdb` plugin selected through
+    /// `$RWAVE_PLUGIN_FSDB`, whose reader API has no connectivity calls at all).
+    /// Only `trace` consults this, and it turns `None` into a clean
+    /// "unsupported" message rather than a partial answer.
+    pub fn design_query(&mut self) -> Option<&mut dyn crate::backend::DesignQuery> {
+        self.backend.design_query()
+    }
+
     /// Ensure the given signals' traces are decoded and cached. Idempotent;
     /// only the not-yet-cached signals are requested from the backend, and the
     /// backend decodes each underlying signal once even across alias `Sid`s.

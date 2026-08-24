@@ -216,7 +216,7 @@ pub(super) fn opt_time(s: Option<&str>) -> Json {
 /// argument was at fault.
 ///
 /// Distinct from `search`'s resolver, which resolves *within* a `--scope`
-/// selection; `tree` takes a single name and no selection.
+/// selection; `tree` and `trace` take a single name and no selection.
 pub(super) fn resolve_signal_path(
     wave: &Wave,
     pattern: &str,

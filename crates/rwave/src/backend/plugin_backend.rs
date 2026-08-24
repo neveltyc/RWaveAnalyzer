@@ -45,14 +45,34 @@ use crate::plugin::loader::{external_plugin_path, LoadError};
 
 /// A resolved backend, external or built-in. Held for the process
 /// lifetime; the `vtable` pointer stays valid because cache entries are
-/// never removed — an external plugin additionally keeps `_library`
+/// never removed — an external plugin additionally keeps `library`
 /// mapped, while a built-in's vtable is `&'static` to begin with.
 struct LoadedPlugin {
     /// `Some` for an external (dlopened) plugin — keeps the shared library
     /// mapped so the vtable behind it stays valid. `None` for a built-in,
-    /// whose vtable is compiled into the rwave binary.
-    _library: Option<Library>,
+    /// whose vtable is compiled into the rwave binary. Also read as the
+    /// built-in/external discriminator by [`LoadedPlugin::is_builtin`].
+    // Only the fsdb design-query path reads this; elsewhere it is held purely
+    // to keep the library mapped.
+    #[cfg_attr(
+        not(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64")),
+        allow(dead_code)
+    )]
+    library: Option<Library>,
     vtable: *const RwaveBackend,
+}
+
+impl LoadedPlugin {
+    /// Whether this vtable is compiled into rwave rather than dlopened.
+    ///
+    /// The distinction matters because capabilities beyond the C ABI (design
+    /// queries) exist only for built-ins, whose concrete session type this
+    /// crate knows. An external plugin advertising the same format token is
+    /// still a different implementation behind an opaque handle.
+    #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]
+    fn is_builtin(&self) -> bool {
+        self.library.is_none()
+    }
 }
 
 // SAFETY: `Library` is already `Send + Sync`. The raw vtable pointer is
@@ -201,7 +221,7 @@ fn register(
     // All checks passed. Promote to &'static via Box::leak — fine because
     // the cache entry is process-lifetime by design.
     let entry: &'static LoadedPlugin = Box::leak(Box::new(LoadedPlugin {
-        _library: library,
+        library,
         vtable: vtable_raw,
     }));
 
@@ -534,6 +554,41 @@ impl WaveformBackend for PluginBackend {
         // Specialized iff the plugin filled the optional vtable slot. Both
         // built-ins do; external plugins predating the slot leave it NULL.
         self.vtable().load_traces_windowed.is_some()
+    }
+
+    /// Design queries for the built-in Verdi NPI FSDB backend only.
+    ///
+    /// This capability is intentionally *not* in the C vtable. `RwaveBackend`
+    /// is a C struct whose length is fixed when a plugin is compiled, so a
+    /// newer host that appends slots reads past the end of an older plugin's
+    /// object. Routing the capability through the concrete Rust type instead
+    /// keeps the ABI frozen and costs external plugins nothing.
+    ///
+    /// The guard is both halves of the identity: `is_builtin` rules out an
+    /// external `.so`, and the format name rules out the other built-in (WLF).
+    /// An external FSDB plugin selected via `$RWAVE_PLUGIN_FSDB` is therefore
+    /// excluded automatically — which is also correct on the merits, since the
+    /// FFR reader it wraps has no connectivity API at all.
+    #[cfg(all(feature = "fsdb", target_os = "linux", target_arch = "x86_64"))]
+    fn design_query(&mut self) -> Option<&mut dyn super::DesignQuery> {
+        use crate::plugin::builtin::fsdb::backend::FsdbBackend;
+        if !self.plugin.is_builtin() {
+            return None;
+        }
+        // SAFETY: `name` is validated non-NULL and equal to the requested
+        // format token in `register`.
+        let name = unsafe { CStr::from_ptr(self.vtable().name) };
+        if name.to_bytes() != b"fsdb" {
+            return None;
+        }
+        // SAFETY: for the built-in fsdb backend the opaque session handle is
+        // exactly the `Box::into_raw(Box::new(FsdbBackend))` produced by
+        // `fsdb::api_open` — the same cast its own trampolines perform. The
+        // two conditions above prove that provenance: only `builtin::vtable`
+        // registers a built-in, and only `fsdb::vtable()` names itself "fsdb".
+        // Tied to `&mut self`, so no second reference to the session can exist
+        // while this one is alive.
+        Some(unsafe { &mut *(self.handle as *mut FsdbBackend) })
     }
 
     fn load_traces_windowed(

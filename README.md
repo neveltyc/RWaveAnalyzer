@@ -166,10 +166,11 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 | `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
+| `trace`    | *(experimental, off by default)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only; set `RWAVE_TRACE_EN=1` |
 
-Every command except `info` and `tree` accepts the four selection options
-described in [Selecting signals](#selecting-signals); `tree` takes `--scope`
-and `--depth` only. The commands that read a span of time
+Every command except `info`, `tree`, and `trace` accepts the four selection
+options described in [Selecting signals](#selecting-signals); `tree` takes
+`--scope` and `--depth` only. The commands that read a span of time
 — `dump`, `summary`, and `search` — also take a `--begin`/`--end` window;
 `snapshot` and `compare` take instants instead (`--at`), and `list` and `info`
 describe the file rather than a time. Times take the unit suffixes `fs`, `ps`,
@@ -381,6 +382,36 @@ rwave info sim.fsdb
 When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
 `.fsdb` files.
 
+### Tracing drivers and loads (experimental, off by default)
+
+`trace` answers "who drives this signal" and "what reads it", with the driving
+statement's source text and `file:line`. It is the one command that reads
+something other than the waveform, so it is opted into rather than merely
+available: without `RWAVE_TRACE_EN` set it refuses and says so.
+
+```bash
+export RWAVE_TRACE_EN=1
+rwave trace sim.fsdb tb.dut.u_core.u_alu.res
+rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
+```
+
+Connectivity comes from Verdi's elaborated design database, built with
+`vcs -kdb -debug_access+all` or with `vericom -kdb` plus `elabcom -elab kdb`.
+You do not normally say where it is: VCS records the path in the FSDB header.
+Pass `--kdb <simv.daidir>` only when rwave reports that path unreachable, which
+happens when a dump is copied away from its build.
+
+`trace` requires an `.fsdb` opened by the built-in Verdi NPI backend, so setting
+`RWAVE_PLUGIN_FSDB` turns it off. Other formats report it as unsupported.
+
+| Option | Effect |
+|:--|:--|
+| `--load` | what reads the signal, instead of what drives it |
+| `--at T` | annotate each endpoint with its value at T |
+| `--control` | include clock, reset, and enclosing `if`/`case` dependencies |
+| `--kdb DIR` | design database, when the recorded path is unreachable |
+| `--top NAME` | design top module, when it differs from the waveform's |
+
 ### Environment variables
 
 | Variable | What it does |
@@ -388,6 +419,8 @@ When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
 | `RWAVE_WLF_LIB`    | Absolute path to `libwlf.so`. Enables built-in WLF reading. |
 | `RWAVE_FSDB_LIB`   | Absolute path to `libNPI.so`. Enables built-in FSDB reading (NPI, needs Verdi-Ultra license). |
 | `RWAVE_PLUGIN_FSDB` | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
+| `RWAVE_TRACE_EN`   | Set to `1` to enable the experimental `trace` command, which is off otherwise. |
+| `RWAVE_NPI_L1_LIB` | Absolute path to `libnpiL1.so` (Verdi's NPI connectivity library), if it is not next to `libNPI.so`. Used by `trace`. |
 
 For other formats or a custom backend implementation, rwave loads any shared
 library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see

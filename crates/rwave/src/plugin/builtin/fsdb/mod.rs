@@ -18,8 +18,13 @@
 
 #![allow(clippy::missing_safety_doc)] // SAFETY notes are inline at each call
 
-mod backend;
+// `pub(crate)` so the host can recover the concrete session from its opaque
+// `RwaveSession*` to reach the design-query capability. That capability is a
+// Rust trait, deliberately not a C vtable slot — see `backend/design.rs`.
+pub(crate) mod backend;
+mod design;
 mod fsdb_sys;
+mod npi_design_sys;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
