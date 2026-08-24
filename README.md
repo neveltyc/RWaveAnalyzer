@@ -382,6 +382,10 @@ rwave info sim.fsdb
 When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
 `.fsdb` files.
 
+The plugin is built against rwave's backend ABI, currently **v2**. rwave
+requires an exact match and says so if it differs, naming both versions;
+rebuild the plugin when it does.
+
 ### Tracing drivers and loads (experimental, off by default)
 
 `trace` answers "who drives this signal" and "what reads it", with the driving
