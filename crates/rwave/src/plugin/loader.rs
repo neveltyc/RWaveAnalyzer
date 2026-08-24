@@ -27,8 +27,10 @@ pub enum LoadError {
         format: String,
         platforms: &'static str,
     },
-    /// An external plugin loaded but its `abi_version` differs from rwave's.
-    /// Separate variant so the message can name the specific remediation.
+    /// An external plugin loaded but its `abi_version` is not the one this
+    /// rwave was built against — a different vtable layout, which cannot be
+    /// read safely. Separate variant so the message can name the specific
+    /// remediation.
     AbiMismatch {
         format: String,
         plugin_abi: u32,
@@ -118,13 +120,16 @@ mod tests {
     fn abi_mismatch_mentions_both_versions() {
         let e = LoadError::AbiMismatch {
             format: "foo".to_string(),
-            plugin_abi: 1,
+            plugin_abi: 99,
             rwave_abi: 2,
         };
         let s = e.to_string();
         assert!(s.contains("ABI mismatch"));
-        assert!(s.contains("plugin v1"));
-        assert!(s.contains("rwave expects v2"));
+        assert!(s.contains("plugin v99"));
+        assert!(s.contains("rwave expects v2"), "{s}");
+        // The remediation, not just the diagnosis: the backend is source-built
+        // against this header, so rebuilding is the whole fix.
+        assert!(s.contains("Rebuild the backend"), "{s}");
     }
 
     #[test]

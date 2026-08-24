@@ -72,13 +72,13 @@ built-in WLF reads `$RWAVE_WLF_LIB` (→ `libwlf.so`/`.dll`), the built-in FSDB
 reads `$RWAVE_FSDB_LIB` (→ `libNPI.so`). Those name the *vendor* `.so`;
 `RWAVE_PLUGIN_<EXT>` names the *rwave backend* `.so` — distinct layers.
 
-## ABI v1
+## ABI v2
 
 The authoritative C header is `crates/rwave/include/rwave_backend.h`.
 Shape:
 
 ```c
-#define RWAVE_BACKEND_ABI_VERSION 1
+#define RWAVE_BACKEND_ABI_VERSION 2
 
 typedef struct RwaveSession RwaveSession;  /* opaque to rwave */
 
@@ -220,12 +220,11 @@ releases:
 |---|---|---|---|
 | **rwave version** | rwave | any rwave change (bug fix, command, perf) | `crates/rwave/Cargo.toml` |
 | **plugin version** | the plugin author | any plugin change (vendor lib update, decoder fix, new field) | the plugin's own manifest, surfaced in the vtable's `version` field |
-| **ABI version** | this protocol | breaking vtable changes only (field removed, signature changed, semantic change to an existing call) | `RWAVE_BACKEND_ABI_VERSION` constant in the header / vtable's `abi_version` field |
+| **ABI version** | this protocol | any vtable change, appended fields included | `RWAVE_BACKEND_ABI_VERSION` constant in the header / vtable's `abi_version` field |
 
 Rwave changing version does **not** force a plugin rebuild. A plugin
 changing version does **not** force a rwave rebuild. The ABI version
-is the only compatibility gate; it stays at the same value across
-many rwave + plugin releases until a structural change forces a bump.
+is the only compatibility gate, and it moves only when the vtable does.
 
 ## Distribution
 
@@ -268,7 +267,7 @@ use std::ffi::{c_char, c_void};
 pub struct RwaveBackend { /* … same shape as the C header … */ }
 
 static VTABLE: RwaveBackend = RwaveBackend {
-    abi_version: 1,
+    abi_version: 2,
     name:    c"foo".as_ptr(),
     version: c"0.0.1".as_ptr(),
     open:    my_open,
@@ -295,11 +294,10 @@ vtable comes from a direct call rather than `dlopen` — see
 See the "Three versions, three semantics" section above for the
 overview. Concretely:
 
-- `RWAVE_BACKEND_ABI_VERSION` bumps **only** on breaking vtable changes
-  (field removed, signature changed, semantic change to an existing
-  call). Appending new fields at the end of the vtable does not bump
-  it — older plugins continue to work; rwave consults only the fields
-  they fill.
+- `RWAVE_BACKEND_ABI_VERSION` bumps on **every** vtable change, appended
+  fields included, and rwave requires an exact match. The vtable carries no
+  length, so the version is what says where it ends. Current: **v2**; a
+  plugin built against another version is refused with a rebuild hint.
 - The plugin's version string (the vtable's `version` field) is the
   plugin's own semver. Plugin authors choose when to bump it (vendor dep
   refresh, decoder fix, new vtable field they decided to fill, etc.);

@@ -36,6 +36,13 @@ rather than merely available.
 - `trace` takes a second positional argument (the signal), as `tree` does.
 
 ### Fixed
+- **An external plugin built before 0.1.5 no longer crashes rwave.**
+  `snapshot --at` and `compare` segfaulted on one: 0.1.5 appended
+  `load_traces_windowed` to the vtable without bumping `abi_version`, so a
+  plugin predating the slot passed the version check and then had the slot
+  read off the end of its shorter struct — whatever followed it in memory,
+  taken for a function pointer and called. 0.1.5's note that such a plugin
+  "leaves it NULL" and falls back was wrong: the field is not part of it.
 - **A WLF's date is rendered, not printed as a Unix timestamp.** `info` reported
   `1787574929` where every other format shows a date, because a WLF header
   carries seconds since the epoch while VCD and FST carry a date string. It now
@@ -44,9 +51,14 @@ rather than merely available.
   depending on where it is opened.
 
 ### Compatibility
-- Plugin ABI unchanged (still version 1); no vtable field added or reordered.
-  Design connectivity is a Rust trait reached through a defaulted method rather
-  than a new vtable slot, so external plugins are unaffected.
+- **Plugin ABI is version 2, and rwave requires an exact match.** The vtable
+  carries no length, so the version is the only thing that says where it ends;
+  appending a field now bumps it. An external plugin built against v1 is
+  refused with a rebuild hint instead of being misread — rebuild it against
+  `include/rwave_backend.h`, which is already how a plugin is installed. No
+  field was removed or reordered, so a rebuild is all it takes.
+- Design connectivity stays a Rust trait reached through a defaulted method
+  rather than a vtable slot, so `trace` adds nothing to the ABI.
 
 ## [0.1.8] — 2026-08-24
 

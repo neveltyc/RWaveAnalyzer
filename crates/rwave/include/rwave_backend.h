@@ -13,10 +13,12 @@
  *
  * ABI versioning: the version sits in the vtable's `abi_version` field
  * rather than the symbol name, so a single `rwave_backend` entry point
- * suffices forever. Bumps to RWAVE_BACKEND_ABI_VERSION are reserved for
- * breaking changes (field removal, signature change, semantic change to
- * an existing call); appending fields at the end of the vtable does not
- * bump it — older rwave reads only the fields it knows about.
+ * suffices forever.
+ *
+ * Every change to this struct bumps RWAVE_BACKEND_ABI_VERSION, appended
+ * fields included, and rwave requires an exact match. The vtable carries
+ * no length, so the version is the only thing that says where it ends;
+ * a backend built against another version is refused rather than read.
  *
  * Licensing: this header alone is released under MIT (same as rwave). It
  * carries no implementation; including it in your project does not affect
@@ -33,12 +35,13 @@
 extern "C" {
 #endif
 
-/* Bump only on breaking vtable changes (field removed, signature changed,
- * semantic change to an existing call). Appending new fields to the end
- * of the vtable does not bump this. Backends fill the `abi_version` field
- * of their vtable with this constant at build time; rwave validates the
- * value before calling any other vtable function. */
-#define RWAVE_BACKEND_ABI_VERSION 1u
+/* Backends fill their vtable's `abi_version` with this constant at build
+ * time; rwave validates it before reading any other field.
+ *
+ *   v1  initial contract
+ *   v2  adds load_traces_windowed
+ */
+#define RWAVE_BACKEND_ABI_VERSION 2u
 
 /* Opaque per-file handle owned by the backend. Each call to
  * RwaveBackend::open returns one; rwave passes it back to every
@@ -155,7 +158,10 @@ typedef struct {
      *
      * A backend leaves this NULL when it cannot seek by time; rwave then
      * falls back to a full load_traces() and windows the result itself.
-     * The emitted values use the identical encoding as load_traces(). */
+     * The emitted values use the identical encoding as load_traces().
+     *
+     * Added in ABI 2, which is why ABI 2 exists: a v1 vtable ends at
+     * load_traces, so this field is not part of one. */
     int             (*load_traces_windowed)(
                         RwaveSession *,
                         const uint64_t *sids,

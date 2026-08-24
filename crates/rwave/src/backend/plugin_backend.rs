@@ -35,7 +35,7 @@ use crate::format::ValueKind;
 use crate::plugin::builtin::{self, BuiltinError};
 use crate::plugin::ffi::{
     file_format, RwaveBackend, RwaveBackendInit, RwaveEmit, RwaveSession as PluginHandle,
-    RwaveValueKind, RwaveVarDecl, RWAVE_BACKEND_ABI_VERSION, RWAVE_BACKEND_SYMBOL,
+    RwaveValueKind, RwaveVarDecl, WindowedFn, RWAVE_BACKEND_ABI_VERSION, RWAVE_BACKEND_SYMBOL,
 };
 use crate::plugin::loader::{external_plugin_path, LoadError};
 
@@ -178,9 +178,13 @@ fn register(
     // the external path NULL-checks before calling here.
     let vtable: &RwaveBackend = unsafe { &*vtable_raw };
 
-    // ABI version. Dedicated variant so the message names the remediation
-    // (rebuild the backend) rather than a dlopen retry. A built-in never
-    // mismatches — it is compiled against this same `ffi` module.
+    // ABI version, before any other field is touched: a vtable built against
+    // a different layout may be shorter than the struct below reads, and the
+    // version is the only way to tell. This is why appending a field bumps it.
+    //
+    // Dedicated error variant so the message names the remediation (rebuild
+    // the backend) rather than a dlopen retry. A built-in never mismatches —
+    // it is compiled against this same `ffi` module.
     if vtable.abi_version != RWAVE_BACKEND_ABI_VERSION {
         return Err(LoadError::AbiMismatch {
             format: format.to_string(),
@@ -313,6 +317,13 @@ impl PluginBackend {
     fn vtable(&self) -> &'static RwaveBackend {
         // SAFETY: validated on load; cache entry is &'static.
         unsafe { &*self.plugin.vtable }
+    }
+
+    /// The backend's windowed-decode entry, or `None` when it left the slot
+    /// empty. Safe to read because `register` refused any vtable whose version
+    /// is not this one, so the field is present by construction.
+    fn windowed_slot(&self) -> Option<WindowedFn> {
+        self.vtable().load_traces_windowed
     }
 
     /// Build (or return cached) sid → ValueKind map. Used by the trace
@@ -551,9 +562,9 @@ impl WaveformBackend for PluginBackend {
     }
 
     fn supports_windowed(&self) -> bool {
-        // Specialized iff the plugin filled the optional vtable slot. Both
-        // built-ins do; external plugins predating the slot leave it NULL.
-        self.vtable().load_traces_windowed.is_some()
+        // Specialized iff the backend filled the optional slot. Both built-ins
+        // do; an external backend that cannot seek leaves it NULL.
+        self.windowed_slot().is_some()
     }
 
     /// Design queries for the built-in Verdi NPI FSDB backend only.
@@ -597,12 +608,12 @@ impl WaveformBackend for PluginBackend {
         from: i64,
         to: Option<i64>,
     ) -> Vec<SignalTrace> {
-        let vtable = self.vtable();
         let handle = self.handle;
-        let Some(windowed) = vtable.load_traces_windowed else {
-            // No windowed entry: a full decode is a correct (unoptimized)
-            // answer. Callers gate on `supports_windowed`, so this is only a
-            // safety net.
+        let Some(windowed) = self.windowed_slot() else {
+            // No windowed entry — either the backend left it NULL or its
+            // vtable is too old to have one. A full decode is a correct
+            // (unoptimized) answer. Callers gate on `supports_windowed`, so
+            // this is only a safety net.
             return self.load_traces(sids);
         };
         // `None` upper edge maps to the ABI's INT64_MAX "to the end" sentinel.
@@ -806,6 +817,14 @@ mod tests {
             .zip(t.values.iter())
             .map(|(t, v)| (*t, v.raw_str().into_owned()))
             .collect()
+    }
+
+    /// `load_traces_windowed` was appended after v1, so the version had to move
+    /// with it: a v1 backend is a shorter object, and reading the slot from one
+    /// yields whatever follows it in memory. Pins the rule as a number.
+    #[test]
+    fn appending_the_windowed_slot_moved_the_abi_version() {
+        assert!(RWAVE_BACKEND_ABI_VERSION >= 2);
     }
 
     #[test]

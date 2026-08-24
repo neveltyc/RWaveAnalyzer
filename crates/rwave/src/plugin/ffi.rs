@@ -13,8 +13,14 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-/// Bump only on breaking vtable changes — see [`super`] docs.
-pub const RWAVE_BACKEND_ABI_VERSION: u32 = 1;
+/// Vtable version; a backend must match it exactly.
+///
+/// Bumped by every change to [`RwaveBackend`], appended fields included — the
+/// struct carries no length, so this is the only thing that says where it ends.
+///
+/// * v1 — initial contract
+/// * v2 — adds `load_traces_windowed`
+pub const RWAVE_BACKEND_ABI_VERSION: u32 = 2;
 
 /// Opaque per-file handle owned by the backend. Sized as a ZST in Rust
 /// (`struct` with empty array); we only ever traffic in `*mut RwaveSession`.
@@ -130,20 +136,25 @@ pub struct RwaveBackend {
 
     // windowed trace decode (optional — NULL when the backend cannot seek
     // by time; rwave then falls back to a full `load_traces`). `to_tick`
-    // is `i64::MAX` for an unbounded upper edge. Appended after `load_traces`
-    // without an `abi_version` bump (see the header's versioning note).
-    pub load_traces_windowed: Option<
-        unsafe extern "C" fn(
-            *mut RwaveSession,
-            *const u64,
-            usize,
-            i64,
-            i64,
-            RwaveEmit,
-            *mut c_void,
-        ) -> c_int,
-    >,
+    // is `i64::MAX` for an unbounded upper edge.
+    //
+    // Added in ABI 2, which is why ABI 2 exists: a v1 vtable ends at
+    // `load_traces`, and reading this field from one would read past it.
+    pub load_traces_windowed: Option<WindowedFn>,
 }
+
+/// Windowed trace decode: `(session, sids, n_sids, from_tick, to_tick, emit,
+/// ctx) -> rc`. Named so the version-gated accessor that hands it out has a
+/// type to return.
+pub type WindowedFn = unsafe extern "C" fn(
+    *mut RwaveSession,
+    *const u64,
+    usize,
+    i64,
+    i64,
+    RwaveEmit,
+    *mut c_void,
+) -> c_int;
 
 // SAFETY: an `RwaveBackend` is an immutable vtable — function pointers,
 // pointers to 'static C strings, and POD. A built-in backend instantiates
