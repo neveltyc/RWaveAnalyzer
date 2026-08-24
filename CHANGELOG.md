@@ -6,6 +6,40 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-08-24
+
+`trace` answers who drives a signal and what reads it — the one question a
+waveform alone cannot answer. It reads a second input, so it is opted into
+rather than merely available.
+
+### Added
+- `trace <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]`,
+  **off unless `$RWAVE_TRACE_EN` is set**. Drivers and loads come back with the
+  statement's source text and `file:line`, `--at T` gives each endpoint its value
+  then, and `--control` adds the `if`/`case`/clock-edge conditions that gate the
+  assignment. Experimental.
+
+  Connectivity is not in a waveform, so this needs Verdi's elaborated design
+  database beside it: an `.fsdb` opened through the built-in NPI backend, whose
+  header names the design library (`--kdb` overrides it, and is taken literally
+  — there is no directory scan). Every other format, and an `.fsdb` served by
+  `$RWAVE_PLUGIN_FSDB`, says so and stops. rwave is a waveform tool; the switch
+  keeps that the default reading of what it does.
+- `$RWAVE_NPI_L1_LIB`, for a Verdi install whose `libnpiL1.so` does not sit next
+  to `libNPI.so`.
+
+### Changed
+- **`--kdb`, `--top`, `--driver`, `--load`, and `--control` are `trace`'s,** and
+  `trace` refuses the selection and time options it does not use; either is a
+  usage error rather than silently ignored. The seven original commands keep
+  their existing tolerance for the flags they ignore.
+- `trace` takes a second positional argument (the signal), as `tree` does.
+
+### Compatibility
+- Plugin ABI unchanged (still version 1); no vtable field added or reordered.
+  Design connectivity is a Rust trait reached through a defaulted method rather
+  than a new vtable slot, so external plugins are unaffected.
+
 ## [0.1.8] — 2026-08-24
 
 A new command for the question a signal list cannot answer — where am I in the
