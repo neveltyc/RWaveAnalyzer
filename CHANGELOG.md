@@ -6,6 +6,53 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-08-24
+
+A new command for the question a signal list cannot answer — where am I in the
+hierarchy — and WLF point queries that seek instead of replaying the run.
+
+### Added
+- `tree <file> [SCOPE] [--depth N] [--of SIGNAL]`, on every format. It builds its
+  own scope index rather than reusing the flat scope list, so a module of nothing
+  but sub-modules is not invisible; `--of` prints a signal's ancestor chain.
+  `--depth` counts scopes where `list` counts signals, and is the one command
+  that accepts it without `--scope`, measured from the root.
+
+### Changed
+- **`--of` is scoped to `tree`,** and `tree` refuses the selection and time
+  options it does not use; either is a usage error rather than silently ignored.
+  The seven original commands keep their existing tolerance for the flags they
+  ignore.
+- `tree` takes a second positional argument (its starting scope); other commands
+  still reject extra positionals.
+
+### Performance
+- **WLF point queries seek.** `snapshot --at` and `compare` on a `.wlf` scan only
+  the window rather than the run before it: ~2 ms where a full decode took
+  ~600 ms, on a 48 MB capture of 20 M time steps. The carried value is tagged one
+  tick before the window, because libwlf cannot report when it last changed.
+- **`compare` on a seeking backend reads two instants, not the span between
+  them.** A far-apart pair no longer re-reads everything in between (WLF, 20 M
+  steps: ~5.5 s → ~0.05 s). Non-seeking backends keep the single pass.
+
+### Fixed
+- **Plugin traces are folded to one net entry per tick**, last write wins, with
+  consecutive duplicates suppressed; events are exempt. The vendor libraries
+  report transport granularity rather than user-visible writes — libwlf delivers
+  a wide vector one 32-bit word per callback, which made a 256-bit bus count
+  eight `summary` changes per real transition — and its end-of-scan marker
+  appended a fake trailing change to every signal.
+- WLF scans pass `endDelta = WLF_LAST_DELTA`, so captures logged with
+  `-nowlfcollapse` keep their end-tick delta events.
+- `--batch` ended a command at the first unquoted `#`, taking the rest as the
+  result's label, which made every signal under an unnamed generate block
+  unaskable.
+
+### Compatibility
+- Plugin ABI unchanged (still version 1). The windowed vtable slot is appended
+  per the header's rule; a backend that leaves it NULL falls back to a full
+  `load_traces`.
+
 ## [0.1.7] — 2026-08-06
 
 Signal selection grows from one option into four that compose: `--scope` picks a
