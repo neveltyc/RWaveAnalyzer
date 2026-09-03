@@ -1,9 +1,9 @@
 <p align="center">
   <h1 align="center">RWaveAnalyzer</h1>
   <p align="center">
-    A fast, single-binary CLI for inspecting RTL simulation waveforms &mdash;
-    <b>VCD</b>, <b>FST</b>, and <b>GHW</b>, with experimental support for <b>WLF</b> and <b>FSDB</b> &mdash;
-    built for RTL debug, CI, and AI agents.
+    一个快速的单文件命令行工具，用来查看 RTL 仿真波形。
+    支持 <b>VCD</b>、<b>FST</b>、<b>GHW</b>，并实验性支持 <b>WLF</b> 和 <b>FSDB</b>，
+    面向 RTL 调试、CI 和 AI agent。
   </p>
 </p>
 
@@ -13,76 +13,77 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-3366cc?style=flat-square">
 </p>
 
+<p align="center">
+  <a href="README_en.md">English</a> · <b>中文</b>
+</p>
+
 ---
 
-## Why RWaveAnalyzer?
+## 为什么用 RWaveAnalyzer？
 
-You have a multi-gigabyte FST from an overnight regression, and you need to know
-exactly when `arvalid` and `arready` were both high, or what `state[3:0]` held at
-17.55 µs. Opening Verdi or GTKWave means waiting for a GUI to start, clicking
-down the hierarchy, and reading values off a cursor. RWaveAnalyzer answers the
-same questions from the terminal, in a single command:
+假设你手上有一份通宵回归跑出来的 FST，好几个 GB，你想知道 `arvalid` 和
+`arready` 到底什么时候同时为高，或者 `state[3:0]` 在 17.55 µs 时的值是多少。用
+Verdi 或 GTKWave 的话，得等 GUI 启动，在层级里一层层点开，再对着光标读取数值。
+RWaveAnalyzer 在终端里一条命令就能回答：
 
 ```sh
 rwave search sim.fst --condition "arvalid=1,arready=1" --show araddr,arlen
 ```
 
-The tool is a single self-contained binary called `rwave`. It reads the open
-**VCD**, **FST**, and **GHW** formats, and on linux-amd64 it adds experimental
-support for the **WLF** (Mentor/Questa) and **FSDB** (Synopsys/Verdi) databases,
-which it reads through each vendor's own library (see [WLF and FSDB](#experimental-support-for-wlf-and-fsdb)).
-Every command also has a `--json` mode with stable keys, so the same tool drives
-a human at a prompt, a CI gate, and an AI agent equally well. Whole-file commands
-stream their work in bounded memory, so a dump with hundreds of thousands of
-signals does not exhaust RAM.
+rwave 本身就是一个二进制文件，不依赖别的东西。它能读取 VCD、FST、GHW 这几种开放
+格式；在 linux-amd64 上还能读取 WLF（Mentor/Questa）和 FSDB（Synopsys/Verdi）
+数据库，靠的是调用各家自己的库（见 [WLF 和 FSDB](#wlf-与-fsdb-实验性支持)），属于
+实验性支持。每条命令都能用 `--json` 输出，字段名是固定的，所以人在终端里能用，
+写进 CI 脚本能用，AI agent 也能用。处理整个文件的命令都是流式的，占用内存有上
+限，因此哪怕 dump 里有几十万个信号，也不会耗尽内存。
 
-## Quick start
+## 快速上手
 
-Point any command at a `.vcd`, `.fst`, `.ghw` (or `.wlf` / `.fsdb`) file:
+随便哪条命令，后面跟上一个 `.vcd`、`.fst`、`.ghw`（或 `.wlf`、`.fsdb`）文件就行：
 
 ```sh
-# What's in this file?
+# 这个文件里有什么？
 rwave info sim.fst
 
-# Show me the clock and reset
+# 看看时钟和复位
 rwave list sim.fst --filter clk,rst
 
-# What happened between 100 ns and 200 ns?
+# 100 ns 到 200 ns 之间发生了什么？
 rwave dump sim.fst --begin 100ns --end 200ns --filter state
 
-# When were valid and ready both high?
+# valid 和 ready 什么时候同时为高？
 rwave search sim.fst --condition "valid=1,ready=1" --show data
 
-# At which instants does req toggle while ready is low?
+# req 在 ready 为低时翻转的那些时刻？
 rwave search sim.fst --condition "changed(req),ready=0" --show state
 
-# When does ANY of several channels handshake? (repeat --condition to OR)
+# 多个通道里任意一个握手的时刻？（重复 --condition 就是 OR）
 rwave search sim.fst --condition "ch0_valid=1,ch0_ready=1" --condition "ch1_valid=1,ch1_ready=1"
 
-# What are all known values at exactly 17.55 us?
+# 恰好在 17.55 us 时，所有已知值是多少？
 rwave snapshot sim.fst --at 17.55us --filter state,init_done
 
-# What changed between two times?
+# 两个时刻之间有哪些变化？
 rwave compare sim.fst --at 17.5us,17.7us --filter bus
 
-# Which signals are active versus static?
+# 哪些信号有活动，哪些是静态的？
 rwave summary sim.fst --filter alu
 
-# Just this block, and not its submodules
+# 只看这个模块，不包含它的子模块
 rwave list sim.fst --scope u_tx.u_fifo --depth 1
 
-# Everything but the CDC synchronizers
+# 除了 CDC 同步器以外的一切
 rwave summary sim.fst --exclude '*_sync_*.*'
 ```
 
-Add `--json` to any command for compact, machine-readable output.
+任何命令加上 `--json`，输出就变成紧凑的、方便程序读取的格式。
 
-## Install
+## 安装
 
-Download the `rwave` binary for your platform from the
-[latest release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest):
+从[最新 release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest)
+下载对应平台的 `rwave` 二进制：
 
-| Platform | Binary | VCD · FST · GHW | WLF | FSDB |
+| 平台 | 二进制 | VCD · FST · GHW | WLF | FSDB |
 |:--|:--|:--:|:--:|:--:|
 | Linux x86-64          | `rwave-linux-amd64`       | ✓ | ✓ | ✓ |
 | Linux ARM64           | `rwave-linux-arm64`       | ✓ | — | — |
@@ -96,36 +97,33 @@ chmod +x rwave
 ./rwave --version
 ```
 
-Every binary reads VCD/FST/GHW; WLF and FSDB are linux-amd64 only (see
-[WLF and FSDB](#experimental-support-for-wlf-and-fsdb)). The `rwave-linux-amd64` build is dynamically linked
-against glibc with a 2.17 baseline (manylinux2014), so it runs on every
-mainstream Linux distribution released since 2014.
+每个二进制都能读取 VCD、FST、GHW；WLF 和 FSDB 只有 linux-amd64 支持（见
+[WLF 和 FSDB](#wlf-与-fsdb-实验性支持)）。`rwave-linux-amd64` 动态链接 glibc，
+基线是 2.17（manylinux2014），所以 2014 年以后的主流 Linux 发行版都能运行。
 
-## Building from source
+## 从源码构建
 
-The only requirement for a local build is a recent stable Rust toolchain
-(developed against 1.90, edition 2024). The build is pure Rust — there is no C
-code, no `build.rs`, and no system dependency to install — so a plain `cargo`
-invocation produces a binary for the host machine:
+本地构建只需要一个较新的稳定版 Rust 工具链（基于 1.90、edition 2024 开发）。
+整个构建是纯 Rust 的，没有 C 代码，没有 `build.rs`，也不用安装任何系统依赖，所以
+一条普通的 `cargo` 命令就能编译出当前机器的二进制：
 
 ```sh
 cargo build --release      # → target/release/rwave
 ```
 
-The WLF and FSDB backends are gated behind the default-on `wlf` and `fsdb`
-features and are further restricted to `x86_64` Linux at compile time; on any
-other host they compile out and you are left with the VCD/FST/GHW core.
-`--no-default-features` forces that pure core on any platform. The parser
-front-end (`wellen`) and its FST reader are vendored under `vendor/`, so the
-build needs no network access and always uses the exact, pinned parser revision.
+WLF 和 FSDB 后端由默认开启的 `wlf`、`fsdb` 两个 feature 控制，而且编译期只对
+`x86_64` Linux 生效；换到别的平台，它们会被编译掉，只剩 VCD、FST、GHW 核心。加上
+`--no-default-features` 就能在任意平台上只保留这个核心。解析前端 `wellen` 和它的
+FST reader 都放在 `vendor/` 里，所以构建不用联网，用的始终是锁定的那个解析器
+版本。
 
-To produce the four release binaries, `scripts/build-release.sh` cross-compiles
-them with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (Zig
-as the cross-linker), so the same recipe works from any host — only the macOS
-target requires a macOS machine. Each target receives the correct feature set
-automatically, and `linux-amd64` is pinned to the glibc 2.17 baseline.
+要一次产出四个 release 二进制，用 `scripts/build-release.sh`。它借助
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)（用 Zig 作为交叉
+链接器）来交叉编译，所以同一套流程在任何机器上都能运行，只有 macOS 目标必须在
+macOS 机器上编译。每个目标会自动配好对应的 feature，`linux-amd64` 锁定 glibc
+2.17 基线。
 
-| Target | Triple | Output |
+| 目标 | Triple | 输出 |
 |:--|:--|:--|
 | `linux-amd64`   | `x86_64-unknown-linux-gnu`   | `dist/rwave-linux-amd64`       |
 | `linux-arm64`   | `aarch64-unknown-linux-musl` | `dist/rwave-linux-arm64`       |
@@ -133,156 +131,120 @@ automatically, and `linux-amd64` is pinned to the glibc 2.17 baseline.
 | `macos-arm64`   | `aarch64-apple-darwin`       | `dist/rwave-macos-arm64`       |
 
 ```sh
-# one-time setup (macOS)
+# 一次性准备（macOS）
 brew install rustup zig
 rustup default stable
 cargo install --locked cargo-zigbuild
 rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu aarch64-apple-darwin
 
-./scripts/build-release.sh                        # all four targets
-./scripts/build-release.sh --target linux-amd64   # a single target
+./scripts/build-release.sh                        # 全部四个目标
+./scripts/build-release.sh --target linux-amd64   # 只编译一个目标
 ```
 
-The script checks its prerequisites up front and prints the exact install
-command for anything that is missing. [docs/BUILD.md](docs/BUILD.md) covers the
-cross-compilation setup, the per-target linking choices, and the Linux recipe in
-full.
+脚本会先检查这些前提，缺少什么就直接打印出对应的安装命令。交叉编译的配置、各
+目标的链接方式、完整的 Linux 构建步骤，都写在 [docs/BUILD.md](docs/BUILD.md) 里。
 
-## Commands
+## 命令
 
 ```
 rwave [--json] [--limit N] [--verbose] <command> <file> [options]
 rwave --batch [--json] <file> [global-opts] < commands.txt
 ```
 
-| Command | What it does |
+| 命令 | 作用 |
 |:--|:--|
-| `info`     | Timescale, signal and type counts, time span, and scopes — the file at a glance |
-| `list`     | Enumerate signals with path, width, and type (one row per alias path) |
-| `dump`     | Print every value change in a time window, in time order |
-| `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges |
-| `snapshot` | All known signal values at one time point (`--at T`) |
-| `compare`  | What changed between two time points (`--at T1,T2`) |
-| `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
-| `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
-| `trace`    | *(experimental, off by default)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only; set `RWAVE_TRACE_EN=1` |
+| `info`     | 时间刻度、信号和类型的数量、时间跨度、各个 scope，一眼看清文件 |
+| `list`     | 列出信号的路径、位宽、类型（每个别名路径一行） |
+| `dump`     | 按时间顺序打印某个时间窗内的每一次值变化 |
+| `summary`  | 逐个信号的统计：有没有活动、变化了多少次、上升和下降沿数量 |
+| `snapshot` | 某个时刻（`--at T`）所有已知的信号值 |
+| `compare`  | 两个时刻（`--at T1,T2`）之间有哪些变化 |
+| `search`   | 找出条件成立的时间区间；配合 `changed(SIG)` 则找出成立的具体时刻 |
+| `tree`     | 浏览层级：某个 scope 的子节点，或 `--of SIGNAL` 的完整上级链 |
+| `trace`    | *(实验性，默认关闭)* 谁驱动了某个信号、它又驱动了谁，附带 `file:line`。只支持通过内置 Verdi NPI 后端打开的 FSDB；需要设 `RWAVE_TRACE_EN=1` |
 
-Every command except `info`, `tree`, and `trace` accepts the four selection
-options described in [Selecting signals](#selecting-signals); `tree` takes
-`--scope` and `--depth` only. The commands that read a span of time
-— `dump`, `summary`, and `search` — also take a `--begin`/`--end` window;
-`snapshot` and `compare` take instants instead (`--at`), and `list` and `info`
-describe the file rather than a time. Times take the unit suffixes `fs`, `ps`,
-`ns`, `us`, `ms`, and `s` (for example `17.5us`); a bare integer is interpreted
-as raw ticks. The global flags are `--json`
-for structured output, `--limit N` to cap the number of rows (the default is
-500, and `0` means unlimited), and `--verbose` for extra fields. A clipped
-result says so on its last line, and carries a `hint` field under `--json`. A search
-condition is a comma-separated AND-list of `SIG=VAL`, `SIG!=VAL`, or
-`changed(SIG)` terms, with values written in decimal, hexadecimal (`0xff`),
-binary (`b1010`), or 4-state. `changed(SIG)` is an edge predicate: the search
-then reports the instants where SIG transitions and the rest of the clause
-holds (event mode), instead of time intervals. Repeating `--condition` ORs the
-clauses (OR-of-ANDs): the search holds wherever *any* clause holds — e.g. one
-clause per channel to find when any handshakes; every clause must contain a
-`changed()` term or none may. There is no in-string OR (`|`/parentheses); OR
-is only the repeated flag. Run `rwave <command> --help` for the complete
-reference.
+- **选择信号。** 除了 `info`、`tree`、`trace`，每条命令都支持四个
+  [信号选择](#选择信号)选项；`tree` 只支持 `--scope` 和 `--depth`。
+- **时间。** `dump`、`summary`、`search` 用 `--begin`/`--end` 指定时间窗；
+  `snapshot`、`compare` 用 `--at` 指定时刻。时间带单位后缀 `fs`、`ps`、`ns`、
+  `us`、`ms`、`s`（比如 `17.5us`）；只写数字则按原始 tick 计算。
+- **全局选项。** `--json` 输出结构化数据，`--limit N` 限制行数（默认 500，写 `0`
+  表示不限），`--verbose` 输出更多字段。结果被截断时，最后一行会说明，`--json`
+  下还会带一个 `hint` 字段。
+- **条件**（`search` 用）是一串用逗号连起来的 AND 条件，每项是 `SIG=VAL`、
+  `SIG!=VAL` 或 `changed(SIG)`；值可以写十进制、十六进制（`0xff`）、二进制
+  （`b1010`）或 4 态。写 `changed(SIG)` 会切换到事件模式，报告 SIG 翻转、同时子句
+  其余部分也成立的那些时刻。重复写 `--condition`，就是把这些子句用 OR 连接（它们
+  要么都包含 `changed()`，要么都不包含）；字符串内部不支持 OR。
 
-## Selecting signals
+完整用法见 `rwave <command> --help`。
 
-A dump has more signals than any one question needs. Four options narrow it,
-and they compose as a pipeline over each signal path in turn:
+## 选择信号
+
+一份 dump 里的信号，往往比你某一个问题需要看的多得多。用下面四个选项来缩小
+范围，它们会对每条信号路径依次生效，像一条流水线：
 
 | | |
 |:--|:--|
-| `--scope P1,P2`  | which subtree to look in |
-| `--depth N`      | how far below that subtree's root to go (requires `--scope`) |
-| `--filter K1,K2` | which names to keep |
-| `--exclude K1,K2`| what to drop, applied last |
+| `--scope P1,P2`  | 在哪棵子树里查找 |
+| `--depth N`      | 从这棵子树的根往下走多深（要配合 `--scope`） |
+| `--filter K1,K2` | 保留哪些名字 |
+| `--exclude K1,K2`| 去掉哪些，最后生效 |
 
 ```sh
-# One block, not its submodules.
+# 只要这个模块，不包含子模块。
 rwave list sim.fst --scope u_tx.u_fifo --depth 1
 
-# A status bit, without the CDC synchronizer named after it.
+# 一个状态位，但不包含以它命名的 CDC 同步器。
 rwave summary sim.fst --filter tx_fifo_push_err
 
-# Everything except the clock trees.
+# 除时钟树以外的一切。
 rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
 ```
 
-**Patterns match a name, or a path.** A pattern with no separator matches the
-signal's **leaf name**; one containing a `.` or `/` matches its **whole
-hierarchical path** (both separate hierarchies — FST and VCD use `.`, FSDB may
-use either). This matters because RTL names scopes after signals: a CDC
-synchronizer instance is conventionally `u_sync_<sig>`, so a whole-path match
-for `tx_fifo_push_err` returns the status bit *and* every net inside the
-synchronizer — clocks and pipeline flops whose change counts can run five
-orders of magnitude higher. Matching the leaf asks for the signal itself. To
-address the hierarchy instead, include a dot: `--filter 'u_dma.'` keeps
-everything under `u_dma`, and `--filter 'top.u_dma.*'` does the same anchored
-from the root. Either way, a pattern with no `*`/`?` matches by substring, one
-with them is an anchored glob, `[` and `]` are literal (for bus ranges), and
-matching is case-insensitive. Comma-separated patterns are ORed.
+**按名字还是按路径。** 一个 pattern 如果不包含分隔符，就只匹配信号名本身（路径
+的最后一段）；如果包含 `.` 或 `/`，就匹配它的完整路径。这个区别很关键：RTL 习惯
+用信号名给 CDC 同步器起名（`u_sync_<sig>`），所以用 `tx_fifo_push_err` 匹配路径，
+会把这个同步器内部的每条线也一起带出来。想要信号本身，就匹配名字；想定位到某一
+段层级，就加上一个点（`--filter 'u_dma.'`）。pattern 里没有 `*` 或 `?` 时按子串
+匹配，有的话就是锚定的 glob；`[` 和 `]` 当作普通字符，匹配不区分大小写，用逗号
+隔开的多个 pattern 之间是 OR 关系。
 
-**`--scope` matches segment by segment**, so `u_fifo` never selects
-`u_fifo_ctrl`. A bare value names one instance and takes its descendants with
-it; `*` and `?` are allowed (`--scope 'u_ch?'`). A path value matches as a
-segment-aligned suffix, so `u_tx.u_fifo` finds that subtree wherever it sits in
-the tree, and a path written out from the root works too.
+**`--scope`** 是逐段匹配的（`u_fifo` 绝不会命中 `u_fifo_ctrl`），选中一棵子树，
+连同它下面的所有内容；路径则按段对齐、从后往前匹配。**`--depth`** 从选中的
+scope 开始往下计层（直接在里面的信号算作第 1 层），要配合 `--scope` 使用。只有
+`tree` 例外，它计的是 scope 而不是信号，从根开始往下走，可以单独用 `--depth`。
 
-**`--depth` counts from the matched scope**, with a signal sitting directly in
-it at depth 1. `--scope u_tx --depth 1` is "this block's own signals, none of
-its submodules'". It requires `--scope`, since there is nothing to count from
-otherwise — except for `tree`, which counts scopes rather than signals and
-accepts `--depth` alone, counting from the root.
+**判断是按路径做的，不是按信号。** 一条信号只要有任意一条路径通过了全部选项，
+它就会被保留。这就是为什么 `--exclude` 用在“同时又接进某个同步器的线”上是安全
+的：外面那条路径把信号保留下来，同步器自己的线（没有外面的路径）被排除掉。
+`search` 没有行级过滤，它的 `--condition` 和 `--show` 里的名字本身就是选择，所以
+这些选项只是帮忙确定一个名字到底指哪条信号；直接写全路径的话，就完全绕开了选
+择。匹配不到不算错误，只是空结果；把值留空（`--filter ''`）等于没写这个选项，
+`--batch` 里某一行就是靠这招去掉一个默认值的。
 
-**Selection is decided per path, not per signal.** A signal is kept when any
-one of its paths clears every option. That is what makes `--exclude` safe on a
-net visible at several points in the hierarchy: a status bit wired into a
-synchronizer has a path inside it and a path outside, so excluding the
-synchronizer hides the inner path and keeps the signal, while the
-synchronizer's own nets — which have no path outside — drop out. `list` prints
-only the paths that survived `--scope`, `--depth`, and `--exclude`; `--filter`
-hides no paths, since a wanted signal's other paths are worth seeing.
+## JSON 输出
 
-**`search` has no row filter** — its `--condition` and `--show` names *are* the
-selection — so the options narrow how those names are **resolved**. Against a
-design with four counters, `--condition cnt=1` is an ambiguity error and
-`--scope u_m0.u_a` makes it a unique hit. A name spelled out as a full path
-bypasses selection entirely, so an `--exclude` can never put a named signal out
-of reach.
-
-An option that matches nothing is an empty result, not an error, and an empty
-value (`--filter ''`) reads as "not given" — which is how a `--batch` line lifts
-a default it does not want.
-
-## JSON output
-
-Under `--json`, every command emits compact structured JSON. Each time is given
-both as a raw tick count (the `*_ticks` fields) and in human-readable form (the
-`*_h` fields), so the output is equally usable by a script, a CI gate, or an AI
-agent rather than only by a person reading the terminal. Signal values render
-compactly for the same reason: a 1-bit logic signal as `0`/`1`/`x`/`z`, a
-multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), a bus with
-unknown bits as `b<bits>` (e.g. `b01x0`), and real/string values verbatim. The
-width is in each signal's metadata, so it is not re-encoded as hex padding.
+加上 `--json`，每条命令都输出紧凑的结构化 JSON。每个时间都给两种形式：原始
+tick 数（`*_ticks` 字段）和人能直接读的形式（`*_h` 字段），这样脚本、CI、AI
+agent 和终端前的人都能用。信号值也是同样的考虑，尽量紧凑：1 位逻辑信号是
+`0`/`1`/`x`/`z`，多位总线是去掉前导零的 `0x<hex>`（比如 `0x4`），有未知位的总线
+是 `b<bits>`（比如 `b01x0`），实数和字符串原样给出。位宽记在每条信号的元数据
+里，所以不用再拿十六进制补零来表示。
 
 ```sh
 rwave --json info sim.fst
 rwave --json search sim.fst --condition "state=5" --show data
 ```
 
-## Batch mode
+## 批处理模式
 
-Large FSDB and WLF databases are read through a vendor library, where each
-"open" spins up a C++ runtime and indexes the whole hierarchy — seconds to tens
-of seconds for a multi-gigabyte file. When several queries target the *same*
-file (a CI gate, a scripted extraction, an AI agent's multi-step plan), paying
-that cost once instead of once per query matters. `--batch` does exactly that:
-it loads the file **once**, then runs a list of commands read from stdin.
+大的 FSDB 和 WLF 数据库要通过厂商库来读取，每“打开”一次都要启动一个 C++ 运行
+时、把整个层级建立一遍索引，几个 GB 的文件就得耗时几秒到几十秒。如果多次查询都
+是针对同一个文件（CI 检查、脚本批量提取、AI agent 的多步流程），那这笔开销只承担
+一次、而不是每次查询都承担，就很值。`--batch` 干的就是这件事：文件只加载一次，
+然后依次执行从 stdin 读进来的一串命令。
 
 ```sh
 printf '%s\n' \
@@ -293,105 +255,94 @@ printf '%s\n' \
   | rwave --batch --json sim.fst
 ```
 
-Each input line is an ordinary command with the leading `rwave` and the file
-omitted — both are already fixed by the `--batch` invocation. Blank lines and
-lines beginning with `#` are skipped; a trailing `#label` names that line's
-result. Any `[global-opts]` on the `--batch` command line (`--limit`,
-`--verbose`, the selection options, …) become defaults that an individual line
-can override. A `--batch`-wide `--exclude` is a good way to keep one class of
-noise out of every query in a plan; each option overrides its own default
-independently, so a line that wants one of them lifted passes it empty
-(`--filter ''`) without disturbing the rest.
+每行输入就是一条普通命令，只是开头的 `rwave` 和文件名都省略了，因为这两样在
+`--batch` 那次调用里已经定死。空行、以 `#` 开头的行会被跳过；行尾写 `#label`
+可以给这一行的结果起个名字。`--batch` 命令行上给的 `[global-opts]`（`--limit`、
+`--verbose`、各种选择选项等）会作为默认值，某一行可以覆盖它。在整个 `--batch`
+上加一个 `--exclude`，是把某类噪声从每条查询里都排除掉的好办法；每个选项各自独立
+覆盖自己的默认值，所以某一行想去掉其中一个，把它传成空值（`--filter ''`）就行，
+不影响别的。
 
-Results come back in input order, one per command. With `--json` each is a
-single NDJSON object; without it, each is a `#label` header followed by that
-command's usual text output:
+结果按输入顺序返回，一条命令对应一条。`--json` 下每条是一个 NDJSON 对象；不加
+`--json` 时，每条是一个 `#label` 开头，后面跟着这条命令平常的文本输出：
 
 ```
 {"id":"1","ok":true,"result":{ …info… }}
 {"id":"2","ok":true,"result":{ …list… }}
 ```
 
-A batch `result` is identical to what the equivalent single command would
-produce — batch only saves the repeated load, it never changes a command's
-output. A command that fails (an unknown signal, an illegal time) is reported
-with `"ok":false` and does **not** stop the batch; the run still exits `0`. Only
-a file that cannot be loaded, or a command stream that cannot be read, is fatal.
+批处理里一条命令的 `result`，和你单独运行这条命令的结果一模一样；批处理只是省去
+了重复加载，不会改变任何命令的输出。某条命令失败了（信号名不认识、时间不合
+法），会以 `"ok":false` 报告，但不会中断批处理，整轮照样以 `0` 退出。只有文件加
+载不了、或者命令流无法读取，才算致命错误。
 
-## Experimental support for WLF and FSDB
+## WLF 和 FSDB 实验性支持
 
-On linux-amd64, RWaveAnalyzer provides experimental support for two vendor
-waveform databases — Mentor/Siemens **WLF** and Synopsys **FSDB** — by calling
-into each vendor's own reader library at runtime. There is no format conversion
-step and no intermediate file.
+在 linux-amd64 上，RWaveAnalyzer 实验性支持两种厂商波形数据库：Mentor/Siemens
+的 **WLF** 和 Synopsys 的 **FSDB**。它在运行时直接调用各家自己的 reader 库来读
+取，不用先转格式，也不产生中间文件。
 
 ### WLF
 
-rwave reads Questa / ModelSim `.wlf` files through `libwlf.so`. Point
-`RWAVE_WLF_LIB` at the library from your Questa installation:
+rwave 靠 `libwlf.so` 来读取 Questa / ModelSim 的 `.wlf` 文件。把 `RWAVE_WLF_LIB`
+设成你 Questa 安装里这个库的路径：
 
 ```sh
 export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so
 rwave info run.wlf
 ```
 
-The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
-at runtime and does not ship it.
+厂商工具必须安装在同一台机器上；rwave 运行时才加载 `libwlf.so`，自己并不附带这
+个库。
 
 ### FSDB
 
-rwave supports two ways to read `.fsdb` files. Both are experimental and
-linux-amd64 only.
+rwave 有两种读取 `.fsdb` 的方式，都是实验性的，也都只支持 linux-amd64。
 
-**Built-in backend (NPI)** — ships with the `rwave-linux-amd64` binary; no
-extra build step. rwave calls Synopsys's NPI (Novas Programming Interface)
-through `libNPI.so` from your Verdi installation. This path requires a
-Verdi-Ultra license feature on the host:
+**内置后端（NPI）**，随 `rwave-linux-amd64` 一起发布，不用额外编译。rwave 通过你
+Verdi 安装里的 `libNPI.so` 来调用 Synopsys 的 NPI（Novas Programming
+Interface）。这条路径需要机器上有 Verdi-Ultra 的 license。用起来只要一个
+`VERDI_HOME`：
 
 ```sh
-export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
-export LD_LIBRARY_PATH="$VERDI_HOME/share/NPI/lib/linux64:$VERDI_HOME/share/FsdbReader/linux64:$VERDI_HOME/platform/linux64/lib/Qt5/lib:$VERDI_HOME/platform/linux64/lib:$VERDI_HOME/platform/linux64/lib/Qt5/lib/depends/ssl:$LD_LIBRARY_PATH"
+export VERDI_HOME=/path/to/verdi     # source Verdi 环境时通常已经设好了
 rwave info sim.fsdb
 ```
 
-Source your Verdi environment first so that `libNPI.so` can locate its dependent
-libraries. You must also set `LD_LIBRARY_PATH`.
+rwave 会自己在 `$VERDI_HOME` 下找到 `libNPI.so`，不需要设置 `LD_LIBRARY_PATH`。
+只有当安装目录结构不标准时，才需要用 `RWAVE_FSDB_LIB` 指定 `libNPI.so` 的具体
+路径。
 
-**Plugin backend
-([rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin))**
-— a source-only plugin that reads FSDB through Synopsys's FsdbReader interface.
-You compile it yourself on a machine that has a licensed Verdi installation,
-because the build links against vendor libraries that cannot be redistributed.
-This path does not require the Verdi-Ultra license feature that the NPI backend
-needs — if you need to read FSDB on any linux-amd64 environment, choose this
-approach:
+**插件后端
+（[rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin)）**
+是一个纯源码插件，通过 Synopsys 的 FsdbReader 接口读取 FSDB。你需要在一台装了已
+授权 Verdi 的机器上自己编译它，因为编译时会链接到不能再分发的厂商库。这条路径不
+需要 NPI 后端要求的那个 Verdi-Ultra license。如果你想在任意 linux-amd64 环境上读
+取 FSDB，就选它：
 
 ```sh
-# build on a machine with Verdi
+# 在有 Verdi 的机器上构建
 git clone https://github.com/neveltyc/rwave-open-fsdb-plugin
 cd rwave-open-fsdb-plugin
 ./configure && make bundle
 
-# deploy — unpack the bundle, point rwave at the plugin
+# 部署：解开 bundle，把 rwave 指向这个插件
 mkdir -p ~/.rwave
 tar xzf dist/rwave_fsdb_backend-*-linux_x86_64.tar.gz -C ~/.rwave --strip-components=1
 export RWAVE_PLUGIN_FSDB="$HOME/.rwave/librwave_fsdb_backend.so"
 rwave info sim.fsdb
 ```
 
-When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
-`.fsdb` files.
+只要设了 `RWAVE_PLUGIN_FSDB`，读取 `.fsdb` 时它就会覆盖内置的 NPI 后端。
 
-The plugin is built against rwave's backend ABI, currently **v2**. rwave
-requires an exact match and says so if it differs, naming both versions;
-rebuild the plugin when it does.
+这个插件是按 rwave 的后端 ABI 编译的，当前是 **v2**。rwave 要求版本完全一致，
+不一致就会报错并把两个版本号都列出来；遇到这种情况重新编译插件即可。
 
-### Tracing drivers and loads (experimental, off by default)
+### 追踪驱动和负载（实验性，默认关闭）
 
-`trace` answers "who drives this signal" and "what reads it", with the driving
-statement's source text and `file:line`. It is the one command that reads
-something other than the waveform, so it is opted into rather than merely
-available: without `RWAVE_TRACE_EN` set it refuses and says so.
+`trace` 回答两个问题：谁驱动了这条信号、谁又在读取它，并给出驱动语句的源码和
+`file:line`。它是唯一一条不只读波形的命令，所以要显式打开：没设 `RWAVE_TRACE_EN`
+时它会拒绝执行并给出说明。
 
 ```bash
 export RWAVE_TRACE_EN=1
@@ -399,139 +350,126 @@ rwave trace sim.fsdb tb.dut.u_core.u_alu.res
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 ```
 
-Connectivity comes from Verdi's elaborated design database, built with
-`vcs -kdb -debug_access+all` or with `vericom -kdb` plus `elabcom -elab kdb`.
-You do not normally say where it is: VCS records the path in the FSDB header.
-Pass `--kdb <simv.daidir>` only when rwave reports that path unreachable, which
-happens when a dump is copied away from its build.
+连接关系来自 Verdi 详细展开（elaborate）后的设计数据库，用
+`vcs -kdb -debug_access+all`，或者 `vericom -kdb` 加 `elabcom -elab kdb` 生成。
+一般你不用告诉 rwave 它在哪，因为 VCS 会把路径写进 FSDB 文件头。只有当 rwave 说
+这个路径访问不到时（比如 dump 被挪出了它原来的构建目录），才需要传入
+`--kdb <simv.daidir>`。
 
-`trace` requires an `.fsdb` opened by the built-in Verdi NPI backend, so setting
-`RWAVE_PLUGIN_FSDB` turns it off. Other formats report it as unsupported.
+`trace` 要求 `.fsdb` 是用内置的 Verdi NPI 后端打开的，所以一旦设了
+`RWAVE_PLUGIN_FSDB`，`trace` 就用不了。其他格式则会提示不支持。
 
-| Option | Effect |
+| 选项 | 作用 |
 |:--|:--|
-| `--load` | what reads the signal, instead of what drives it |
-| `--at T` | annotate each endpoint with its value at T |
-| `--control` | include clock, reset, and enclosing `if`/`case` dependencies |
-| `--kdb DIR` | design database, when the recorded path is unreachable |
-| `--top NAME` | design top module, when it differs from the waveform's |
+| `--load` | 查看谁在读取这条信号，而不是谁驱动它 |
+| `--at T` | 为每个端点标注它在 T 时刻的值 |
+| `--control` | 把时钟、复位，以及外层的 `if`/`case` 依赖也一并纳入 |
+| `--kdb DIR` | 设计数据库的路径，用于记录的路径访问不到时 |
+| `--top NAME` | 设计的顶层模块名，用于它和波形里的不一致时 |
 
-### Environment variables
+### 环境变量
 
-| Variable | What it does |
-|:--|:--|
-| `RWAVE_WLF_LIB`    | Absolute path to `libwlf.so`. Enables built-in WLF reading. |
-| `RWAVE_FSDB_LIB`   | Absolute path to `libNPI.so`. Enables built-in FSDB reading (NPI, needs Verdi-Ultra license). |
-| `RWAVE_PLUGIN_FSDB` | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
-| `RWAVE_TRACE_EN`   | Set to `1` to enable the experimental `trace` command, which is off otherwise. |
-| `RWAVE_NPI_L1_LIB` | Absolute path to `libnpiL1.so` (Verdi's NPI connectivity library), if it is not next to `libNPI.so`. Used by `trace`. |
+| 变量 | 是否必需 | 作用 |
+|:--|:--|:--|
+| `VERDI_HOME`       | 读 `.fsdb` 时必需 | 你的 Verdi 安装目录。rwave 会在它下面自动找到 `libNPI.so`（以及 `trace` 用的 `libnpiL1.so`）。需要 Verdi-Ultra license。 |
+| `RWAVE_WLF_LIB`    | 读 `.wlf` 时必需 | `libwlf.so` 的绝对路径。 |
+| `RWAVE_TRACE_EN`   | 用 `trace` 时必需 | 设成 `1` 打开实验性的 `trace` 命令，默认关闭。 |
+| `RWAVE_FSDB_LIB`   | 可选 | `libNPI.so` 的绝对路径。用来覆盖 `VERDI_HOME` 的自动查找，供目录结构不标准时使用。 |
+| `RWAVE_NPI_L1_LIB` | 可选 | `libnpiL1.so`（NPI 连接库，`trace` 用）的绝对路径。当它不在 `libNPI.so` 旁边时用来指定。 |
+| `RWAVE_PLUGIN_FSDB` | 可选 | 插件编译出的 `librwave_fsdb_backend.so` 的绝对路径，会覆盖内置的 FSDB 后端。 |
 
-For other formats or a custom backend implementation, rwave loads any shared
-library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see
-[docs/PLUGIN.md](docs/PLUGIN.md).
+对于其他格式，或者你自己实现的后端，rwave 会从 `$RWAVE_PLUGIN_<EXT>` 加载任何实
+现了它 C ABI 的共享库，详见 [docs/PLUGIN.md](docs/PLUGIN.md)。
 
-## Disclaimer
+## 免责声明
 
-RWaveAnalyzer reads WLF and FSDB only through each vendor's own reader library
-interface. It contains no vendor binaries and no vendor source code, links
-against none of them at build time, and redistributes no vendor software; at
-runtime it loads the reader library that you supply from your own licensed
-installation. The
-[rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) is
-likewise source-only and ships no vendor binaries — you compile it against your
-own Verdi installation. Reading these formats requires the vendor's software and,
-where applicable, a valid license on your machine; obtaining and using those
-under the vendor's terms is your responsibility.
+RWaveAnalyzer 读取 WLF 和 FSDB 时，只经过各厂商自己的 reader 库接口。它不包含任
+何厂商的二进制或源码，编译时不链接它们，也不分发任何厂商软件；运行时加载的
+reader 库，是你从自己已授权的安装里提供的。
+[rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) 同样
+是纯源码，不带任何厂商二进制，你用自己的 Verdi 安装来编译它。读取这些格式需要厂
+商的软件，需要的时候还得你机器上有有效的 license；按厂商条款获取和使用它们，是你
+自己的责任。
 
-## For AI agents
+## 面向 AI agent
 
-The repository ships an agent skill at [skill/SKILL.md](skill/SKILL.md): a
-decision tree that maps user intent to a command, a cheat sheet of the JSON
-fields, the condition grammar, the WLF/FSDB setup, and a handful of debugging
-workflows. Point your agent at it, and the `--json` output of every command does
-the rest.
+仓库里带了一个 agent skill，在 [skill/SKILL.md](skill/SKILL.md)：包含一棵从用户
+意图到命令的决策树、一份 JSON 字段速查、条件语法、WLF/FSDB 的配置，还有几个调试
+流程。把你的 agent 指向这个文件，剩下的就交给每条命令的 `--json` 输出。
 
-## Architecture
+## 架构
 
-The crate is layered top to bottom, and each layer depends only on the ones
-below it:
+crate 自上而下分层，每一层只依赖它下面的层：
 
 ```
-        cli            argument parsing only
+        cli            只做参数解析
          │
-      commands         per-command logic and presentation (text / JSON)
+      commands         每条命令的逻辑和呈现（文本 / JSON）
          │
-       model           format-neutral domain: signal table, replay, snapshots
+       model           与格式无关的领域层：信号表、replay、快照
          │
-      backend          WaveformBackend trait (the parser contract)
+      backend          WaveformBackend trait（解析器契约）
          │
-  wellen_backend       the only code that touches the wellen parser
+  wellen_backend       唯一接触 wellen 解析器的代码
 ```
 
-The decisive boundary is the **`WaveformBackend`** trait. A backend hands the
-model fully decoded, owned per-signal traces (parallel time and value arrays);
-the model owns all of the replay, merging, and snapshot logic and works purely
-over slices. Because the trait surface is coarse — there is no per-sample virtual
-call — the hot path stays monomorphic, and adding a parser means adding a single
-file under `backend/`. The vendor and plugin formats enter through that same
-boundary: a backend can come from a vtable compiled into the binary
-(`plugin/builtin/`) or from a `dlopen`ed library (`plugin/loader.rs`), and either
-one is driven through `plugin_backend.rs` and the C ABI in
-[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h).
+最关键的边界是 **`WaveformBackend`** 这个 trait。后端把每条信号完整解码好、各自
+持有的 trace（时间数组和值数组并排放）交给 model；replay、归并、快照这些逻辑全
+在 model 里，只跟切片打交道。因为这个 trait 的粒度很粗，没有逐个采样的虚调用，
+热路径就保持单态，所以增加一个解析器，只是往 `backend/` 下添加一个文件。厂商格式
+和插件格式也从同一条边界进来：后端既可以是编进二进制的 vtable（`plugin/builtin/`），
+也可以是 `dlopen` 进来的库（`plugin/loader.rs`），两者都通过 `plugin_backend.rs`
+以及 [`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h)
+里的 C ABI 来驱动。
 
-At the top level the repository is organized as follows:
+仓库顶层是这样组织的：
 
 ```
-crates/rwave/      the rwave crate (CLI, model, backends, plugin ABI)
-vendor/            vendored parser front-end: wellen + a patched fst-reader
-verify/            self-test harness with committed stimulus
-scripts/           release build and stimulus-generation scripts
-skill/             the agent-skill descriptor
-docs/              extended documentation (BUILD, PLUGIN)
-.github/workflows/ CI (ci.yml), release (release.yml), and benchmark (bench.yml)
+crates/rwave/      rwave crate（CLI、model、后端、插件 ABI）
+vendor/            vendor 进来的解析前端：wellen 加一个打过补丁的 fst-reader
+verify/            自测 harness，激励也提交进了仓库
+scripts/           release 构建和激励生成脚本
+skill/             agent-skill 描述文件
+docs/              扩展文档（BUILD、PLUGIN）
+.github/workflows/ CI（ci.yml）、release（release.yml）、benchmark（bench.yml）
 ```
 
-## Performance
+## 性能
 
-- **Replay** is a binary min-heap k-way merge over the selected signals' traces,
-  `O(n log k)` for `n` changes across `k` signals; ties within one timestamp
-  resolve to writer (declaration) order.
-- **Snapshots and `compare`** binary-search each signal for the last value at or
-  before the target time, with no full replay.
-- **Whole-file commands** — `summary`, and unfiltered `dump`/`snapshot`/`compare`
-  — decode signals in memory-bounded batches and release each batch as they go,
-  so peak memory is proportional to one batch rather than to the whole file.
-  `summary` computes its per-signal statistics directly from each trace in an
-  allocation-light loop, and `dump` keeps only the earliest `--limit` events in a
-  bounded heap.
+- **Replay** 是在所选信号的 trace 上做二叉最小堆的 k 路归并，k 条信号上共 n 次变
+  化时是 `O(n log k)`；同一时间戳内谁先谁后，由写入（声明）顺序决定。
+- **快照和 `compare`** 对每条信号做二分查找，定位目标时间点（或之前）的最后一个
+  值，不用完整 replay。
+- **处理整个文件的命令**（`summary`，以及不带过滤的
+  `dump`/`snapshot`/`compare`）把信号分批解码，每批内存有上限，处理完一批就释放
+  一批，所以峰值内存只和一批成正比，而不是整个文件。`summary` 在一个几乎不分配
+  内存的循环里，直接从每条 trace 计算出它的统计；`dump` 只在一个有上限的堆里保留
+  最早的 `--limit` 个事件。
 
-These streaming paths produce byte-identical output to the simple eager paths;
-the switch between them is purely a memory and throughput optimization keyed on
-how many signals were selected.
+这些流式路径的输出，和简单的一次性（eager）路径逐字节一致；用哪条只是根据所选信
+号数量所做的内存和吞吐优化，不影响结果。
 
-## Testing
+## 测试
 
 ```sh
-cargo test                  # unit tests: formatting, filters, conditions, CLI
-bash verify/run.sh          # smoke test plus VCD/FST parity on bundled stimulus
+cargo test                  # 单元测试：格式化、过滤、条件、CLI
+bash verify/run.sh          # 冒烟测试，外加在内置激励上比对 VCD/FST 是否一致
 ```
 
-`verify/run.sh` needs only the built binary: it confirms that every command runs
-on both a VCD and an FST, and that the value-bearing commands produce identical
-results across the two formats for the same design — a self-contained regression
-net that needs no external reference.
+`verify/run.sh` 只需要编译好的二进制：它验证每条命令在 VCD 和 FST 上都能运行，而
+且那些会给出具体值的命令，对同一个设计在两种格式上结果一致。这是一张自包含的回
+归网，不依赖任何外部参照。
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE), which covers rwave's own code. The vendored
-components keep their own licenses: `vendor/wellen` and `vendor/fst-reader` are
-both BSD-3-Clause, and each retains its license file in its own directory.
+MIT，见 [LICENSE](LICENSE)，覆盖 rwave 自己的代码。vendor 进来的组件各自保留自己
+的许可证：`vendor/wellen` 和 `vendor/fst-reader` 都是 BSD-3-Clause，各自的许可证
+文件保留在它们自己的目录里。
 
-Because rwave ships as a single statically linked binary, a downloaded release
-asset carries no repository around it — so the notices its dependencies require
-in a binary redistribution are collected in
-[third-party-licenses.md](third-party-licenses.md), which is published with every
-release. Regenerate it after a dependency change:
+因为 rwave 是以单个静态链接的二进制发布的，下载到的 release 文件周围没有仓库，
+所以它的依赖在二进制再分发时要求的那些声明，都汇总在
+[third-party-licenses.md](third-party-licenses.md) 里，随每次 release 一起发布。
+依赖变动之后，重新生成它：
 
 ```sh
 bash scripts/gen-licenses.sh

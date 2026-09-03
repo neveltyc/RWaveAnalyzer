@@ -11,10 +11,11 @@
 //! [`vtable`] (a direct call) rather than a `dlopen`ed `rwave_backend`
 //! export.
 //!
-//! `libNPI` itself is `dlopen`ed at runtime — via `$RWAVE_FSDB_LIB` (see
-//! [`fsdb_sys`]) — and `npi_init` needs a Verdi install + a Verdi-Ultra
-//! license at runtime; nothing Synopsys is linked or shipped in. An external
-//! FSDB plugin set via `$RWAVE_PLUGIN_FSDB` overrides this built-in.
+//! `libNPI` itself is `dlopen`ed at runtime — auto-discovered under
+//! `$VERDI_HOME`, or pointed at explicitly with `$RWAVE_FSDB_LIB` (see
+//! [`fsdb_sys`], [`verdi`]) — and `npi_init` needs a Verdi install + a
+//! Verdi-Ultra license at runtime; nothing Synopsys is linked or shipped in.
+//! An external FSDB plugin set via `$RWAVE_PLUGIN_FSDB` overrides this built-in.
 
 #![allow(clippy::missing_safety_doc)] // SAFETY notes are inline at each call
 
@@ -25,6 +26,7 @@ pub(crate) mod backend;
 mod design;
 mod fsdb_sys;
 mod npi_design_sys;
+mod verdi;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
@@ -66,8 +68,9 @@ static VTABLE: RwaveBackend = RwaveBackend {
 
 /// Resolve the built-in FSDB vtable, loading `libNPI` (and running
 /// `npi_init`) on first call. `Err` carries the vendor-library load
-/// diagnostic (e.g. `$RWAVE_FSDB_LIB` unset / missing) for the caller to
-/// surface verbatim; a missing Verdi license surfaces later at open.
+/// diagnostic (e.g. no `libNPI` under `$VERDI_HOME` and no `$RWAVE_FSDB_LIB`)
+/// for the caller to surface verbatim; a missing Verdi license or unset
+/// `VERDI_HOME` surfaces later at open.
 pub fn vtable() -> Result<&'static RwaveBackend, String> {
     fsdb_sys::ensure_loaded()?;
     Ok(&VTABLE)

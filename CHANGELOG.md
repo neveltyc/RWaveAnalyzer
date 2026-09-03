@@ -6,6 +6,22 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-03
+
+Reading FSDB now takes nothing but a Verdi install: point `VERDI_HOME` at it and
+`.fsdb` — and `trace` — just work, with no `LD_LIBRARY_PATH` and no
+`RWAVE_FSDB_LIB` to set.
+
+### Changed
+- **FSDB (NPI) libraries are auto-discovered from `$VERDI_HOME`.** With a Verdi
+  install pointed at by `VERDI_HOME`, `.fsdb` reading and `trace` need nothing
+  else — rwave locates `libNPI.so`/`libnpiL1.so` under it, and no
+  `LD_LIBRARY_PATH` is required (`libNPI` carries its own `RPATH`, and `npi_init`
+  finds the Verdi tree from `$VERDI_HOME`). `RWAVE_FSDB_LIB` / `RWAVE_NPI_L1_LIB`
+  stay as overrides for a non-standard layout.
+- README is now Chinese ([README.md](README.md)); the English version moves to
+  [README_en.md](README_en.md). The two are maintained together.
+
 ## [0.1.9] — 2026-08-24
 
 `trace` answers who drives a signal and what reads it — the one question a

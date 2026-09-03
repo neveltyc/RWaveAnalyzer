@@ -19,7 +19,9 @@ vcs -full64 -sverilog -kdb -debug_access+all -lca \
     "$VERDI_HOME/share/PLI/VCS/LINUX64/pli.a" \
     dut.sv -o simv
 ./simv                      # writes tb.fsdb
-export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
+# rwave finds libNPI.so under $VERDI_HOME on its own; set RWAVE_FSDB_LIB only to
+# override that (e.g. a non-standard layout):
+# export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"
 ```
 
 The PLI path is `linux64` on some releases and `LINUX64` on others.

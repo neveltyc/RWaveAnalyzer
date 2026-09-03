@@ -6,7 +6,7 @@
 //! Kept out of the `fsdb` module, which is gated to linux-x86_64 for its vendor
 //! dlopens. Nothing here touches FFI, so its tests run on every platform.
 //!
-//! The grammar, as emitted by Verdi V-2023.12 for
+//! The grammar, as emitted by Verdi for
 //! `npi_trace_{driver,load}_dump2`:
 //!
 //! ```text
@@ -190,7 +190,7 @@ pub fn parse_dump(text: &str) -> Vec<Hop> {
 mod tests {
     use super::*;
 
-    /// Verbatim output from Verdi V-2023.12-SP2 for
+    /// Verbatim output from Verdi for
     /// `npi_trace_driver_dump2("tb.u_core.u_alu.res", ...)`.
     const DRIVER_DUMP: &str = "\
 npiReg, tb.u_core.u_alu.res, {/p/dut.sv : 15} /* results of trace driver */
@@ -384,7 +384,7 @@ Need pass through
     /// and NPI reports that identical statement as both its driver and its
     /// load. Any verdict inferred from that overlap calls ordinary RTL
     /// testbench-driven; this is the shape that proved it, taken verbatim from
-    /// Verdi V-2023.12 output for `always_ff @(posedge clk) free_cnt <= free_cnt + 1;`.
+    /// Verdi output for `always_ff @(posedge clk) free_cnt <= free_cnt + 1;`.
     #[test]
     fn a_self_referential_counter_is_an_ordinary_resolved_driver() {
         let dump = "\

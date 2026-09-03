@@ -60,19 +60,20 @@ fn header_version(path: &str) -> Option<(u8, u8)> {
 
 /// What to say when `npi_fsdb_open` refuses a file.
 ///
-/// A Verdi older than the dump is a real and otherwise baffling cause: NPI
-/// prints its own `*WARN*` about it on stderr, but the version is worth
-/// stating outright rather than leaving among licence and environment guesses.
+/// The actionable cause is almost always the environment: `npi_init` locates
+/// the Verdi tree (and checks out the license) from `$VERDI_HOME`, so a missing
+/// or unlicensed `VERDI_HOME` makes every open return NULL. A Verdi older than
+/// the dump is a second, otherwise-baffling cause — NPI prints its own `*WARN*`
+/// on stderr — so when the header parses we state its version too.
 fn open_failure(path: &str) -> String {
+    let fix = "Set VERDI_HOME to a licensed Verdi install (npi_init locates its tree and \
+               license from it); RWAVE_FSDB_LIB only overrides which libNPI.so is loaded.";
     match header_version(path) {
         Some((major, minor)) => format!(
-            "cannot read {path} (FSDB version {major}.{minor}). Verdi must be at least as \
-             new as the file; otherwise check the Verdi-Ultra license and environment."
+            "cannot read {path} (FSDB version {major}.{minor}). If Verdi is older than the \
+             file it cannot read it; otherwise: {fix}"
         ),
-        None => format!(
-            "cannot read {path}. Check the Verdi-Ultra license, RWAVE_FSDB_LIB, and that \
-             the Verdi environment is sourced."
-        ),
+        None => format!("cannot read {path}. {fix}"),
     }
 }
 

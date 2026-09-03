@@ -69,8 +69,9 @@ supersedes the built-in NPI one.
 
 Each backend locates *its own* vendor library separately, at init: the
 built-in WLF reads `$RWAVE_WLF_LIB` (→ `libwlf.so`/`.dll`), the built-in FSDB
-reads `$RWAVE_FSDB_LIB` (→ `libNPI.so`). Those name the *vendor* `.so`;
-`RWAVE_PLUGIN_<EXT>` names the *rwave backend* `.so` — distinct layers.
+auto-discovers `libNPI.so` under `$VERDI_HOME` (or `$RWAVE_FSDB_LIB` overrides
+the path). Those point at the *vendor* `.so`; `RWAVE_PLUGIN_<EXT>` names the
+*rwave backend* `.so` — distinct layers.
 
 ## ABI v2
 
@@ -330,7 +331,7 @@ A plugin is conformant if:
 | Format | Kind | Vendor lib | Notes |
 |--------|------|-----------|-------|
 | `wlf`  | built-in | `libwlf.so` (`$RWAVE_WLF_LIB`) | Mentor/Questa; linux-amd64 |
-| `fsdb` | built-in | `libNPI.so` (`$RWAVE_FSDB_LIB`) | Synopsys Verdi NPI; needs a Verdi-Ultra license; linux-amd64 |
+| `fsdb` | built-in | `libNPI.so` (under `$VERDI_HOME`; `$RWAVE_FSDB_LIB` overrides) | Synopsys Verdi NPI; needs a Verdi-Ultra license; linux-amd64 |
 
 To register an external plugin, send a PR adding a row.
 

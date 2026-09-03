@@ -121,7 +121,7 @@ fn load_once() -> Result<LibNpiL1, String> {
         bridge_err(
             ERR_PREFIX,
             format!(
-                "cannot load {}: {e}. Set RWAVE_NPI_L1_LIB to Verdi's libnpiL1.so.",
+                "cannot load {}: {e}. Set VERDI_HOME, or RWAVE_NPI_L1_LIB to Verdi's libnpiL1.so.",
                 path.display()
             ),
         )
@@ -157,8 +157,8 @@ fn load_once() -> Result<LibNpiL1, String> {
     Ok(LibNpiL1 { _library: lib, trace_driver_dump, trace_load_dump })
 }
 
-/// `$RWAVE_NPI_L1_LIB`, else a sibling of the resolved `libNPI.so`, else the
-/// bare name for the dynamic loader to resolve.
+/// `$RWAVE_NPI_L1_LIB`, else a sibling of the resolved `libNPI.so`, else under
+/// `$VERDI_HOME`, else a sibling of this cdylib, else the bare name.
 fn locate_l1() -> PathBuf {
     if let Some(p) = std::env::var_os("RWAVE_NPI_L1_LIB") {
         return PathBuf::from(p);
@@ -170,6 +170,9 @@ fn locate_l1() -> PathBuf {
                 return sibling;
             }
         }
+    }
+    if let Some(p) = super::verdi::npi_l1_lib() {
+        return p;
     }
     if let Some(dir) = super::super::self_path::self_dir() {
         let sibling = dir.join(L1_FILENAME);

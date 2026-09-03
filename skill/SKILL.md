@@ -12,8 +12,8 @@ terminal. It natively reads **VCD**, **FST**, and **GHW** (prefer FST — typica
 reader library interface. Nine commands cover inspection, search, comparison,
 summary, hierarchy, and driver/load tracing. **Always pass `--json` from an
 agent.** This file covers
-what is unique to driving the tool from an agent — see the repo README for the
-full reference.
+what is unique to driving the tool from an agent — see [README_en.md](../README_en.md)
+for the full reference.
 
 ## Install
 
@@ -31,19 +31,16 @@ chmod +x ~/.local/bin/rwave
 
 ## Vendor formats — experimental (linux-amd64 only)
 
-On linux-amd64, rwave provides experimental support for Questa `.wlf` and
-Verdi `.fsdb` by calling into each vendor's own reader library interface.
-Point rwave at the library from the user's licensed installation via an
-env var, then query as usual:
+On linux-amd64, rwave reads Questa `.wlf` and Verdi `.fsdb` through each
+vendor's own reader library from the user's licensed installation:
 
 ```bash
-export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so          # for .wlf
-export RWAVE_FSDB_LIB="$VERDI_HOME/share/NPI/lib/linux64/libNPI.so"  # for .fsdb (needs a Verdi-Ultra license)
-# Also set LD_LIBRARY_PATH with the Verdi NPI, FsdbReader, and Qt5 lib dirs.
+export VERDI_HOME=/path/to/verdi                            # for .fsdb (needs a Verdi-Ultra license)
+export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so # for .wlf
 rwave --json info dump.fsdb
 ```
 
-If the env var is unset, the library/license is missing, or the build is not
+If the env is unset, the library/license is missing, or the build is not
 linux-amd64, `.wlf`/`.fsdb` fail with a one-line `Error:` — fall back to
 converting the dump to VCD or FST first.
 
@@ -105,7 +102,7 @@ or `changed(SIG)`.
 
 ## Command quick reference
 
-`<F>` is the input file. See the repo README for the full surface; the table
+`<F>` is the input file. See [README_en.md](../README_en.md) for the full surface; the table
 below is the agent-side cheat sheet of the JSON-form arguments and the
 fields you'll usually parse out.
 
@@ -342,5 +339,5 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
   you need decimal.
 
 For everything else (time syntax, filter syntax, value formatting, format
-quirks, the FST `parameter`-value drop, performance notes) see the repo README.
+quirks, the FST `parameter`-value drop, performance notes) see [README_en.md](../README_en.md).
 

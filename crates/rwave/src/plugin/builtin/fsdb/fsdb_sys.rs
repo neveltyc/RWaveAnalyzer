@@ -7,9 +7,10 @@
 //! determined by the function signatures and stable across Verdi releases.
 //!
 //! Resolution order for `libNPI.so`:
-//!   1. `$RWAVE_FSDB_LIB` (absolute path to libNPI.so)
-//!   2. sibling of this cdylib (located via dladdr — the self-contained bundle)
-//!   3. platform loader default (`LD_LIBRARY_PATH`, the sourced Verdi env)
+//!   1. `$RWAVE_FSDB_LIB` (absolute path to libNPI.so; an explicit override)
+//!   2. under `$VERDI_HOME` (`share/NPI/lib/<arch>/libNPI.so`; see [`super::verdi`])
+//!   3. sibling of this cdylib (located via dladdr — the self-contained bundle)
+//!   4. platform loader default (`LD_LIBRARY_PATH`, the sourced Verdi env)
 //!
 //! `npi_init` is called once per process at load. It checks out a
 //! Verdi-Ultra license and locates Verdi's resource dir from the
@@ -425,6 +426,9 @@ fn locate_npi() -> Result<PathBuf, String> {
             "RWAVE_FSDB_LIB={} does not exist",
             path.display()
         )));
+    }
+    if let Some(p) = super::verdi::npi_lib() {
+        return Ok(p);
     }
     if let Some(dir) = self_dir() {
         let direct = dir.join(NPI_FILENAME);
