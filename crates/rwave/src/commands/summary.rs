@@ -5,7 +5,7 @@
 //! unique values) over a window, grouped active/static/undefined.
 
 use crate::cli::Args;
-use crate::format::{fmt_time, fmt_val};
+use crate::format::{bits_have_unknown, fmt_time, fmt_val};
 use crate::json::{Json, Obj};
 use crate::model::{Sid, Wave};
 use super::common::*;
@@ -22,6 +22,9 @@ struct SummaryRow {
     first_at: Option<i64>,
     last_at: Option<i64>,
     unique: usize,
+    /// Any observed value (the window baseline or a change in it) had an
+    /// unknown bit. Emitted sparsely, so a clean row costs nothing.
+    unknown: bool,
     width: u32,
     type_str: &'static str,
 }
@@ -32,6 +35,7 @@ struct SummaryCounts {
     undefined: usize,
     active: usize,
     static_: usize,
+    unknown: usize,
 }
 
 fn summary_rows(
@@ -57,6 +61,7 @@ fn summary_rows(
         unique_count: usize,
         rise_count: Option<usize>,
         fall_count: Option<usize>,
+        unknown: bool,
     }
 
     let mut stats_list: Vec<Stats> = Vec::new();
@@ -104,6 +109,10 @@ fn summary_rows(
         // `prev` is a borrowed view of the previous value's bit string, used
         // only to detect clean 0->1 / 1->0 edges; non-bit values yield None.
         let mut prev: Option<&str> = base_pos.and_then(|p| bits_view(&tr.values[p]));
+        // "Has this signal carried an unknown bit?" — checked on the baseline
+        // and on every change until the first hit, so a signal stuck at `x`
+        // with no changes is still reported.
+        let mut unknown = prev.is_some_and(bits_have_unknown);
         if let Some(p) = base_pos {
             uniq.insert(uniq_key(&tr.values[p]));
         }
@@ -117,6 +126,9 @@ fn summary_rows(
                 _ => {}
             }
             changes += 1;
+            if !unknown {
+                unknown = cur.is_some_and(bits_have_unknown);
+            }
             if first_at.is_none() {
                 first_at = Some(tr.times[i]);
             }
@@ -147,6 +159,7 @@ fn summary_rows(
             unique_count,
             rise_count: Some(rise),
             fall_count: Some(fall),
+            unknown,
         });
     });
 
@@ -181,6 +194,7 @@ fn summary_rows(
             first_at: s.first_at,
             last_at: s.last_at,
             unique: s.unique_count,
+            unknown: s.unknown,
             width: info.width,
             type_str: info.type_str,
         });
@@ -191,12 +205,14 @@ fn summary_rows(
 
     let active = rows.iter().filter(|r| r.kind == "active").count();
     let static_ = rows.iter().filter(|r| r.kind == "static").count();
+    let unknown = rows.iter().filter(|r| r.unknown).count();
     let counts = SummaryCounts {
         selected: selected.len(),
         defined: rows.len(),
         undefined: undefined.len(),
         active,
         static_,
+        unknown,
     };
     (rows, undefined, counts)
 }
@@ -279,6 +295,7 @@ fn build_undef_rows(wave: &Wave, undef_sids: &[Sid]) -> Vec<SummaryRow> {
                 first_at: None,
                 last_at: None,
                 unique: 0,
+                unknown: false,
                 width: info.width,
                 type_str: info.type_str,
             }
@@ -351,6 +368,7 @@ pub(super) fn compute_summary(wave: &mut Wave, args: &Args) -> Result<Json, Stri
         .push("undefined", Json::Int(d.counts.undefined as i64))
         .push("active", Json::Int(d.counts.active as i64))
         .push("static", Json::Int(d.counts.static_ as i64))
+        .push("unknown", Json::Int(d.counts.unknown as i64))
         .push("shown", Json::Int(shown_n as i64))
         .push("truncated", Json::Bool(trunc));
     let obj = push_trunc_hint(obj, trunc, shown_n, d.ordered.len(), true, "rows")
@@ -377,13 +395,18 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
         "Selected: {}, Defined: {}, Undefined: {}",
         d.counts.selected, d.counts.defined, d.counts.undefined
     );
-    println!("Active: {}, Static: {}", d.counts.active, d.counts.static_);
+    println!(
+        "Active: {}, Static: {}, Unknown: {}",
+        d.counts.active, d.counts.static_, d.counts.unknown
+    );
     let mut current = "";
     for r in d.ordered.iter().take(shown_n) {
         if r.kind != current {
             current = r.kind;
             println!("\n{}", current.to_uppercase());
         }
+        // Text rows carry the same sparse marker as the JSON `unknown` field.
+        let mark = if r.unknown { " unknown" } else { "" };
         match r.kind {
             "active" => {
                 let edge = match r.rise_count {
@@ -392,7 +415,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                 };
                 if args.verbose {
                     println!(
-                        "  {} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}",
+                        "  {} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}{}",
                         ljust(&r.path, 45),
                         r.width,
                         r.type_str,
@@ -402,33 +425,37 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                         r.last,
                         r.first_at.map(|t| fmt_time(t, ts)).unwrap_or_else(|| "-".to_string()),
                         r.last_at.map(|t| fmt_time(t, ts)).unwrap_or_else(|| "-".to_string()),
-                        r.unique
+                        r.unique,
+                        mark
                     );
                 } else {
                     println!(
-                        "  {} chg={}{} init={} last={}",
+                        "  {} chg={}{} init={} last={}{}",
                         ljust(&r.path, 45),
                         r.changes,
                         edge,
                         r.init,
-                        r.last
+                        r.last,
+                        mark
                     );
                 }
             }
             "static" => {
                 if args.verbose {
                     println!(
-                        "  {} w={} {} value={}",
+                        "  {} w={} {} value={}{}",
                         ljust(&r.path, 45),
                         r.width,
                         r.type_str,
-                        r.value.as_deref().unwrap_or("")
+                        r.value.as_deref().unwrap_or(""),
+                        mark
                     );
                 } else {
                     println!(
-                        "  {} value={}",
+                        "  {} value={}{}",
                         ljust(&r.path, 45),
-                        r.value.as_deref().unwrap_or("")
+                        r.value.as_deref().unwrap_or(""),
+                        mark
                     );
                 }
             }
@@ -490,6 +517,9 @@ fn summary_row_json(r: &SummaryRow, verbose: bool, ts: f64) -> Json {
     }
     if r.unique > 0 {
         o = o.push("unique", Json::Int(r.unique as i64));
+    }
+    if r.unknown {
+        o = o.push("unknown", Json::Bool(true));
     }
     if verbose {
         o = o

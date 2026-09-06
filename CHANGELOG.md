@@ -6,6 +6,21 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+### Changed
+- **1-bit `x`/`z` print as `bx`/`bz`.** Buses already printed unknowns as
+  `b<bits>`; the 1-bit case was the one exception, which left `'x' in value` as
+  the only common test — and that matches every `0x` hex value. Now
+  `value.startswith('b')` is exactly "has an unknown bit", and no clean value
+  (`0`, `1`, `0x…`) starts with `b`. Clean values are unchanged. Migration:
+  replace `value in ('x', 'z')` with `value.startswith('b')`; `bx`/`bz` are
+  also accepted `--condition` targets, so output still pastes back in.
+
+### Added
+- `summary` rows carry `"unknown": true` when the signal had an x/z bit at any
+  point in the window (the baseline value counts, so a signal stuck at `x`
+  is reported); the key is absent otherwise. The top-level `unknown` count
+  gives the number of such rows. Text mode marks the same rows with `unknown`.
+
 ## [0.2.0] — 2026-09-03
 
 Reading FSDB now takes nothing but a Verdi install: point `VERDI_HOME` at it and

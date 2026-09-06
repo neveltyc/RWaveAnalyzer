@@ -165,7 +165,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `info`     | Timescale, signal and type counts, time span, and scopes — the file at a glance |
 | `list`     | Enumerate signals with path, width, and type (one row per alias path) |
 | `dump`     | Print every value change in a time window, in time order |
-| `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges |
+| `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges, whether it ever carried an unknown bit |
 | `snapshot` | All known signal values at one time point (`--at T`) |
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
@@ -242,9 +242,11 @@ Under `--json`, every command emits compact structured JSON. Each time is given
 both as a raw tick count (the `*_ticks` fields) and in human-readable form (the
 `*_h` fields), so the output is equally usable by a script, a CI gate, or an AI
 agent rather than only by a person reading the terminal. Signal values render
-compactly for the same reason: a 1-bit logic signal as `0`/`1`/`x`/`z`, a
-multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), a bus with
-unknown bits as `b<bits>` (e.g. `b01x0`), and real/string values verbatim. The
+compactly for the same reason: a clean 1-bit logic signal as `0`/`1`, a clean
+multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), any value
+with an unknown bit as `b<bits>` at full width (`bx`, `bz`, `b01x0`), and
+real/string values verbatim. The `b` prefix is the one test for "has unknown
+bits" — do not test for the letter `x`, every `0x` value contains it. The
 width is in each signal's metadata, so it is not re-encoded as hex padding.
 
 ```sh

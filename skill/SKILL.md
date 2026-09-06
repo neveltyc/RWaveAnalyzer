@@ -111,7 +111,7 @@ fields you'll usually parse out.
 | `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
 | `list` | `rwave --json list <F> [selection]` | `signals[].path`, `signals[].width`, `signals[].type` |
 | `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
-| `summary` | `rwave --json summary <F> [selection]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `active`, `static` |
+| `summary` | `rwave --json summary <F> [selection]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `rows[].unknown` (only when `true`), `active`, `static`, `unknown` |
 | `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
 | `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
 | `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
@@ -251,11 +251,15 @@ sub-interval, with `--show` capturing the field values you care about.
 ### Hunt an unexpected state
 
 ```
-1. search --condition "state=x"          when does it go unknown?
-2. search --condition "error!=0"         when does it assert?
-3. snapshot --at <first_hit>             full picture at that moment
-4. dump --begin <pre> --end <hit> --filter <relevant>
+1. summary --scope <block>               rows with unknown:true carried an x/z bit
+2. search --condition "state=x"          when does it go unknown?
+3. search --condition "error!=0"         when does it assert?
+4. snapshot --at <first_hit>             full picture at that moment
+5. dump --begin <pre> --end <hit> --filter <relevant>
 ```
+
+Step 1 is one call over the whole selection; the top-level `unknown` count
+says whether there is anything to chase before you read the rows.
 
 ### Orient in an unfamiliar hierarchy
 
@@ -332,11 +336,18 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
   identical to the reference; only intra-timestamp order can differ.
 - `comments` is always `[]` and `synthesized_buses` is always `0` 
 - A zero-width `search` window (`--begin T --end T`) yields no rows.
-- **Value format.** Multi-bit logic values print as `0x<hex>` (lower-case,
-  leading zeros stripped — `0x4`, not `0x00000004`); 1-bit as `0`/`1`/`x`/`z`;
-  a bus with any unknown bit as `b<bits>` (e.g. `b01x0`); real/string verbatim.
-  Width is in the signal metadata, not the value — convert hex→int yourself if
-  you need decimal.
+- **Value format.** Clean 1-bit: `0`/`1`. Clean multi-bit: `0x<hex>`
+  (lower-case, leading zeros stripped — `0x4`, not `0x00000004`). Any value with
+  an unknown bit, 1-bit included: `b<bits>` at full width (`bx`, `bz`, `b01x0`).
+  Real/string verbatim. Width is in the signal metadata, not the value.
+
+  ```python
+  is_unknown = value.startswith('b')    # 'bx', 'bz', 'b01x0'
+  n = int(value, 16)                    # '0', '1', '0x3' all parse directly
+  bits = value[1:]                      # unknown value: full-width bit string
+  ```
+
+  Never test `'x' in value` — every `0x` hex value contains an `x`.
 
 For everything else (time syntax, filter syntax, value formatting, format
 quirks, the FST `parameter`-value drop, performance notes) see [README_en.md](../README_en.md).

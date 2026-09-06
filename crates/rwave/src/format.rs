@@ -98,9 +98,13 @@ pub enum ValueKind {
 ///
 /// * `event`            -> `triggered`
 /// * `real`/`string`    -> the value verbatim
-/// * 1-bit logic        -> `0` / `1` / `x` / `z` (lower-cased)
+/// * 1-bit clean        -> `0` / `1`
 /// * multi-bit clean    -> `0x<hex>` (lower-case, leading zeros stripped)
-/// * multi-bit w/ x or z -> `b<bits>`
+/// * any unknown bit    -> `b<bits>` (full width; 1-bit `x`/`z` print `bx`/`bz`)
+///
+/// The `b` prefix is the one machine predicate for "has unknown bits": it is
+/// never the first character of a clean value, whereas `'x' in value` would
+/// match every `0x` hex value.
 ///
 /// `raw` for a logic vector is the MSB-first bit string from wellen
 /// (e.g. `"0010"`, possibly containing `x`/`z`). For real/string it is the
@@ -130,10 +134,6 @@ fn fmt_bits(raw: &str, width: u32) -> String {
         value
     };
 
-    if width == 1 {
-        return value;
-    }
-
     // Left-extend short vectors per IEEE Table 18-1: x extends x, z extends z,
     // otherwise 0.
     let value = if value.len() < width {
@@ -149,11 +149,18 @@ fn fmt_bits(raw: &str, width: u32) -> String {
         value
     };
 
+    // Unknown bits, at any width, carry the `b` prefix so a consumer has a
+    // single predicate (`value.startswith('b')`) — a bare 1-bit `x` would be
+    // the one exception and force substring tests, which `0x` then breaks.
     if value.contains('x') || value.contains('z') {
         let mut s = String::with_capacity(value.len() + 1);
         s.push('b');
         s.push_str(&value);
         return s;
+    }
+
+    if width == 1 {
+        return value;
     }
 
     // Clean binary -> `0x<hex>`, lower-case with leading zeros stripped. Hex is
@@ -194,6 +201,14 @@ fn normalize_bits(raw: &str) -> String {
             _ => 'x',
         })
         .collect()
+}
+
+/// Does a raw logic bit string carry any unknown bit? Mirrors
+/// [`normalize_bits`]: only `0`/`1` and the strength forms `h`/`l` are known;
+/// `x`, `z`, `u`, `w`, `-` and anything else count as unknown.
+pub fn bits_have_unknown(raw: &str) -> bool {
+    raw.bytes()
+        .any(|b| !matches!(b.to_ascii_lowercase(), b'0' | b'1' | b'h' | b'l'))
 }
 
 fn is_4state(s: &str) -> bool {
@@ -679,8 +694,25 @@ mod tests {
     fn one_bit() {
         assert_eq!(fmt_val("0", ValueKind::Bits, 1), "0");
         assert_eq!(fmt_val("1", ValueKind::Bits, 1), "1");
-        assert_eq!(fmt_val("x", ValueKind::Bits, 1), "x");
-        assert_eq!(fmt_val("z", ValueKind::Bits, 1), "z");
+        // 1-bit unknowns carry the same `b` prefix as buses, so `startswith('b')`
+        // is the one predicate for "has unknown bits".
+        assert_eq!(fmt_val("x", ValueKind::Bits, 1), "bx");
+        assert_eq!(fmt_val("z", ValueKind::Bits, 1), "bz");
+    }
+
+    #[test]
+    fn b_prefix_is_the_unknown_predicate() {
+        // No clean value starts with `b`; every value with an unknown bit does.
+        for (raw, w) in [("0", 1), ("1", 1), ("1011", 4), ("10110000", 8)] {
+            assert!(!fmt_val(raw, ValueKind::Bits, w).starts_with('b'), "{raw}");
+        }
+        for (raw, w) in [("x", 1), ("z", 1), ("u", 1), ("01x0", 4), ("zzzz", 4), ("1x", 8)] {
+            assert!(fmt_val(raw, ValueKind::Bits, w).starts_with('b'), "{raw}");
+        }
+        assert!(bits_have_unknown("01x0"));
+        assert!(bits_have_unknown("u"));
+        assert!(!bits_have_unknown("01hl"));
+        assert!(!bits_have_unknown(""));
     }
 
     #[test]
@@ -734,7 +766,7 @@ mod tests {
         // h -> 1, l -> 0
         assert_eq!(fmt_val("hl", ValueKind::Bits, 2), "0x2");
         // u -> x
-        assert_eq!(fmt_val("u", ValueKind::Bits, 1), "x");
+        assert_eq!(fmt_val("u", ValueKind::Bits, 1), "bx");
     }
 
     #[test]
