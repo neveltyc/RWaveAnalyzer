@@ -225,15 +225,20 @@ $RW --json tree "$HF" u_a 2>/dev/null \
   | grep -q '"roots":\["hier_deep.u_m0.u_a","hier_deep.u_m1.u_a"\]' \
   && ok || bad "tree JSON exposes roots as an array of paths"
 
-# trace is off unless RWAVE_TRACE_EN is set, and the refusal must be clean
-# (exit 1, explanatory text) rather than a partial answer.
-derr=$(RWAVE_TRACE_EN= $RW trace "$HF" hier_deep.u_m0.u_a.clk 2>&1); dcode=$?
-[[ "$dcode" -eq 1 ]] && ok || bad "trace off by default exits 1 (got $dcode)"
+# trace is on by default; RWAVE_TRACE_EN only turns it off. Either refusal must
+# be clean (exit 1, explanatory text) rather than a partial answer.
+derr=$(RWAVE_TRACE_EN=0 $RW trace "$HF" hier_deep.u_m0.u_a.clk 2>&1); dcode=$?
+[[ "$dcode" -eq 1 ]] && ok || bad "trace switched off exits 1 (got $dcode)"
 printf '%s' "$derr" | grep -q "RWAVE_TRACE_EN" \
   && ok || bad "the disabled refusal names the switch"
-# An empty value reads as "not given", as it does for every other option.
-printf '%s' "$(RWAVE_TRACE_EN='' $RW trace "$HF" clk 2>&1)" | grep -q "RWAVE_TRACE_EN" \
-  && ok || bad "an empty RWAVE_TRACE_EN does not enable trace"
+# With the variable unset, the command is available: the refusal that follows is
+# the backend's, not the switch's.
+printf '%s' "$($RW trace "$HF" clk 2>&1)" | grep -q "built-in Verdi NPI backend" \
+  && ok || bad "trace is on by default"
+# An empty value reads as "not given", as it does for every other option, so it
+# leaves trace on rather than turning it off.
+printf '%s' "$(RWAVE_TRACE_EN='' $RW trace "$HF" clk 2>&1)" | grep -q "built-in Verdi NPI backend" \
+  && ok || bad "an empty RWAVE_TRACE_EN leaves trace on"
 
 # Once enabled, trace still needs design connectivity, which no waveform-only
 # backend has.

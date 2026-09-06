@@ -502,10 +502,11 @@ fn a_clipped_result_says_so_in_both_output_modes() {
     assert!(json.contains("\"hint\":\"showing 2 of "), "{json}");
     assert!(json.contains("--limit"), "{json}");
 
-    // A complete result carries no hint at all.
+    // A complete result carries `hint: null` — present, because a key that
+    // comes and goes with the data is a key every caller has to guard.
     let json = ok_stdout(&vcd, &["list", "--json"]);
     assert!(json.contains("\"truncated\":false"), "{json}");
-    assert!(!json.contains("\"hint\""), "no hint when nothing was clipped: {json}");
+    assert!(json.contains("\"hint\":null"), "hint is null, not absent: {json}");
     let _ = std::fs::remove_file(&vcd);
 }
 

@@ -162,9 +162,9 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | 两个时刻（`--at T1,T2`）之间有哪些变化 |
 | `search`   | 找出条件成立的时间区间；配合 `changed(SIG)` 则找出成立的具体时刻 |
 | `tree`     | 浏览层级：某个 scope 的子节点，或 `--of SIGNAL` 的完整上级链 |
-| `trace`    | *(实验性，默认关闭)* 谁驱动了某个信号、它又驱动了谁，附带 `file:line`。只支持通过内置 Verdi NPI 后端打开的 FSDB；需要设 `RWAVE_TRACE_EN=1` |
+| `trace`    | 谁驱动了某个信号、它又驱动了谁，附带 `file:line`。只支持通过内置 Verdi NPI 后端打开的 FSDB。默认开启，`RWAVE_TRACE_EN=0` 可以关掉 |
 
-- **选择信号。** 除了 `info`、`tree`、`trace`，每条命令都支持四个
+- **选择信号。** 除了 `info`、`tree`、`trace`，每条命令都支持五个
   [信号选择](#选择信号)选项；`tree` 只支持 `--scope` 和 `--depth`。
 - **时间。** `dump`、`summary`、`search` 用 `--begin`/`--end` 指定时间窗；
   `snapshot`、`compare` 用 `--at` 指定时刻。时间带单位后缀 `fs`、`ps`、`ns`、
@@ -182,7 +182,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 
 ## 选择信号
 
-一份 dump 里的信号，往往比你某一个问题需要看的多得多。用下面四个选项来缩小
+一份 dump 里的信号，往往比你某一个问题需要看的多得多。用下面五个选项来缩小
 范围，它们会对每条信号路径依次生效，像一条流水线：
 
 | | |
@@ -191,6 +191,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `--depth N`      | 从这棵子树的根往下走多深（要配合 `--scope`） |
 | `--filter K1,K2` | 保留哪些名字 |
 | `--exclude K1,K2`| 去掉哪些，最后生效 |
+| `--exact`        | 让上面两个按整名匹配，而不是按子串 |
 
 ```sh
 # 只要这个模块，不包含子模块。
@@ -210,6 +211,28 @@ rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
 段层级，就加上一个点（`--filter 'u_dma.'`）。pattern 里没有 `*` 或 `?` 时按子串
 匹配，有的话就是锚定的 glob；`[` 和 `]` 当作普通字符，匹配不区分大小写，用逗号
 隔开的多个 pattern 之间是 OR 关系。
+
+**`--exact` 关掉子串匹配。** 子串匹配同时会命中所有以这个名字开头的信号，
+`DtsmTrainVal0Min` 会把 `DtsmTrainVal0Min_strobe` 一起带出来，而那条 strobe 通常
+不动，于是 `summary` 就把它报成 static，看上去像是要找的信号不动。加上 `--exact`，
+不带通配符的 pattern 就要求匹配整个名字。带 `*`/`?` 的 pattern 本来就是锚定的，
+`--exact` 对它没有影响。这个开关对 `--filter`、`--exclude`，以及 `search` 里
+`--condition`/`--show` 的名字解析同时生效。
+
+**总线要连范围一起写。** 「整个名字」指的是声明时的那个名字，而 vector 的名字是
+带范围后缀的，所以 `--filter state --exact` 在 `state[2:0]` 上匹配不到东西，得写
+`--filter 'state[2:0]' --exact`；或者干脆不加 `--exact`，让子串匹配去做。pattern
+里的 `[` 和 `]` 是普通字符，除了 shell 的引号之外不需要额外转义。
+
+**输出会说清楚匹配到了什么。** `dump`、`summary`、`snapshot`、`compare` 在数据行之前会打一行
+`Matched N signals: <路径列表>`（超过 10 条就只报数量），JSON 里对应 `matched`
+字段。一条信号在波形里有多个声明名字时，匹配到的名字和数据行上的规范名字会一并
+列出（`A -> B`），因为数据行只会写规范名字。
+
+```sh
+# 要这一条，不要同前缀的 strobe。
+rwave summary sim.fst --filter DtsmTrainVal0Min --exact
+```
 
 **`--scope`** 是逐段匹配的（`u_fifo` 绝不会命中 `u_fifo_ctrl`），选中一棵子树，
 连同它下面的所有内容；路径则按段对齐、从后往前匹配。**`--depth`** 从选中的
@@ -238,6 +261,17 @@ agent 和终端前的人都能用。信号值也是同样的考虑，尽量紧�
 rwave --json info sim.fst
 rwave --json search sim.fst --condition "state=5" --show data
 ```
+
+**形状只跟着调用走，不跟着数据走。** 同一条命令、同一组 flag，键集就是固定的：
+文档里列出的每个键都一定在，顺序也一定，没内容的写成 `null` / `0` / `[]` / `{}`，
+不会消失。所以判断一个键该用它的值，而不是判断它在不在。`--verbose` 会多加一组
+字段，但这是调用方自己传的，自己知道。
+
+出错时也是 JSON：写到 stderr，退出码非零，形如
+`{"command":"dump","ok":false,"error":"..."}`。stdout 只放结果，所以一个脚本
+两条路径共用同一套解析。
+
+完整的逐命令字段表见 [docs/JSON.md](docs/JSON.md)。
 
 ## 批处理模式
 
@@ -339,14 +373,16 @@ rwave info sim.fsdb
 这个插件是按 rwave 的后端 ABI 编译的，当前是 **v2**。rwave 要求版本完全一致，
 不一致就会报错并把两个版本号都列出来；遇到这种情况重新编译插件即可。
 
-### 追踪驱动和负载（实验性，默认关闭）
+### 追踪驱动和负载
 
 `trace` 回答两个问题：谁驱动了这条信号、谁又在读取它，并给出驱动语句的源码和
-`file:line`。它是唯一一条不只读波形的命令，所以要显式打开：没设 `RWAVE_TRACE_EN`
-时它会拒绝执行并给出说明。
+`file:line`。只要 `.fsdb` 是用内置的 Verdi NPI 后端打开的，它就直接可用；换成别
+的文件会明确报错并退出 1。
+
+它是唯一一条不只读波形的命令，要读展开后的设计库，而这会占用一个 license，所以
+原来那个开关保留下来当总闸：设 `RWAVE_TRACE_EN=0` 就彻底禁用。
 
 ```bash
-export RWAVE_TRACE_EN=1
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 ```
@@ -374,7 +410,7 @@ rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 |:--|:--|:--|
 | `VERDI_HOME`       | 读 `.fsdb` 时必需 | 你的 Verdi 安装目录。rwave 会在它下面自动找到 `libNPI.so`（以及 `trace` 用的 `libnpiL1.so`）。需要 Verdi-Ultra license。 |
 | `RWAVE_WLF_LIB`    | 读 `.wlf` 时必需 | `libwlf.so` 的绝对路径。 |
-| `RWAVE_TRACE_EN`   | 用 `trace` 时必需 | 设成 `1` 打开实验性的 `trace` 命令，默认关闭。 |
+| `RWAVE_TRACE_EN`   | 可选 | `trace` 默认开启；设成 `0` 就彻底禁用（它要读设计库，会占一个 license）。 |
 | `RWAVE_FSDB_LIB`   | 可选 | `libNPI.so` 的绝对路径。用来覆盖 `VERDI_HOME` 的自动查找，供目录结构不标准时使用。 |
 | `RWAVE_NPI_L1_LIB` | 可选 | `libnpiL1.so`（NPI 连接库，`trace` 用）的绝对路径。当它不在 `libNPI.so` 旁边时用来指定。 |
 | `RWAVE_PLUGIN_FSDB` | 可选 | 插件编译出的 `librwave_fsdb_backend.so` 的绝对路径，会覆盖内置的 FSDB 后端。 |

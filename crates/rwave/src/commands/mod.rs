@@ -6,6 +6,13 @@
 //! One module per subcommand (`info`, `list`, `dump`, `snapshot`, `compare`,
 //! `summary`, `search`, `tree`, `trace`); each owns its command's JSON shape
 //! and text layout.
+//!
+//! The JSON shape follows the invocation and never the data: for one command
+//! and one set of flags the key set is fixed and always present, carrying
+//! `null`/`0`/`[]`/`{}` when it has nothing to say, and the payload array has
+//! one name whatever the mode. A key that came and went with the data would be
+//! a key every caller had to guard. `docs/JSON.md` is the contract; the
+//! `compute_*` functions below are what has to keep it.
 //! Cross-command helpers (limit/clip math, selection, value formatting, the
 //! streaming threshold) live in [`common`]. The dispatch entry points route a
 //! parsed [`Args`]: `--json` goes through the `compute_*` functions, text
@@ -27,7 +34,7 @@ mod summary;
 mod trace;
 mod tree;
 
-use crate::cli::{Args, Command};
+use crate::cli::{cmd_name, Args, Command};
 use crate::json::Json;
 use crate::model::Wave;
 
@@ -77,6 +84,29 @@ pub fn render_text(wave: &mut Wave, args: &Args) -> Result<(), String> {
 /// `--json` path ([`run`]) and the batch runner both call it, so a batch
 /// `result` is byte-for-byte identical to the equivalent `rwave --json …`.
 pub fn compute(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+    Ok(with_command(&args.command, compute_body(wave, args)?))
+}
+
+/// Stamp `command` as the first member of a result object.
+///
+/// Done here rather than in each command module: the field is part of the
+/// output contract, and a contract nine call sites have to remember is one
+/// that eventually gets forgotten.
+fn with_command(command: &Command, value: Json) -> Json {
+    match value {
+        Json::Object(members) => {
+            let mut out = Vec::with_capacity(members.len() + 1);
+            out.push(("command".to_string(), Json::str(cmd_name(command))));
+            out.extend(members);
+            Json::Object(out)
+        }
+        // No command builds anything but an object; a future one that does
+        // keeps its own shape rather than being silently wrapped.
+        other => other,
+    }
+}
+
+fn compute_body(wave: &mut Wave, args: &Args) -> Result<Json, String> {
     match args.command {
         Command::Info => compute_info(wave, args),
         Command::List => compute_list(wave, args),

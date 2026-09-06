@@ -310,13 +310,17 @@ struct SummaryData {
     counts: SummaryCounts,
     t0: i64,
     t1: Option<i64>,
+    selected: Vec<Sid>,
+    matched: MatchReport,
 }
 
 fn summary_data(wave: &mut Wave, args: &Args) -> Result<SummaryData, String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let sel = match_selection(wave, args)?;
+    let selection = selection_of(args)?;
+    let sel = match_selection(wave, &selection);
     let selected = selected_sids(wave, &sel);
+    let matched = match_report(wave, &selection, &selected);
 
     // summary_rows loads traces in memory-bounded batches itself (the stats are
     // per-signal independent), so we do not eagerly load everything here.
@@ -337,6 +341,8 @@ fn summary_data(wave: &mut Wave, args: &Args) -> Result<SummaryData, String> {
         counts,
         t0,
         t1,
+        selected,
+        matched,
     })
 }
 
@@ -346,35 +352,60 @@ pub(super) fn compute_summary(wave: &mut Wave, args: &Args) -> Result<Json, Stri
     let limit = limit_of(args);
     let total = d.ordered.len();
     let (shown_n, trunc) = clip_len(total, limit);
-    let begin_h = fmt_time(d.t0, ts);
-    let end_h = d.t1.map(|t| fmt_time(t, ts));
 
     let mut row_arr = Vec::new();
     for r in d.ordered.iter().take(shown_n) {
         row_arr.push(summary_row_json(r, args.verbose, ts));
     }
-    let window = Obj::new()
-        .push("begin", Json::str(begin_h.clone()))
-        .push("end", opt_time(end_h.as_deref()))
-        .push("begin_ticks", Json::Int(d.t0))
-        .push("begin_h", Json::str(begin_h.clone()))
-        .push("end_ticks", Json::opt_int(d.t1))
-        .push("end_h", opt_time(end_h.as_deref()))
-        .build();
     let obj = Obj::new()
-        .push("window", window)
+        .push("window", window_json(d.t0, d.t1, ts))
+        .push("matched", d.matched.json())
         .push("selected", Json::Int(d.counts.selected as i64))
         .push("defined", Json::Int(d.counts.defined as i64))
         .push("undefined", Json::Int(d.counts.undefined as i64))
         .push("active", Json::Int(d.counts.active as i64))
         .push("static", Json::Int(d.counts.static_ as i64))
-        .push("unknown", Json::Int(d.counts.unknown as i64))
-        .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc));
-    let obj = push_trunc_hint(obj, trunc, shown_n, d.ordered.len(), true, "rows")
-        .push("rows", Json::Array(row_arr))
-        .build();
+        .push("unknown", Json::Int(d.counts.unknown as i64));
+    let obj = push_counts(obj, shown_n, total, true, trunc);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(trunc, shown_n, d.ordered.len(), true, "rows"));
+    hints.push_opt(d.matched.alias_note());
+    // A window past the end of the trace leaves every signal holding its last
+    // value, which reads as "everything is static" — the most misleading way
+    // this command can be wrong, so it says so.
+    hints.push_opt(stale_window_note(wave, &d, ts));
+    let obj = hints.attach(obj).push("rows", Json::Array(row_arr)).build();
     Ok(obj)
+}
+
+/// The sentence for a `summary` whose window caught no activity, when the
+/// reason is knowable. `None` when the window did catch something.
+fn stale_window_note(wave: &mut Wave, d: &SummaryData, ts: f64) -> Option<String> {
+    if d.counts.active > 0 {
+        return None;
+    }
+    if d.counts.selected == 0 && d.matched.selective {
+        return Some(SELECTION_EMPTY.to_string());
+    }
+    // Free, and the one worth saying: a window past the end leaves every signal
+    // holding its last value, which reads as "nothing here ever moves".
+    if let Some((_, mx)) = wave.time_range() {
+        if d.t0 > mx {
+            return Some(format!(
+                "the window begins at {}, after the last event at {}",
+                fmt_time(d.t0, ts),
+                fmt_time(mx, ts)
+            ));
+        }
+    }
+    // Rows with data, none of them active: "Active: 0, Static: N" above has
+    // already said it, and asking why would cost a second decode of the whole
+    // selection to reprint it. Only a result with nothing defined in it is
+    // worth that.
+    if d.counts.defined > 0 {
+        return None;
+    }
+    Some(empty_window_reason(wave, &d.selected, d.matched.selective, d.t0, ts))
 }
 
 pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
@@ -383,14 +414,14 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let limit = limit_of(args);
     let total = d.ordered.len();
     let (shown_n, trunc) = clip_len(total, limit);
-    let begin_h = fmt_time(d.t0, ts);
-    let end_h = d.t1.map(|t| fmt_time(t, ts));
 
-    println!(
-        "Window: {}..{}",
-        begin_h,
-        end_h.as_deref().unwrap_or("(end)")
-    );
+    println!("{}", window_line(d.t0, d.t1, ts));
+    if let Some(h) = d.matched.header() {
+        println!("{h}");
+    }
+    if let Some(note) = d.matched.alias_note() {
+        println!("Note: {note}");
+    }
     println!(
         "Selected: {}, Defined: {}, Undefined: {}",
         d.counts.selected, d.counts.defined, d.counts.undefined
@@ -399,6 +430,9 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
         "Active: {}, Static: {}, Unknown: {}",
         d.counts.active, d.counts.static_, d.counts.unknown
     );
+    if let Some(note) = stale_window_note(wave, &d, ts) {
+        println!("Note: {note}");
+    }
     let mut current = "";
     for r in d.ordered.iter().take(shown_n) {
         if r.kind != current {
@@ -506,21 +540,13 @@ fn summary_row_json(r: &SummaryRow, verbose: bool, ts: f64) -> Json {
         )
         .push("init", Json::str(r.init.clone()))
         .push("last", Json::str(r.last.clone()));
-    if let (Some(fa), Some(la)) = (r.first_at, r.last_at) {
-        o = o
-            .push("first_at_ticks", Json::Int(fa))
-            .push("first_at", Json::str(fmt_time(fa, ts)))
-            .push("first_at_h", Json::str(fmt_time(fa, ts)))
-            .push("last_at_ticks", Json::Int(la))
-            .push("last_at", Json::str(fmt_time(la, ts)))
-            .push("last_at_h", Json::str(fmt_time(la, ts)));
-    }
-    if r.unique > 0 {
-        o = o.push("unique", Json::Int(r.unique as i64));
-    }
-    if r.unknown {
-        o = o.push("unknown", Json::Bool(true));
-    }
+    // A static row has no first/last change and no unique-value count; it
+    // still carries the keys, as nulls and a zero.
+    o = push_opt_time(o, "first_at", r.first_at, ts);
+    o = push_opt_time(o, "last_at", r.last_at, ts);
+    o = o
+        .push("unique", Json::Int(r.unique as i64))
+        .push("unknown", Json::Bool(r.unknown));
     if verbose {
         o = o
             .push("width", Json::Int(r.width as i64))

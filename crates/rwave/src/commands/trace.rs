@@ -3,13 +3,14 @@
 
 //! `trace`: who drives a signal, and what reads it.
 //!
-//! Experimental, and only for an FSDB opened through the built-in Verdi NPI
-//! backend: connectivity comes from an elaborated design database, not from the
-//! waveform. See [`crate::backend::design`].
+//! Only for an FSDB opened through the built-in Verdi NPI backend: connectivity
+//! comes from an elaborated design database, not from the waveform. See
+//! [`crate::backend::design`].
 //!
-//! Off unless `$RWAVE_TRACE_EN` is set. rwave is a waveform tool; this is the
-//! one command that reads a second, vendor-specific input, so it is opted into
-//! rather than merely available.
+//! On by default. `$RWAVE_TRACE_EN=0` turns it off — the switch is kept because
+//! the command reads a second, vendor-specific input and checks out a licence
+//! to do it, which a site may want to forbid outright. Everywhere the backend
+//! is present the command is part of the tool.
 //!
 //! `--at T` annotates every endpoint with its value at T, from the waveform
 //! already open.
@@ -65,20 +66,36 @@ fn unsupported_message(wave: &Wave) -> String {
     s
 }
 
-/// Whether `trace` is switched on. Set and non-empty enables it; an empty value
-/// reads as "not given", as it does everywhere else in the CLI.
+/// Said when the environment switched `trace` off.
+const TRACE_DISABLED: &str = concat!(
+    "trace is switched off by RWAVE_TRACE_EN; unset it (or set it to 1) to ",
+    "re-enable. It answers only for an .fsdb opened through the built-in Verdi ",
+    "NPI backend.",
+);
+
+/// Whether `trace` is switched on. On unless `$RWAVE_TRACE_EN` explicitly says
+/// otherwise: `0`, `off`, `no` and `false` disable it, and an empty value reads
+/// as "not given", as it does everywhere else in the CLI.
+///
+/// The default flipped once the NPI backend became the ordinary way to open an
+/// FSDB: gating a command that works behind an environment variable nobody sets
+/// only hides it. The switch stays so a site that does not want the design
+/// library read — it costs a licence checkout — can still say so.
 fn enabled() -> bool {
-    std::env::var_os("RWAVE_TRACE_EN").is_some_and(|v| !v.is_empty())
+    match std::env::var("RWAVE_TRACE_EN") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "off" | "no" | "false")
+        }
+        Err(_) => true,
+    }
 }
 
 fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     // Before the arguments are even looked at: whether the command is available
     // does not depend on how it was spelled.
     if !enabled() {
-        return Err("trace is off by default; set RWAVE_TRACE_EN=1 to enable it. \
-                    It is experimental and answers only for an .fsdb opened through \
-                    the built-in Verdi NPI backend."
-            .to_string());
+        return Err(TRACE_DISABLED.to_string());
     }
     let target = args
         .target
@@ -201,18 +218,23 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
         .push("mode", Json::str("static"))
         .push("kdb", Json::str(d.kdb.clone()))
         .push("status", Json::str(d.status.tag()));
-    if let Some((ticks, human)) = &d.at {
-        o = o
-            .push("at_ticks", Json::Int(*ticks))
-            .push("at_h", Json::str(human.clone()))
-            .push("unresolved_in_wave", Json::Int(d.unresolved_in_wave as i64));
-    }
+    // Present whether or not `--at` was given; null says "no instant asked
+    // for" without the caller having to probe for the key.
     o = o
-        .push("total", Json::Int(d.total as i64))
-        .push("shown", Json::Int(d.shown as i64))
-        .push("truncated", Json::Bool(d.truncated));
+        .push("at_ticks", Json::opt_int(d.at.as_ref().map(|(t, _)| *t)))
+        .push("at_h", Json::opt_str(d.at.as_ref().map(|(_, h)| h.as_str())))
+        .push(
+            "unresolved_in_wave",
+            match &d.at {
+                Some(_) => Json::Int(d.unresolved_in_wave as i64),
+                None => Json::Null,
+            },
+        );
+    o = push_counts(o, d.shown, d.total, true, d.truncated);
     let noun = if d.dir == Direction::Driver { "drivers" } else { "loads" };
-    o = push_trunc_hint(o, d.truncated, d.shown, d.total, true, noun);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(d.truncated, d.shown, d.total, true, noun));
+    o = hints.attach(o);
 
     let rows: Vec<Json> = d
         .hops
@@ -248,7 +270,8 @@ pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String
                 .build()
         })
         .collect();
-    Ok(o.push(noun, Json::Array(rows)).build())
+    // One payload key for both directions; `dir` says which.
+    Ok(o.push("endpoints", Json::Array(rows)).build())
 }
 
 /// Map each wanted endpoint name to a sid. Built once per `--at` query, since

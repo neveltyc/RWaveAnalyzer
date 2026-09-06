@@ -260,36 +260,43 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TreeData, String> {
     })
 }
 
+/// Said when `tree` has no scopes to show: `--of` on a root-level signal, and
+/// a hierarchy the selection emptied or that was flat to begin with.
+const NO_ANCESTORS: &str = "the signal sits at the root, so it has no enclosing scopes";
+const NO_SCOPES: &str = concat!(
+    "no scope matched; the file's hierarchy may be flat, ",
+    "or --scope/--depth may have excluded everything",
+);
+
 pub(super) fn compute_tree(wave: &mut Wave, args: &Args) -> Result<Json, String> {
     let d = build(wave, args)?;
-    let mut o = Obj::new();
-    match &d.of {
-        Some(sig) => {
-            o = o
-                .push("mode", Json::str("chain"))
-                .push("signal", Json::str(sig.clone()));
-        }
-        None => {
-            // An array, not a display string: a pattern can legitimately match
-            // the same instance name in several places, and a consumer needs
-            // the paths rather than a count to act on.
-            o = o
-                .push("mode", Json::str("subtree"))
-                .push(
-                    "roots",
-                    Json::Array(d.roots.iter().map(|r| Json::str(r.clone())).collect()),
-                )
-                .push("depth", Json::Int(d.depth as i64));
-        }
+    // Both modes carry both key sets; the ones the mode does not fill are null
+    // or empty. `mode` says which half is meaningful, and a caller that reads
+    // it never has to test for a missing key.
+    //
+    // `roots` is an array, not a display string: a pattern can legitimately
+    // match the same instance name in several places, and a consumer needs the
+    // paths rather than a count to act on.
+    let chain = d.of.is_some();
+    let mut o = Obj::new()
+        .push("mode", Json::str(if chain { "chain" } else { "subtree" }))
+        .push("signal", Json::opt_str(d.of.as_deref()))
+        .push(
+            "roots",
+            Json::Array(d.roots.iter().map(|r| Json::str(r.clone())).collect()),
+        )
+        .push("depth", if chain { Json::Null } else { Json::Int(d.depth as i64) })
+        .push(
+            "root_signals",
+            if chain { Json::Null } else { Json::Int(d.root_signals as i64) },
+        );
+    o = push_counts(o, d.shown, d.total, true, d.truncated);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(d.truncated, d.shown, d.total, true, "scopes"));
+    if d.total == 0 {
+        hints.push(if d.of.is_some() { NO_ANCESTORS } else { NO_SCOPES });
     }
-    if d.of.is_none() {
-        o = o.push("root_signals", Json::Int(d.root_signals as i64));
-    }
-    o = o
-        .push("total", Json::Int(d.total as i64))
-        .push("shown", Json::Int(d.shown as i64))
-        .push("truncated", Json::Bool(d.truncated));
-    o = push_trunc_hint(o, d.truncated, d.shown, d.total, true, "scopes");
+    o = hints.attach(o);
     let rows: Vec<Json> = d
         .nodes
         .iter()
@@ -303,8 +310,9 @@ pub(super) fn compute_tree(wave: &mut Wave, args: &Args) -> Result<Json, String>
                 .build()
         })
         .collect();
-    let key = if d.of.is_some() { "chain" } else { "scopes" };
-    Ok(o.push(key, Json::Array(rows)).build())
+    // One payload key for both modes; `mode` says whether these are a subtree's
+    // children or an ancestor chain.
+    Ok(o.push("scopes", Json::Array(rows)).build())
 }
 
 pub(super) fn text_tree(wave: &mut Wave, args: &Args) -> Result<(), String> {

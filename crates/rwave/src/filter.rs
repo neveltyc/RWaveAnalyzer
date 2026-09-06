@@ -18,6 +18,11 @@
 //! where only `*` (any span) and `?` (one char) are special; every other
 //! character — notably `[` and `]` in bus ranges such as `data[7:0]` — is
 //! literal. This intentionally differs from shell `fnmatch`.
+//!
+//! [`MatchMode::Exact`] anchors the substring case too, so a pattern is
+//! required to be the whole haystack: `DtsmTrainVal0Min` then names that signal
+//! and not `DtsmTrainVal0Min_strobe`. A pattern that already carries a wildcard
+//! is anchored either way, so the mode does not change it.
 
 /// Hierarchy separators. Wellen normalizes VCD/FST/GHW paths to `.`; the
 /// built-in FSDB backend emits either `.` or `/`. Both a pattern's
@@ -37,6 +42,20 @@ impl std::fmt::Display for FilterParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// How a wildcard-free pattern matches its haystack.
+///
+/// `Substring` is the default and the historical behaviour; `Exact` is what
+/// `--exact` selects. Only the wildcard-free case differs — a glob is anchored
+/// under both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchMode {
+    /// The pattern must appear somewhere in the haystack.
+    #[default]
+    Substring,
+    /// The pattern must be the whole haystack.
+    Exact,
 }
 
 /// A single compiled pattern: which haystack it applies to, and how it matches.
@@ -83,8 +102,18 @@ pub struct Filters {
 
 impl Filters {
     /// Parse a list of raw pattern strings (already split on commas by the CLI
-    /// layer, or split here from a single comma-joined string).
+    /// layer, or split here from a single comma-joined string), matching by
+    /// substring.
     pub fn parse<S: AsRef<str>>(raw_patterns: &[S]) -> Result<Filters, FilterParseError> {
+        Filters::parse_mode(raw_patterns, MatchMode::Substring)
+    }
+
+    /// [`parse`](Self::parse) with the wildcard-free matching mode chosen by
+    /// the caller.
+    pub fn parse_mode<S: AsRef<str>>(
+        raw_patterns: &[S],
+        mode: MatchMode,
+    ) -> Result<Filters, FilterParseError> {
         let mut pats = Vec::new();
         for raw in raw_patterns {
             let pat = raw.as_ref().trim();
@@ -111,7 +140,10 @@ impl Filters {
             // paths, and a pattern like `top/u_dma/*` addresses a hierarchy just
             // as plainly as its dotted equivalent.
             let domain = if lower.contains(SEPARATORS) { Domain::Path } else { Domain::Leaf };
-            let kind = if lower.contains('*') || lower.contains('?') {
+            // Exact mode compiles even a wildcard-free pattern as a glob: a
+            // lone `Lit` token is anchored at both ends by `glob_match`, which
+            // is exactly string equality — no second matcher to keep in step.
+            let kind = if mode == MatchMode::Exact || lower.contains('*') || lower.contains('?') {
                 PatKind::Glob(compile_glob(&lower))
             } else {
                 PatKind::Substr(lower)
@@ -123,8 +155,13 @@ impl Filters {
 
     /// Parse from a single comma-joined string (e.g. the raw `--filter` value).
     pub fn parse_csv(value: &str) -> Result<Filters, FilterParseError> {
+        Filters::parse_csv_mode(value, MatchMode::Substring)
+    }
+
+    /// [`parse_csv`](Self::parse_csv) with an explicit matching mode.
+    pub fn parse_csv_mode(value: &str, mode: MatchMode) -> Result<Filters, FilterParseError> {
         let parts: Vec<&str> = value.split(',').collect();
-        Filters::parse(&parts)
+        Filters::parse_mode(&parts, mode)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -364,6 +401,51 @@ mod tests {
         assert!(f.matches_path_leaf(path, leaf));
         let f = Filters::parse_csv("u_dma").unwrap();
         assert!(!f.matches_path_leaf(path, leaf), "a scope name is not a leaf name");
+    }
+
+    /// The motivating case for `--exact`: a substring pattern also names every
+    /// signal that merely starts with it, and a strobe sharing the prefix is
+    /// exactly the sort of thing that comes back looking like the answer.
+    #[test]
+    fn exact_mode_requires_the_whole_leaf() {
+        let sub = Filters::parse_csv("DtsmTrainVal0Min").unwrap();
+        assert!(m(&sub, "tb.DtsmTrainVal0Min"));
+        assert!(m(&sub, "tb.DtsmTrainVal0Min_strobe"), "substring catches the strobe");
+
+        let exact = Filters::parse_csv_mode("DtsmTrainVal0Min", MatchMode::Exact).unwrap();
+        assert!(m(&exact, "tb.DtsmTrainVal0Min"));
+        assert!(!m(&exact, "tb.DtsmTrainVal0Min_strobe"));
+        assert!(!m(&exact, "tb.pre_DtsmTrainVal0Min"));
+    }
+
+    /// Exact mode picks the haystack the same way substring mode does: a
+    /// separator in the pattern still means "match the whole path".
+    #[test]
+    fn exact_mode_keeps_the_leaf_versus_path_split() {
+        let f = Filters::parse_csv_mode("tb.clk", MatchMode::Exact).unwrap();
+        assert!(f.matches_path_leaf("tb.clk", "clk"));
+        assert!(!f.matches_path_leaf("top.tb.clk", "clk"), "anchored, not a suffix");
+        let f = Filters::parse_csv_mode("clk", MatchMode::Exact).unwrap();
+        assert!(f.matches_path_leaf("top.tb.clk", "clk"), "bare name still means the leaf");
+    }
+
+    /// A pattern that already carries a wildcard is anchored either way, so
+    /// `--exact` leaves it alone rather than turning `*` into a literal.
+    #[test]
+    fn exact_mode_does_not_change_a_glob() {
+        for mode in [MatchMode::Substring, MatchMode::Exact] {
+            let f = Filters::parse_csv_mode("*_valid", mode).unwrap();
+            assert!(m(&f, "tb.a_valid"), "{mode:?}");
+            assert!(!m(&f, "tb.a_valid_q"), "{mode:?}");
+        }
+    }
+
+    /// Exactness is about anchoring, not about case: every other pattern in the
+    /// tool folds case, and one that did not would be a trap of its own.
+    #[test]
+    fn exact_mode_is_still_case_insensitive() {
+        let f = Filters::parse_csv_mode("CLK", MatchMode::Exact).unwrap();
+        assert!(m(&f, "tb.clk"));
     }
 
     #[test]

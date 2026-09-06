@@ -8,6 +8,7 @@
 
 use std::io::Write;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 fn rwave() -> &'static str {
     env!("CARGO_BIN_EXE_rwave")
@@ -41,12 +42,26 @@ z!
 x$
 ";
 
-fn vcd() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rwave_unknown_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("unknown.vcd");
-    std::fs::File::create(&path).unwrap().write_all(VCD.as_bytes()).unwrap();
-    path
+/// The fixture, written exactly once per test binary.
+///
+/// Every test here reads the same path, and they run concurrently as threads
+/// of one binary. Rewriting it per call raced: `File::create` truncates before
+/// `write_all` fills it, so another test's `rwave` could open the file inside
+/// that window and be handed zero bytes — "unknown file format", intermittently
+/// and only under CI's timing. `OnceLock` makes the write happen before any
+/// reader has the path, and the rename means the path never names a partial
+/// file even if a previous run left the directory behind.
+fn vcd() -> &'static std::path::Path {
+    static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("rwave_unknown_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("unknown.vcd.part");
+        std::fs::File::create(&tmp).unwrap().write_all(VCD.as_bytes()).unwrap();
+        let path = dir.join("unknown.vcd");
+        std::fs::rename(&tmp, &path).unwrap();
+        path
+    })
 }
 
 fn run(args: &[&str]) -> Output {
@@ -126,10 +141,11 @@ fn summary_flags_signals_that_carried_an_unknown() {
         rest[..rest.find('}').unwrap()].to_string()
     };
     for name in ["a", "bus", "late"] {
-        assert!(row(name).ends_with("\"unknown\":true"), "{}", row(name));
+        assert!(row(name).contains("\"unknown\":true"), "{}", row(name));
     }
-    // Sparse: a clean row has no `unknown` key at all.
-    assert!(!row("clean").contains("unknown"), "{}", row("clean"));
+    // Every row carries the key; a clean one carries it as false. The flag has
+    // to be read, not merely looked for.
+    assert!(row("clean").contains("\"unknown\":false"), "{}", row("clean"));
 }
 
 #[test]

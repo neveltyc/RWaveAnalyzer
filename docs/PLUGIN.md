@@ -200,7 +200,7 @@ affect leaf names, which are never obtained by splitting.
 
 ### Threading
 
-ABI v1 is single-threaded with respect to any one `RwaveSession*`.
+The ABI is single-threaded with respect to any one `RwaveSession*`.
 rwave will not call concurrently into the same backend. Plugins may
 use threads internally as long as their exported functions present a
 synchronous interface.

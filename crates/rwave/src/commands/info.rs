@@ -103,13 +103,10 @@ pub(super) fn compute_info(wave: &mut Wave, _args: &Args) -> Result<Json, String
         .push("reference_count", Json::Int(d.reference_count as i64))
         .push("synthesized_buses", Json::Int(0))
         .push("var_types", Json::Object(var_types))
-        .push("time_min", opt_time(d.time_min_h.as_deref()))
         .push("time_min_ticks", Json::opt_int(d.t_min))
         .push("time_min_h", opt_time(d.time_min_h.as_deref()))
-        .push("time_max", opt_time(d.time_max_h.as_deref()))
         .push("time_max_ticks", Json::opt_int(d.t_max))
         .push("time_max_h", opt_time(d.time_max_h.as_deref()))
-        .push("duration", opt_time(d.duration_h.as_deref()))
         .push("duration_ticks", Json::opt_int(d.duration))
         .push("duration_h", opt_time(d.duration_h.as_deref()))
         .push(

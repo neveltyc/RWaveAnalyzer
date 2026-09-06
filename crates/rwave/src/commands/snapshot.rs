@@ -10,6 +10,11 @@ use crate::json::{Json, Obj};
 use crate::model::{Sid, Wave};
 use super::common::*;
 
+/// Tail of the "nothing known here" sentence.
+const NO_KNOWN_VALUE: &str =
+    "every selected signal's first recorded sample is later, or it was never dumped";
+
+
 /// One `snapshot` display row.
 struct SnapRow {
     path: String,
@@ -27,14 +32,17 @@ struct SnapData {
     known_count: usize,
     undef_len: usize,
     t_at: i64,
+    matched: MatchReport,
 }
 
 fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let t_at = parse_time(at_raw, ts).map_err(|e: TimeParseError| e.0)?;
-    let sel = match_selection(wave, args)?;
+    let selection = selection_of(args)?;
+    let sel = match_selection(wave, &selection);
     let selected = selected_sids(wave, &sel);
+    let matched = match_report(wave, &selection, &selected);
 
     // Large/unfiltered selections decode in batches to bound memory; small
     // selections load eagerly (cheaper, identical result). A backend that can
@@ -95,6 +103,7 @@ fn snapshot_data(wave: &mut Wave, args: &Args) -> Result<SnapData, String> {
         known_count,
         undef_len: undef.len(),
         t_at,
+        matched,
     })
 }
 
@@ -107,12 +116,17 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
 
     let mut sig_arr = Vec::new();
     for r in d.rows.iter().take(shown_n) {
-        let mut o = Obj::new().push("path", Json::str(r.path.clone()));
-        if r.undefined {
-            o = o.push("value", Json::Null).push("undefined", Json::Bool(true));
-        } else {
-            o = o.push("value", Json::str(r.value.clone().unwrap_or_default()));
-        }
+        // `undefined` on every row, not only the undefined ones.
+        let mut o = Obj::new()
+            .push("path", Json::str(r.path.clone()))
+            .push(
+                "value",
+                match &r.value {
+                    Some(v) if !r.undefined => Json::str(v.clone()),
+                    _ => Json::Null,
+                },
+            )
+            .push("undefined", Json::Bool(r.undefined));
         if args.verbose {
             o = o
                 .push("width", Json::Int(r.width as i64))
@@ -120,21 +134,26 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
         }
         sig_arr.push(o.build());
     }
-    let at_h = fmt_time(d.t_at, ts);
-    let obj = Obj::new()
-        .push("at", Json::str(at_h.clone()))
-        .push("at_ticks", Json::Int(d.t_at))
-        .push("at_h", Json::str(at_h))
+    let obj = push_time(Obj::new(), "at", d.t_at, ts)
+        .push("matched", d.matched.json())
         .push("selected", Json::Int(d.selected_len as i64))
         .push("known", Json::Int(d.known_count as i64))
-        .push("undefined", Json::Int(d.undef_len as i64))
-        .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc));
+        .push("undefined", Json::Int(d.undef_len as i64));
+    let obj = push_counts(obj, shown_n, total, true, trunc);
+    let mut hints = Hints::new();
     // `total`, not `known_count`: under --verbose the rows also carry the
     // undefined signals, so the known count is not what was clipped.
-    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "signals")
-        .push("signals", Json::Array(sig_arr))
-        .build();
+    hints.push_opt(trunc_hint(trunc, shown_n, total, true, "signals"));
+    hints.push_opt(d.matched.alias_note());
+    if d.selected_len == 0 {
+        hints.push(if d.matched.selective { SELECTION_EMPTY } else { NO_SIGNALS });
+    } else if d.known_count == 0 {
+        hints.push(format!(
+            "no signal has a known value at {}: {NO_KNOWN_VALUE}",
+            fmt_time(d.t_at, ts)
+        ));
+    }
+    let obj = hints.attach(obj).push("signals", Json::Array(sig_arr)).build();
     Ok(obj)
 }
 
@@ -149,6 +168,12 @@ pub(super) fn text_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> 
         println!("No known values at {}.", fmt_time(d.t_at, ts));
     } else {
         println!("Known snapshot @ {}", fmt_time(d.t_at, ts));
+    }
+    if let Some(h) = d.matched.header() {
+        println!("{h}");
+    }
+    if let Some(note) = d.matched.alias_note() {
+        println!("Note: {note}");
     }
     if args.verbose {
         println!(

@@ -41,7 +41,8 @@ rwave --json info dump.fsdb
 ```
 
 If the env is unset, the library/license is missing, or the build is not
-linux-amd64, `.wlf`/`.fsdb` fail with a one-line `Error:` — fall back to
+linux-amd64, `.wlf`/`.fsdb` fail with a non-zero exit and an explanation on
+stderr — JSON under `--json`, a one-line `Error:` without it. Fall back to
 converting the dump to VCD or FST first.
 
 ## Pick the right command
@@ -68,12 +69,11 @@ User wants to know...
 ├─ "Where am I?" / "What's under tb.dut?"
 │   └─ tree           hierarchy; --of SIGNAL gives its full ancestor chain
 └─ "Who drives this signal?" / "What reads it?"
-    └─ trace          drivers/loads with file:line; FSDB + built-in NPI only,
-                      and off unless RWAVE_TRACE_EN=1
+    └─ trace          drivers/loads with file:line; FSDB + built-in NPI only
 ```
 
-`search`'s JSON top-level key depends on the mode: `intervals` /
-`segments` / `events`. Always check `mode` before parsing.
+All three `search` modes answer under `rows`; read `mode` to know how to read a
+row (`event` rows have `end_ticks: null`).
 
 ## Condition syntax (search only)
 
@@ -109,19 +109,21 @@ fields you'll usually parse out.
 | Command | Common invocation | Useful JSON fields |
 |---|---|---|
 | `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
-| `list` | `rwave --json list <F> [selection]` | `signals[].path`, `signals[].width`, `signals[].type` |
-| `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `events[].time_ticks`, `events[].time_h`, `events[].path`, `events[].value` |
-| `summary` | `rwave --json summary <F> [selection]` | `rows[].path`, `rows[].kind`, `rows[].changes`, `rows[].rise_count`/`fall_count`, `rows[].init`, `rows[].last`, `rows[].unknown` (only when `true`), `active`, `static`, `unknown` |
-| `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `signals[].path`, `signals[].value`, `at_ticks`, `at_h`, `known`, `undefined` |
-| `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `diffs[].path`, `diffs[].at_t1`, `diffs[].at_t2`, `time1_ticks`, `time1_h`, `time2_ticks`, `time2_h` |
-| `search` | see decision tree above | `mode`, then one of `intervals[]` / `segments[]` / `events[]` |
-| `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `roots[]`, `root_signals`, `scopes[]`/`chain[]` with `.path`, `.name`, `.level`, `.signals`, `.children` |
-| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `drivers[]`/`loads[]` with `.kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
+| `list` | `rwave --json list <F> [selection]` | `signals[].path`, `.width`, `.type` |
+| `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `window{}`, `matched`, `events[].time_ticks`, `.time_h`, `.path`, `.value` |
+| `summary` | `rwave --json summary <F> [selection]` | `window{}`, `matched`, `active`, `static`, `unknown`, `rows[].path`, `.kind`, `.changes`, `.rise_count`/`.fall_count`, `.init`, `.last`, `.unknown` |
+| `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `at_ticks`, `at_h`, `known`, `undefined`, `signals[].path`, `.value`, `.undefined` |
+| `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `t1_ticks`, `t1_h`, `t2_ticks`, `t2_h`, `unchanged`, `diffs[].path`, `.at_t1`, `.at_t2` |
+| `search` | see decision tree above | `mode`, `window{}`, `rows[].begin_ticks`, `.end_ticks`, `.values{}` |
+| `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `signal`, `roots[]`, `root_signals`, `scopes[].path`, `.name`, `.level`, `.signals`, `.children` |
+| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `dir`, `endpoints[].kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
 
-`tree` works on every format. `trace` is off unless `RWAVE_TRACE_EN=1` is set in
-the environment, and even then works only on `.fsdb` via the built-in NPI
-backend; elsewhere it exits 1. Both are capability limits, not transient
-failures, so do not retry either on another file format.
+Every result also carries `command`, `shown`, `truncated`, `total`,
+`total_is_exact` and `hint`. Full field reference: `docs/JSON.md`.
+
+`tree` works on every format. `trace` works only on `.fsdb` via the built-in NPI
+backend and exits 1 elsewhere — a capability limit, not a transient failure, so
+do not retry it on another file format.
 
 `trace` rules:
 
@@ -140,9 +142,10 @@ For `snapshot` and `compare` on large files, **always pass a selection** — unf
 
 ## Selecting signals
 
-Four options, applied to each signal path in turn. They work on every command
-except `info` — `list`, `dump`, `summary`, `snapshot`, `compare`, and `search`
-(the last narrows name resolution rather than rows, see below) — and all work
+Five options, applied to each signal path in turn. They work on every command
+except `info` and `trace` — `list`, `dump`, `summary`, `snapshot`, `compare`,
+and `search` (the last narrows name resolution rather than rows, see below);
+`tree` takes `--scope`/`--depth` only — and all work
 as `--batch` defaults. `info` describes the file and ignores them.
 
 | | |
@@ -151,6 +154,7 @@ as `--batch` defaults. `info` describes the file and ignores them.
 | `--depth N` | at most N levels below the `--scope` root; a signal directly in it is depth 1. Requires `--scope` |
 | `--filter K1,K2` | keep matching signals |
 | `--exclude K1,K2` | drop matching signals; applied last |
+| `--exact` | make a wildcard-free `--filter`/`--exclude` pattern match the whole name, not a substring |
 
 **A pattern with no separator matches the leaf name; one containing a `.` or
 `/` matches the whole path.** This is the rule to internalize. RTL names scopes after signals —
@@ -166,8 +170,14 @@ value is a segment-aligned suffix, so `u_tx.u_fifo` finds that subtree without
 you knowing the path from the root.
 
 If `list --filter X` returns far more rows than expected, **do not just raise
-`--limit`** — narrow structurally with `--scope`/`--depth`, or subtract with
-`--exclude`.
+`--limit`** — narrow structurally with `--scope`/`--depth`, subtract with
+`--exclude`, or pin the name with `--exact`.
+
+`--filter NAME` without `--exact` also matches `NAME_strobe`, `NAME_q`, and any
+other signal containing it. Use `--exact` whenever you mean one named signal —
+but a vector's name includes its range, so it is `--filter 'state[2:0]' --exact`,
+never `--filter state --exact`, which matches nothing. `--exact` narrows
+`search`'s `--condition`/`--show` names the same way.
 
 Selection is per path: a signal is kept when any one of its paths clears every
 option, so excluding a synchronizer never costs you the status bit wired into
@@ -273,7 +283,7 @@ says whether there is anything to chase before you read the rows.
 can paste straight into `--scope`. `--depth` counts scopes here, where `list`
 counts signals.
 
-### "Why does this signal have that value?" (FSDB + NPI only, RWAVE_TRACE_EN=1)
+### "Why does this signal have that value?" (FSDB + NPI only)
 
 ```
 1. snapshot --at T --filter <signal>     confirm the value
@@ -282,7 +292,7 @@ counts signals.
 4. trace <signal> --load                 or go the other way: who reads it
 ```
 
-Each `drivers[]` entry carries `statement`, `file`, `line`, and the `signals[]`
+Each `endpoints[]` entry carries `statement`, `file`, `line`, and the `signals[]`
 it reads; with `--at` those come with their values, so one call answers both
 "who drives it" and "what was it carrying". Follow a `signals[].path` into the
 next `trace` to walk the cone. Stop when `status` is `boundary_only`, which
@@ -318,11 +328,33 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
   with `--limit 0` (unlimited) or a larger value. `total_is_exact: false`
   means `total` is a lower bound, not the true count. Never treat a
   truncated result as the whole answer.
-- **`search` mode discriminator.** The output's top-level array key
-  depends on the mode (`intervals` / `segments` / `events`). Always read
-  the `mode` field first.
-- **Exit code is non-zero on errors.** Errors are a single line on stderr
-  starting with `Error:`. Catch and parse them.
+- **Fixed JSON shape.** For a given command and flags, every documented key
+  is always present — `null`/`0`/`[]`/`{}` when it has nothing to say. Test a
+  key's *value*, never its presence. `search` answers under `rows` in all
+  three modes; read `mode` to know how to read a row.
+- **Errors are JSON too.** With `--json` a failure is
+  `{"command":…,"ok":false,"error":…}` on stderr with a non-zero exit code.
+  stdout carries results only, so one parser covers both.
+- **Check `matched` before reading rows.** `dump`, `summary`, `snapshot` and
+  `compare` carry `matched: {count, paths}` whenever a selection option was given
+  (`paths` stops at 10; `count` is exact). `count` larger than intended
+  means the pattern over-matched — re-run with `--exact`, not with a
+  bigger `--limit`. Absent when no selection option was passed.
+- **Rows carry the canonical path.** A signal declared under several names
+  is always labelled with one of them. When the matched name differs, the
+  `hint` says so; do not assume the row path is the string you searched for.
+- **An empty result says why.** `shown: 0` comes with a `hint` naming the
+  cause: the selection matched nothing, the window starts after the last
+  event, or the signals simply did not change. Read it instead of guessing.
+- **`dump`/`summary` echo `window`.** `begin_ticks`/`end_ticks` are the
+  resolved window; a fractional time rounds to a tick and shows up there.
+  `snapshot` echoes `at_ticks` the same way.
+- **A flag the command does not read is an error.** `list --begin 1ns`,
+  `dump --at 1ns`, `info --filter clk` all exit 2. `--begin`/`--end` are
+  `dump`/`summary`/`search`; `--at` is `snapshot`/`compare`/`trace`.
+- **Exit code is non-zero on errors.** 2 for a usage error, 1 for a runtime
+  one. Without `--json` the message is one line on stderr starting with
+  `Error:`.
 - **`--json` everywhere.** Mixing text-mode parsing in is the most common
   source of fragility. Pass `--json` on every invocation.
 - **Shell quoting.** Double-quote conditions (`--condition "changed(req),ready=0"`

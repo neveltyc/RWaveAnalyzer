@@ -23,7 +23,7 @@
 //!
 //! Gates are ANDed and `--exclude` is applied last, so it always wins.
 
-use crate::filter::{compile_glob, glob_match, Filters, GlobTok, SEPARATORS};
+use crate::filter::{compile_glob, glob_match, Filters, GlobTok, MatchMode, SEPARATORS};
 use crate::filter::{MAX_FILTER_PATTERN_LEN, MAX_FILTER_WILDCARDS};
 use crate::model::{leaf_of, SignalInfo};
 
@@ -109,10 +109,25 @@ impl Selection {
         filter: &Option<String>,
         exclude: &Option<String>,
     ) -> Result<Selection, String> {
+        Selection::parse_mode(scope, depth, filter, exclude, MatchMode::Substring)
+    }
+
+    /// [`parse`](Self::parse) with the `--filter` / `--exclude` matching mode
+    /// chosen by the caller (`--exact` picks [`MatchMode::Exact`]). The mode
+    /// applies to both pattern gates: a run that asks for exact names wants
+    /// them on the side that drops rows too, or `--exclude` would keep quietly
+    /// removing more than it names.
+    pub fn parse_mode(
+        scope: &Option<String>,
+        depth: Option<i64>,
+        filter: &Option<String>,
+        exclude: &Option<String>,
+        mode: MatchMode,
+    ) -> Result<Selection, String> {
         let compile = |raw: &Option<String>| -> Result<Option<Filters>, String> {
             match raw {
                 Some(r) => {
-                    let f = Filters::parse_csv(r).map_err(|e| e.0)?;
+                    let f = Filters::parse_csv_mode(r, mode).map_err(|e| e.0)?;
                     Ok(if f.is_empty() { None } else { Some(f) })
                 }
                 None => Ok(None),
@@ -284,6 +299,20 @@ impl Selection {
         info.alias_pairs().any(|(p, sc)| self.keeps_alias(p, sc))
     }
 
+    /// The alias path that actually cleared the gates, or `None` when the
+    /// signal is not selected.
+    ///
+    /// [`keeps_signal`](Self::keeps_signal) answers *whether*; this answers
+    /// *through which name*. Output rows are labelled with the signal's
+    /// canonical path, so on a waveform where one signal is declared under
+    /// several names the two can differ — and reporting only the canonical one
+    /// answers a question the user did not ask.
+    pub fn matched_alias<'a>(&self, info: &'a SignalInfo) -> Option<&'a str> {
+        info.alias_pairs()
+            .find(|(p, sc)| self.keeps_alias(p, sc))
+            .map(|(p, _)| p)
+    }
+
     /// As [`keeps_signal`](Self::keeps_signal), with `pat` as one more term on
     /// the *same* alias. Used to resolve a `search` name inside the current
     /// selection: the path that matches the name must itself be a path the
@@ -309,6 +338,17 @@ mod tests {
             depth,
             &f.map(str::to_string),
             &x.map(str::to_string),
+        )
+        .expect("options compile")
+    }
+
+    fn sel_exact(f: Option<&str>, x: Option<&str>) -> Selection {
+        Selection::parse_mode(
+            &None,
+            None,
+            &f.map(str::to_string),
+            &x.map(str::to_string),
+            MatchMode::Exact,
         )
         .expect("options compile")
     }
@@ -590,5 +630,42 @@ mod tests {
             !s.keeps_signal_matching(&info, &pat),
             "the matching path is excluded, even though the signal survives"
         );
+    }
+
+    /// `--exact` reaches both pattern gates. An exclusion that still matched by
+    /// substring would keep dropping more than it names, which is the quieter
+    /// half of the same problem.
+    #[test]
+    fn exact_applies_to_filter_and_exclude() {
+        let sig = crate::model::test_signal(&[("tb.req", "tb")]);
+        let strobe = crate::model::test_signal(&[("tb.req_strobe", "tb")]);
+
+        let s = sel_exact(Some("req"), None);
+        assert!(s.keeps_signal(&sig));
+        assert!(!s.keeps_signal(&strobe));
+
+        let s = sel_exact(None, Some("req"));
+        assert!(!s.keeps_signal(&sig));
+        assert!(s.keeps_signal(&strobe), "exclude is anchored too");
+
+        // Substring mode is unchanged: both are caught either way.
+        let s = sel(None, None, Some("req"), None);
+        assert!(s.keeps_signal(&sig) && s.keeps_signal(&strobe));
+    }
+
+    /// `matched_alias` answers *through which name*, which is what lets a
+    /// command say so when the row it prints is labelled differently.
+    #[test]
+    fn matched_alias_names_the_path_that_matched() {
+        let info = crate::model::test_signal(&[("tb.foo", "tb"), ("tb.foo_copy", "tb")]);
+        let s = sel_exact(Some("foo_copy"), None);
+        assert_eq!(s.matched_alias(&info), Some("tb.foo_copy"));
+        assert_ne!(s.matched_alias(&info), Some(info.path.as_str()));
+
+        let s = sel_exact(Some("foo"), None);
+        assert_eq!(s.matched_alias(&info), Some("tb.foo"));
+
+        let s = sel_exact(Some("nothing"), None);
+        assert_eq!(s.matched_alias(&info), None);
     }
 }

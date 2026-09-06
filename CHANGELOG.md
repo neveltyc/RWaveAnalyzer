@@ -6,7 +6,118 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-06
+
+`--json` output has a fixed shape now, and `trace` is on by default. Both are
+breaking changes; migration notes are on each entry below.
+
+### Added
+- **[docs/JSON.md](docs/JSON.md): the output schema, written down.** Every
+  command's key set, in order, with types and meanings, plus the rules the
+  shape follows.
+- **`--exact`** makes a wildcard-free `--filter`/`--exclude` pattern match the
+  whole name instead of a substring. Without it, `--filter DtsmTrainVal0Min`
+  also selects `DtsmTrainVal0Min_strobe` — and a strobe that never moves then
+  shows up as a `static` row that reads as the wanted signal's. Patterns
+  carrying `*`/`?` are anchored already, so the flag does not change them; it
+  applies to both pattern gates, and to `search`'s `--condition`/`--show` name
+  resolution. Also available as a `--batch` default (additive, like
+  `--verbose`).
+- **`dump`, `summary`, `snapshot` and `compare` report what the selection
+  caught**, above the rows in text mode (`Matched N signals: …`, a count alone
+  past 10) and as `matched: {count, paths}` in JSON. Where a signal is declared
+  under several names, the matched name and the canonical name the rows carry
+  are both shown (`A -> B`), with a `hint` saying so — previously a query for
+  one name came back labelled with another and nothing marked the substitution.
+- **`dump` echoes the window it resolved** as `window` in JSON and a
+  `Window: …` line in text, matching `summary`. A fractional `--begin` that
+  rounded to a neighbouring tick, or landed past the end of the trace, is now
+  visible rather than showing up only as an empty result.
+- **An empty result says which kind of empty it is**, in `hint` and in text.
+  `dump` printed `(no changes in range)` for four different situations; they
+  are now told apart: the selection matched nothing; the signals carry no
+  recorded data anywhere in the file (present in the hierarchy, never written
+  to the dump — no window will help); the window starts after the last event;
+  or the signals genuinely held still. A mixed selection reports both halves.
+  `summary` says the same when a window past the end of the trace leaves
+  everything looking static, and `list`, `snapshot`, `compare`, `search` and
+  `tree` each name their own reason: a pattern that missed, a file whose
+  hierarchy is empty, an instant before any signal had a value, two instants
+  that agree, a condition that never held.
+- `summary` rows carry `"unknown": true` when the signal had an x/z bit at any
+  point in the window (the baseline value counts, so a signal stuck at `x` is
+  reported). The top-level `unknown` count gives the number of such rows. Text
+  mode marks the same rows with `unknown`.
+
+### Fixed
+- **A time could print in a unit its own rule had ruled out.** `fmt_time`
+  picks the smallest unit where the scaled value is under 1000, but tested the
+  raw quotient rather than the digits it was about to print: at a 1ps
+  timescale, 1us is exactly 1e-6 s, and `1e-6 / 1e-9` is 999.9999999999999 —
+  under 1000, then rounded to `"1000ns"`. Which side of the boundary the
+  quotient landed on depended on how the seconds were arrived at, so the same
+  instant rendered differently from different timescales (`1000ns` from 1ps,
+  `1us` from 1ns). Every boundary is now decided on the printed value.
+
 ### Changed
+- **`--help`'s batch paragraph shows a line instead of only describing one.**
+  It now says what batch is for (a large waveform is slow to open, and batch
+  pays that once), gives two example lines, and states the one behaviour
+  that silently loses results: a failed line is `ok:false` and does not stop
+  the run, which still exits 0. One line longer than what it replaced.
+- **`--json` output has a fixed shape.** For a given command and set of flags
+  the key set is fixed and always present, carrying `null`/`0`/`[]`/`{}` when
+  there is nothing to say: shape follows the invocation, never the data.
+  Migration:
+  - **Duplicate time keys are gone.** Each timestamp was written twice under
+    different names — `time`/`time_ticks`, `at`/`at_h`, `begin`/`begin_h`,
+    `t1`/`t1_h`, `first_at`/`first_at_h` — and the bare key did not agree with
+    itself across commands: `time` was an integer where `at`, `begin` and `t1`
+    were strings. Only `<name>_ticks` (int) and `<name>_h` (string) remain.
+    Replace `e["time"]` with `e["time_ticks"]`, `d["at"]` with `d["at_h"]`.
+  - **One payload key per command, whatever the mode.** `search` answers under
+    `rows` in all three modes (was `intervals`/`segments`/`events`) and the row
+    shape is shared: an event row fills `begin_*` and leaves `end_*` null.
+    `search`'s `events[]` used to collide with `dump`'s under the same name and
+    a different shape. `tree` answers under `scopes` in both modes (was
+    `scopes`/`chain`), `trace` under `endpoints` in both directions (was
+    `drivers`/`loads`); `mode` and `dir` already said which.
+  - **`dump`, `summary` and `search` carry `window`** instead of loose
+    `begin_*`/`end_*` keys.
+  - **Keys no longer come and go with the data.** `hint`, `matched`,
+    `total_is_exact`, `changed`, `values`, and the summary row's `unique`,
+    `unknown`, `first_at_*` and `last_at_*` are always present; snapshot rows
+    always carry `undefined`. Stop testing for a key's presence — test its
+    value.
+  - **Every result carries `command`**, and the counts `shown`, `truncated`,
+    `total`, `total_is_exact` in that order on every command.
+  - **New keys**: `window` on `dump`; `matched` and `selected` on `dump` and
+    `compare` (`summary` and `snapshot` already had `selected`); `unchanged`
+    on `compare`; `total_is_exact` on `list`, `summary`, `snapshot`, `compare`
+    and `tree`; `undefined` on every `snapshot` row.
+  - **Failures are JSON under `--json`**: `{"command":…,"ok":false,"error":…}`
+    on stderr, exit code unchanged. stdout still carries results only.
+- **`trace` is on by default** wherever the built-in Verdi NPI backend is, and
+  is no longer described as experimental. It used to refuse unless
+  `RWAVE_TRACE_EN=1` was set, which only hid a working command behind a
+  variable nobody sets. The switch is kept as a kill switch — the command reads
+  the elaborated design library, which costs a licence checkout — so
+  `RWAVE_TRACE_EN=0` (or `off`/`no`/`false`) refuses outright. An empty value
+  reads as "not given", as everywhere else in the CLI, and leaves it on.
+- **A flag a command does not read is now an error.** `list --begin 1ns`,
+  `dump --at 1ns`, `snapshot --end 1ns`, `info --filter clk` and the like used
+  to be accepted and ignored — which also meant a *malformed* value on such a
+  flag was ignored, so `list --begin banana` exited 0. They now exit 2 naming
+  the flag and what to reach for instead. `--begin`/`--end` belong to `dump`,
+  `summary` and `search`; `--at` to `snapshot`, `compare` and `trace`; the
+  pattern options to everything but `info`, `tree` and `trace`. Unchanged for
+  `--batch` defaults: a session-wide flag still reaches the lines that can use
+  it and is ignored by the rest.
+- **`search` no longer blames `--end` for a `--begin` past the trace.** With no
+  `--end` given the bound is the trace's own last event, so the old
+  `end time must be >= begin time` named a flag the user had not written; the
+  message now names `--begin` and the last event. An explicitly inverted pair
+  still reports the original message.
 - **1-bit `x`/`z` print as `bx`/`bz`.** Buses already printed unknowns as
   `b<bits>`; the 1-bit case was the one exception, which left `'x' in value` as
   the only common test — and that matches every `0x` hex value. Now
@@ -14,12 +125,6 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   (`0`, `1`, `0x…`) starts with `b`. Clean values are unchanged. Migration:
   replace `value in ('x', 'z')` with `value.startswith('b')`; `bx`/`bz` are
   also accepted `--condition` targets, so output still pastes back in.
-
-### Added
-- `summary` rows carry `"unknown": true` when the signal had an x/z bit at any
-  point in the window (the baseline value counts, so a signal stuck at `x`
-  is reported); the key is absent otherwise. The top-level `unknown` count
-  gives the number of such rows. Text mode marks the same rows with `unknown`.
 
 ## [0.2.0] — 2026-09-03
 

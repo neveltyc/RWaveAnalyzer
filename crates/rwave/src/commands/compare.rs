@@ -26,9 +26,12 @@ struct CompareData {
     ta: i64,
     tb: i64,
     union_len: usize,
+    selected_len: usize,
+    matched: MatchReport,
 }
 
 fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
+    let selection = selection_of(args)?;
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let parts: Vec<&str> = at_raw.split(',').collect();
@@ -40,8 +43,9 @@ fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
     if tb < ta {
         return Err("second compare time must be >= first compare time".to_string());
     }
-    let sel = match_selection(wave, args)?;
+    let sel = match_selection(wave, &selection);
     let selected = selected_sids(wave, &sel);
+    let matched = match_report(wave, &selection, &selected);
     let sel_ref = sel.as_deref();
 
     // A backend that can seek by time takes the streaming (windowed) path even
@@ -100,6 +104,8 @@ fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
         ta,
         tb,
         union_len,
+        selected_len: selected.len(),
+        matched,
     })
 }
 
@@ -123,21 +129,26 @@ pub(super) fn compute_compare(wave: &mut Wave, args: &Args) -> Result<Json, Stri
         }
         arr.push(o.build());
     }
-    let t1h = fmt_time(d.ta, ts);
-    let t2h = fmt_time(d.tb, ts);
-    let obj = Obj::new()
-        .push("t1", Json::str(t1h.clone()))
-        .push("t1_ticks", Json::Int(d.ta))
-        .push("t1_h", Json::str(t1h))
-        .push("t2", Json::str(t2h.clone()))
-        .push("t2_ticks", Json::Int(d.tb))
-        .push("t2_h", Json::str(t2h))
-        .push("total", Json::Int(total as i64))
-        .push("shown", Json::Int(shown_n as i64))
-        .push("truncated", Json::Bool(trunc));
-    let obj = push_trunc_hint(obj, trunc, shown_n, total, true, "diffs")
-        .push("diffs", Json::Array(arr))
-        .build();
+    let obj = push_time(Obj::new(), "t1", d.ta, ts);
+    let obj = push_time(obj, "t2", d.tb, ts)
+        .push("matched", d.matched.json())
+        .push("selected", Json::Int(d.selected_len as i64))
+        .push("unchanged", Json::Int((d.union_len - total) as i64));
+    let obj = push_counts(obj, shown_n, total, true, trunc);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(trunc, shown_n, total, true, "diffs"));
+    hints.push_opt(d.matched.alias_note());
+    if d.selected_len == 0 {
+        hints.push(if d.matched.selective { SELECTION_EMPTY } else { NO_SIGNALS });
+    } else if total == 0 {
+        hints.push(format!(
+            "no selected signal differs between {} and {}; {} held the same value",
+            fmt_time(d.ta, ts),
+            fmt_time(d.tb, ts),
+            d.union_len
+        ));
+    }
+    let obj = hints.attach(obj).push("diffs", Json::Array(arr)).build();
     Ok(obj)
 }
 
@@ -150,6 +161,12 @@ pub(super) fn text_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let unchanged = d.union_len - total;
 
     println!("Compare: {} vs {}", fmt_time(d.ta, ts), fmt_time(d.tb, ts));
+    if let Some(h) = d.matched.header() {
+        println!("{h}");
+    }
+    if let Some(note) = d.matched.alias_note() {
+        println!("Note: {note}");
+    }
     println!("{} changed, {} unchanged", total, unchanged);
     for df in d.diffs.iter().take(shown_n) {
         println!("  {} {} -> {}", ljust(&df.path, 48), df.at_t1, df.at_t2);

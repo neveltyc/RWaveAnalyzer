@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use crate::cli::Args;
 use crate::condition::{self, Op, ParsedCondition, TermBody};
-use crate::filter::Filters;
+use crate::filter::{Filters, MatchMode};
 use crate::format::{fmt_time, fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::{Json, Obj};
 use crate::model::{Sid, Wave};
@@ -67,6 +67,7 @@ fn resolve_one_signal(
     sel: &Selection,
     pattern: &str,
     role: &str,
+    mode: MatchMode,
 ) -> Result<Sid, String> {
     let pat = pattern.trim();
     let pl = pat.to_lowercase();
@@ -88,7 +89,7 @@ fn resolve_one_signal(
     }
 
     // Fall back to filter matching, inside the current selection.
-    let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
+    let filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
     let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
     if matched.is_empty() {
         let scoped = within_selection(sel);
@@ -133,6 +134,7 @@ fn resolve_show_sids(
     wave: &Wave,
     sel: &Selection,
     show: &Option<String>,
+    mode: MatchMode,
 ) -> Result<Vec<Sid>, String> {
     let raw = match show {
         Some(s) => s,
@@ -154,7 +156,7 @@ fn resolve_show_sids(
                 continue;
             }
         }
-        let filters = Filters::parse(&[pat]).map_err(|e| e.0)?;
+        let filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
         let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
         if matched.is_empty() {
             missing.push(pat.to_string());
@@ -182,6 +184,7 @@ fn resolve_conditions(
     wave: &Wave,
     sel: &Selection,
     text: &str,
+    mode: MatchMode,
 ) -> Result<Vec<ResolvedCond>, String> {
     let parsed: Vec<ParsedCondition> = condition::parse_conditions(text).map_err(|e| e.0)?;
     let mut resolved: Vec<ResolvedCond> = Vec::new();
@@ -191,7 +194,7 @@ fn resolve_conditions(
             TermBody::Changed => "changed() signal",
             TermBody::Level { .. } => "condition signal",
         };
-        let sid = resolve_one_signal(wave, sel, &c.pattern, role)?;
+        let sid = resolve_one_signal(wave, sel, &c.pattern, role, mode)?;
         let info = wave.signal(sid);
         let term = match c.term {
             TermBody::Level { op, target, value_text } => ResolvedTerm::Level {
@@ -377,6 +380,17 @@ fn show_meta(wave: &Wave, state: &BTreeMap<Sid, String>, show_sids: &[Sid]) -> J
 }
 
 /// Resolve the search end time: explicit `--end`, else the file's max tick.
+/// Why a search came back with nothing. The text renderers already said this;
+/// a JSON caller was left with an empty array and no reason at all.
+fn no_match_reason(s: &SearchSetup) -> String {
+    format!(
+        "the condition {} never held in {}..{}",
+        s.cond_text,
+        fmt_time(s.t0, s.ts),
+        fmt_time(s.t1, s.ts)
+    )
+}
+
 fn search_end_time(wave: &Wave, t1: Option<i64>) -> Result<i64, String> {
     if let Some(t1) = t1 {
         return Ok(t1);
@@ -441,7 +455,16 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     };
     let t1 = search_end_time(wave, t1_raw)?;
     if t1 < t0 {
-        return Err("end time must be >= begin time".to_string());
+        // Without an explicit `--end` the bound is the trace's own last event,
+        // so blaming `--end` would name a flag the user never wrote.
+        return Err(match &args.end {
+            Some(_) => "end time must be >= begin time".to_string(),
+            None => format!(
+                "--begin {} is after the last event at {}; the window is empty",
+                fmt_time(t0, ts),
+                fmt_time(t1, ts)
+            ),
+        });
     }
 
     if args.condition.is_empty() {
@@ -452,7 +475,8 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     // they are the context a bare name is looked up in, which is usually what
     // turns "matches N signals" into a unique hit. A name written as a full
     // path is exempt.
-    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
+    let mode = match_mode(args);
+    let sel = selection_of(args)?;
     // Each `--condition` is one OR clause (a comma-separated AND list). Resolve
     // every clause, then drop duplicate clauses (PRD §7): identical, term-order-
     // permuted, or alias-equivalent clauses fold to one; different value
@@ -461,7 +485,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let mut clauses: Vec<Vec<ResolvedCond>> = Vec::new();
     let mut seen: BTreeSet<Vec<(Sid, &'static str, String)>> = BTreeSet::new();
     for text in &args.condition {
-        let clause = resolve_conditions(wave, &sel, text)?;
+        let clause = resolve_conditions(wave, &sel, text, mode)?;
         if seen.insert(clause_key(&clause)) {
             clauses.push(clause);
         }
@@ -492,7 +516,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let mut changed_sids: Vec<Sid> = changed_set.into_iter().collect();
     changed_sids.sort_by(|a, b| wave.signal(*a).path.cmp(&wave.signal(*b).path));
 
-    let mut show_sids = resolve_show_sids(wave, &sel, &args.show)?;
+    let mut show_sids = resolve_show_sids(wave, &sel, &args.show, mode)?;
     if !changed_sids.is_empty() && show_sids.is_empty() {
         // Event mode with no --show: default to watching the changed() signals.
         show_sids = changed_sids.clone();
@@ -675,15 +699,20 @@ fn search_event_json(
     total: usize,
     truncated: bool,
 ) -> Json {
+    // The same row shape all three modes emit. An event fires at an instant,
+    // so it fills `begin_*` and leaves `end_*` null; an interval or segment
+    // spans one. Sharing the shape is what lets the three modes share a key.
     let evs: Vec<Json> = events
         .iter()
         .map(|e| {
             let mut o = Obj::new()
-                .push("time_ticks", Json::Int(e.time_ticks))
-                .push("time_h", Json::str(e.time_h.clone()))
+                .push("begin_ticks", Json::Int(e.time_ticks))
+                .push("begin_h", Json::str(e.time_h.clone()))
+                .push("end_ticks", Json::Null)
+                .push("end_h", Json::Null)
                 .push("values", values_json(&e.values));
-            if let Some(ref m) = e.meta {
-                o = o.push("meta", m.clone());
+            if s.verbose {
+                o = o.push("meta", e.meta.clone().unwrap_or_else(|| Json::Object(Vec::new())));
             }
             o.build()
         })
@@ -709,16 +738,14 @@ fn search_event_json(
         .push("condition_resolved", Json::str(s.cond_text.clone()))
         .push("changed", Json::Array(changed_paths))
         .push("show", Json::Array(show_paths))
-        .push("begin_ticks", Json::Int(s.t0))
-        .push("begin_h", Json::str(fmt_time(s.t0, s.ts)))
-        .push("end_ticks", Json::Int(s.t1))
-        .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
-        .push("shown", Json::Int(events.len() as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    push_trunc_hint(obj, trunc_final, events.len(), total_field, false, "events")
-        .push("events", Json::Array(evs))
-        .extend(total_json_fields(total_field, trunc_final))
-        .build()
+        .push("window", window_json(s.t0, Some(s.t1), s.ts));
+    let obj = push_counts(obj, events.len(), total_field, !trunc_final, trunc_final);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(trunc_final, events.len(), total_field, false, "rows"));
+    if events.is_empty() {
+        hints.push(no_match_reason(s));
+    }
+    hints.attach(obj).push("rows", Json::Array(evs)).build()
 }
 
 fn search_event_text(
@@ -1007,21 +1034,27 @@ fn search_interval_json(
     truncated: bool,
     has_show: bool,
 ) -> Json {
-    let key = if has_show { "segments" } else { "intervals" };
     let mode = if has_show { "segment" } else { "interval" };
     let rows_json: Vec<Json> = results
         .iter()
         .map(|r| {
+            // `values` is `{}` rather than absent when the run named no --show
+            // signals: an interval row and a segment row differ in what they
+            // carry, not in which keys they have.
             let mut o = Obj::new()
                 .push("begin_ticks", Json::Int(r.begin_ticks))
                 .push("begin_h", Json::str(fmt_time(r.begin_ticks, s.ts)))
                 .push("end_ticks", Json::Int(r.end_ticks))
-                .push("end_h", Json::str(fmt_time(r.end_ticks, s.ts)));
-            if let Some(ref vals) = r.values {
-                o = o.push("values", values_json(vals));
-            }
-            if let Some(ref m) = r.meta {
-                o = o.push("meta", m.clone());
+                .push("end_h", Json::str(fmt_time(r.end_ticks, s.ts)))
+                .push(
+                    "values",
+                    match &r.values {
+                        Some(vals) => values_json(vals),
+                        None => Json::Object(Vec::new()),
+                    },
+                );
+            if s.verbose {
+                o = o.push("meta", r.meta.clone().unwrap_or_else(|| Json::Object(Vec::new())));
             }
             o.build()
         })
@@ -1036,21 +1069,22 @@ fn search_interval_json(
     } else {
         (total, false)
     };
+    // `changed` is an event-mode notion, but it is emitted empty here rather
+    // than dropped.
     let obj = Obj::new()
         .push("mode", Json::str(mode))
         .push("condition", Json::str(s.cond_label.clone()))
         .push("condition_resolved", Json::str(s.cond_text.clone()))
+        .push("changed", Json::Array(Vec::new()))
         .push("show", Json::Array(show_paths))
-        .push("begin_ticks", Json::Int(s.t0))
-        .push("begin_h", Json::str(fmt_time(s.t0, s.ts)))
-        .push("end_ticks", Json::Int(s.t1))
-        .push("end_h", Json::str(fmt_time(s.t1, s.ts)))
-        .push("shown", Json::Int(results.len() as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    push_trunc_hint(obj, trunc_final, results.len(), total_field, false, &format!("{key}"))
-        .push(key, Json::Array(rows_json))
-        .extend(total_json_fields(total_field, trunc_final))
-        .build()
+        .push("window", window_json(s.t0, Some(s.t1), s.ts));
+    let obj = push_counts(obj, results.len(), total_field, !trunc_final, trunc_final);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(trunc_final, results.len(), total_field, false, "rows"));
+    if results.is_empty() {
+        hints.push(no_match_reason(s));
+    }
+    hints.attach(obj).push("rows", Json::Array(rows_json)).build()
 }
 
 fn search_interval_text(

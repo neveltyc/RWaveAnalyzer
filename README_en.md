@@ -170,9 +170,9 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `compare`  | What changed between two time points (`--at T1,T2`) |
 | `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
 | `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
-| `trace`    | *(experimental, off by default)* Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only; set `RWAVE_TRACE_EN=1` |
+| `trace`    | Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only. On by default; `RWAVE_TRACE_EN=0` turns it off |
 
-- **Selection.** Every command but `info`, `tree`, and `trace` takes the four
+- **Selection.** Every command but `info`, `tree`, and `trace` takes the five
   [signal-selection](#selecting-signals) options; `tree` takes `--scope`/`--depth`.
 - **Time.** `dump`, `summary`, and `search` take a `--begin`/`--end` window;
   `snapshot`/`compare` take instants (`--at`). Times use the suffixes `fs`, `ps`,
@@ -191,7 +191,7 @@ Run `rwave <command> --help` for the complete reference.
 
 ## Selecting signals
 
-A dump has more signals than any one question needs. Four options narrow it,
+A dump has more signals than any one question needs. Five options narrow it,
 and they compose as a pipeline over each signal path in turn:
 
 | | |
@@ -200,6 +200,7 @@ and they compose as a pipeline over each signal path in turn:
 | `--depth N`      | how far below that subtree's root to go (requires `--scope`) |
 | `--filter K1,K2` | which names to keep |
 | `--exclude K1,K2`| what to drop, applied last |
+| `--exact`        | make both match the whole name instead of a substring |
 
 ```sh
 # One block, not its submodules.
@@ -220,6 +221,31 @@ leaf for the signal itself; add a dot (`--filter 'u_dma.'`) to address the
 hierarchy. A pattern without `*`/`?` matches by substring, one with them is an
 anchored glob; `[`/`]` are literal, matching is case-insensitive, and
 comma-separated patterns are ORed.
+
+**`--exact` turns substring matching off.** A substring also catches every
+signal that merely starts with the name: `DtsmTrainVal0Min` brings
+`DtsmTrainVal0Min_strobe` with it, and a strobe that never moves then makes
+`summary` report a static row that reads as the wanted signal's. With `--exact`
+a wildcard-free pattern has to be the whole name. Patterns carrying `*`/`?` are
+anchored already, so the flag leaves them alone. It applies to `--filter`,
+`--exclude`, and `search`'s `--condition`/`--show` name resolution alike.
+
+**Buses need their range.** "The whole name" means the name as declared, and a
+vector's name carries its range suffix — so `--filter state --exact` matches
+nothing on a bus called `state[2:0]`. Write `--filter 'state[2:0]' --exact`, or
+drop `--exact` and let the substring match do it. `[` and `]` are literal in a
+pattern, so nothing beyond the shell's quoting is needed.
+
+**The output says what it caught.** `dump`, `summary`, `snapshot` and `compare` print
+`Matched N signals: <paths>` above the rows (a count alone past 10), and carry
+the same under a `matched` key in JSON. Where a waveform declares one signal
+under several names, both the matched name and the canonical name the rows
+carry are shown (`A -> B`), since the rows only ever use the canonical one.
+
+```sh
+# This signal, not the same-prefixed strobe.
+rwave summary sim.fst --filter DtsmTrainVal0Min --exact
+```
 
 **`--scope`** matches segment by segment (`u_fifo` never hits `u_fifo_ctrl`),
 takes a subtree with its descendants, and matches a path as a segment-aligned
@@ -253,6 +279,18 @@ width is in each signal's metadata, so it is not re-encoded as hex padding.
 rwave --json info sim.fst
 rwave --json search sim.fst --condition "state=5" --show data
 ```
+
+**Shape follows the invocation, never the data.** For a given command and a
+given set of flags the key set is fixed: every documented key is always
+present, in the documented order, carrying `null` / `0` / `[]` / `{}` when it
+has nothing to say. Test a key's value, never its presence. `--verbose` adds a
+further fixed set — you know whether you passed it.
+
+Failures are JSON too: on stderr, with a non-zero exit code, as
+`{"command":"dump","ok":false,"error":"..."}`. stdout carries results only, so
+one parser covers both paths.
+
+The full per-command field reference is in [docs/JSON.md](docs/JSON.md).
 
 ## Batch mode
 
@@ -365,15 +403,17 @@ The plugin is built against rwave's backend ABI, currently **v2**. rwave
 requires an exact match and says so if it differs, naming both versions;
 rebuild the plugin when it does.
 
-### Tracing drivers and loads (experimental, off by default)
+### Tracing drivers and loads
 
 `trace` answers "who drives this signal" and "what reads it", with the driving
-statement's source text and `file:line`. It is the one command that reads
-something other than the waveform, so it is opted into rather than merely
-available: without `RWAVE_TRACE_EN` set it refuses and says so.
+statement's source text and `file:line`. It is on wherever the built-in Verdi
+NPI backend is: on any other file it says so and exits 1.
+
+It is the one command that reads something other than the waveform — the
+elaborated design library, which costs a licence checkout — so the switch that
+used to gate it is kept as a kill switch: `RWAVE_TRACE_EN=0` refuses outright.
 
 ```bash
-export RWAVE_TRACE_EN=1
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 ```
@@ -401,7 +441,7 @@ happens when a dump is copied away from its build.
 |:--|:--|:--|
 | `VERDI_HOME`       | for `.fsdb` | Your Verdi install. rwave auto-discovers `libNPI.so` (and `libnpiL1.so` for `trace`) under it; needs a Verdi-Ultra license. |
 | `RWAVE_WLF_LIB`    | for `.wlf` | Absolute path to `libwlf.so`. |
-| `RWAVE_TRACE_EN`   | for `trace` | Set to `1` to enable the experimental `trace` command, off otherwise. |
+| `RWAVE_TRACE_EN`   | optional | `trace` is on by default; set to `0` to refuse it outright (it reads the design library, which costs a licence checkout). |
 | `RWAVE_FSDB_LIB`   | optional | Absolute path to `libNPI.so`. Overrides the `VERDI_HOME` auto-discovery, for a non-standard layout. |
 | `RWAVE_NPI_L1_LIB` | optional | Absolute path to `libnpiL1.so` (NPI connectivity library, used by `trace`). Override if it is not beside `libNPI.so`. |
 | `RWAVE_PLUGIN_FSDB` | optional | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |

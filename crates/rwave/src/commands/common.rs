@@ -10,6 +10,7 @@
 
 use crate::backend::RawValue;
 use crate::cli::{Args, DEFAULT_LIMIT};
+use crate::filter::MatchMode;
 use crate::format::{fmt_val, parse_time, TimeParseError, ValueKind};
 use crate::json::{Json, Obj};
 use crate::model::{Sid, SignalInfo, Wave};
@@ -77,28 +78,24 @@ pub(super) fn trunc_line_lb(shown: usize, total: usize, noun: &str) -> String {
     )
 }
 
-/// Append a `hint` field to a clipped `--json` result, and nothing to a
-/// complete one. `truncated: true` alone is easy to skim past; a sentence
-/// naming the flag that lifts the cap is not.
-pub(super) fn push_trunc_hint(
-    obj: Obj,
+/// The truncation sentence, or `None` for a complete result. `truncated: true`
+/// alone is easy to skim past; a sentence naming the flag that lifts the cap
+/// is not.
+pub(super) fn trunc_hint(
     trunc: bool,
     shown: usize,
     total: usize,
     exact: bool,
     noun: &str,
-) -> Obj {
+) -> Option<String> {
     if !trunc {
-        return obj;
+        return None;
     }
     let plus = if exact { "" } else { "+" };
-    obj.push(
-        "hint",
-        Json::str(format!(
-            "showing {shown} of {total}{plus} {noun}; \
-             re-run with --limit N (or --limit 0 for all) to see the rest"
-        )),
-    )
+    Some(format!(
+        "showing {shown} of {total}{plus} {noun}; \
+         re-run with --limit N (or --limit 0 for all) to see the rest"
+    ))
 }
 
 pub(super) fn count_label(total: usize, truncated: bool) -> String {
@@ -107,14 +104,6 @@ pub(super) fn count_label(total: usize, truncated: bool) -> String {
     } else {
         format!("{total}")
     }
-}
-
-/// Shared JSON count fields (`total` + `total_is_exact`).
-pub(super) fn total_json_fields(total: usize, truncated: bool) -> Vec<(String, Json)> {
-    vec![
-        ("total".to_string(), Json::Int(total as i64)),
-        ("total_is_exact".to_string(), Json::Bool(!truncated)),
-    ]
 }
 
 /// Every sid whose signal satisfies `pred`, in ascending order. The one place
@@ -129,14 +118,296 @@ pub(crate) fn sids_where(wave: &Wave, pred: impl Fn(&SignalInfo) -> bool) -> Vec
         .collect()
 }
 
-/// Resolve the selection options into an optional set of selected sids. `None`
-/// means "no selection given" (all signals).
-pub(super) fn match_selection(wave: &Wave, args: &Args) -> Result<Option<Vec<Sid>>, String> {
-    let sel = Selection::parse(&args.scope, args.depth, &args.filter, &args.exclude)?;
-    if sel.is_all() {
-        return Ok(None);
+/// Compile this invocation's selection options, honouring `--exact`.
+pub(super) fn selection_of(args: &Args) -> Result<Selection, String> {
+    Selection::parse_mode(
+        &args.scope,
+        args.depth,
+        &args.filter,
+        &args.exclude,
+        match_mode(args),
+    )
+}
+
+/// The `--filter`/`--exclude` matching mode this invocation asked for.
+pub(crate) fn match_mode(args: &Args) -> MatchMode {
+    if args.exact {
+        MatchMode::Exact
+    } else {
+        MatchMode::Substring
     }
-    Ok(Some(sids_where(wave, |info| sel.keeps_signal(info))))
+}
+
+/// Resolve a compiled selection into an optional set of selected sids. `None`
+/// means "no selection given" (all signals).
+///
+/// Takes the [`Selection`] rather than the raw `Args` so a caller that also
+/// needs the [`MatchReport`] compiles the patterns once: two compilations of
+/// the same options are two chances for them to disagree about what matched.
+pub(super) fn match_selection(wave: &Wave, sel: &Selection) -> Option<Vec<Sid>> {
+    if sel.is_all() {
+        return None;
+    }
+    Some(sids_where(wave, |info| sel.keeps_signal(info)))
+}
+
+/// What a selection actually caught: for each selected signal, the alias path
+/// that matched and the canonical path its output rows will carry.
+///
+/// The two differ when a waveform declares one signal under several names, and
+/// that gap is the whole reason this exists: a query for `foo_copy` answered
+/// with rows labelled `foo` looks like the wrong signal came back. Empty when
+/// no selection option was given — a whole-file query has nothing to report.
+pub(super) struct MatchReport {
+    /// `(matched alias path, canonical row path)`, sorted by the matched path.
+    pub pairs: Vec<(String, String)>,
+    /// True when any selection option was in force at all.
+    pub selective: bool,
+}
+
+/// How many matched paths a header lists before it stops naming them. Past this
+/// the list has stopped being a check on the pattern and started being the
+/// output; `list` is the command for reading it in full.
+const MATCH_LIST_CAP: usize = 10;
+
+impl MatchReport {
+    pub fn count(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// The pairs whose matched name differs from the name the rows carry.
+    pub fn aliased(&self) -> impl Iterator<Item = &(String, String)> {
+        self.pairs.iter().filter(|(m, p)| m != p)
+    }
+
+    /// The one-line text header, or `None` when there is nothing to report.
+    pub fn header(&self) -> Option<String> {
+        if !self.selective {
+            return None;
+        }
+        let n = self.count();
+        let noun = if n == 1 { "signal" } else { "signals" };
+        if n == 0 {
+            return Some("Matched 0 signals".to_string());
+        }
+        if n > MATCH_LIST_CAP {
+            return Some(format!(
+                "Matched {n} {noun} (run list with the same options to see them)"
+            ));
+        }
+        let names: Vec<String> = self
+            .pairs
+            .iter()
+            .map(|(m, p)| if m == p { m.clone() } else { format!("{m} -> {p}") })
+            .collect();
+        Some(format!("Matched {n} {noun}: {}", names.join(", ")))
+    }
+
+    /// The `matched` JSON member: `null` when no selection option was given,
+    /// otherwise `{count, paths}`. `count` is exact; `paths` stops at
+    /// [`MATCH_LIST_CAP`], so a `paths` shorter than `count` means the rest
+    /// were not listed.
+    pub fn json(&self) -> Json {
+        if !self.selective {
+            return Json::Null;
+        }
+        let paths: Vec<Json> = self
+            .pairs
+            .iter()
+            .take(MATCH_LIST_CAP)
+            .map(|(m, _)| Json::str(m.clone()))
+            .collect();
+        Obj::new()
+            .push("count", Json::Int(self.count() as i64))
+            .push("paths", Json::Array(paths))
+            .build()
+    }
+
+    /// The sentence warning that some rows are labelled with a name other than
+    /// the one asked for, or `None` when every match came through its own
+    /// canonical path.
+    pub fn alias_note(&self) -> Option<String> {
+        let mut it = self.aliased().peekable();
+        it.peek()?;
+        let shown: Vec<String> = self
+            .aliased()
+            .take(3)
+            .map(|(m, p)| format!("{m} is {p}"))
+            .collect();
+        let n = self.aliased().count();
+        let noun = if n == 1 { "signal" } else { "signals" };
+        let more = if n > shown.len() {
+            format!(", and {} more", n - shown.len())
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "{n} {noun} matched through an alias; rows carry the canonical path ({}{more})",
+            shown.join("; ")
+        ))
+    }
+}
+
+/// Build the [`MatchReport`] for `sel` over the already-selected `sids`.
+pub(super) fn match_report(wave: &Wave, sel: &Selection, sids: &[Sid]) -> MatchReport {
+    if sel.is_all() {
+        return MatchReport { pairs: Vec::new(), selective: false };
+    }
+    let mut pairs: Vec<(String, String)> = sids
+        .iter()
+        .filter_map(|sid| {
+            let info = wave.signal(*sid);
+            sel.matched_alias(info)
+                .map(|m| (m.to_string(), info.path.clone()))
+        })
+        .collect();
+    pairs.sort();
+    MatchReport { pairs, selective: true }
+}
+
+/// Collect the sentences that explain a result, joined into one `hint` string.
+///
+/// `hint` already means "a sentence telling the caller what to do next", and an
+/// empty result that needs explaining wants exactly that. Keeping them in one
+/// field rather than adding a second keeps the JSON shape from growing another
+/// conditional key.
+#[derive(Default)]
+pub(super) struct Hints(Vec<String>);
+
+impl Hints {
+    pub fn new() -> Hints {
+        Hints(Vec::new())
+    }
+
+    pub fn push(&mut self, s: impl Into<String>) {
+        self.0.push(s.into());
+    }
+
+    pub fn push_opt(&mut self, s: Option<String>) {
+        if let Some(s) = s {
+            self.0.push(s);
+        }
+    }
+
+    fn text(&self) -> String {
+        self.0.join("; ")
+    }
+
+    /// Append the joined sentences as a `hint` member — `null` when there is
+    /// nothing to say, never absent.
+    pub fn attach(&self, obj: Obj) -> Obj {
+        if self.0.is_empty() {
+            obj.push("hint", Json::Null)
+        } else {
+            obj.push("hint", Json::str(self.text()))
+        }
+    }
+}
+
+/// Said when the file's hierarchy is empty. Distinct from [`SELECTION_EMPTY`]:
+/// there is no pattern to widen, so naming one would send the reader after a
+/// flag they never passed.
+pub(super) const NO_SIGNALS: &str =
+    "the file declares no signals; its hierarchy is empty";
+
+/// What to say when the selection options caught nothing at all. Shared so the
+/// commands that report it cannot word it three different ways.
+pub(super) const SELECTION_EMPTY: &str = concat!(
+    "the selection matched no signals; widen --filter/--scope, ",
+    "or run list to see what is there",
+);
+
+/// Said of a selection whose signals are all absent from the value-change data.
+const NEVER_DUMPED_ONE: &str = concat!(
+    "the selected signal carries no recorded data anywhere in the file: it is in ",
+    "the hierarchy but was never written to the dump, so no window will show it",
+);
+const NEVER_DUMPED_MANY: &str = concat!(
+    "carry no recorded data anywhere in the file: they are in the hierarchy but ",
+    "were never written to the dump, so no window will show them",
+);
+
+/// Above this many selected signals the "never dumped" check is skipped.
+///
+/// It has to decode each selected signal to see whether it carries anything,
+/// which is worth it to name the cause of a query that came back empty, and
+/// not worth a full-file decode to annotate a quiet window on a million
+/// signals. [`empty_window_reason`] runs the cheap tests first so the scan is
+/// reached only when nothing else explains the result.
+const UNDUMPED_SCAN_CAP: usize = STREAMING_BATCH;
+
+/// How many of `sids` carry no recorded samples anywhere in the file.
+///
+/// A signal can be present in the hierarchy and absent from the value-change
+/// data — outside the `$dumpvars` scope, or dumped by a run that did not reach
+/// it. That is a different answer from "it never changed", and until now the
+/// two arrived as the same empty result. `None` when the selection is too
+/// large to check (see [`UNDUMPED_SCAN_CAP`]).
+fn undumped_count(wave: &mut Wave, sids: &[Sid]) -> Option<usize> {
+    if sids.len() > UNDUMPED_SCAN_CAP {
+        return None;
+    }
+    let mut n = 0usize;
+    wave.for_each_signal_batched(Some(sids), STREAMING_BATCH, |_, tr| {
+        if tr.is_empty() {
+            n += 1;
+        }
+    });
+    Some(n)
+}
+
+/// Why a windowed command came back with nothing, when the answer is knowable.
+///
+/// An empty `dump` used to print the same line for every cause. There are four,
+/// and they call for different fixes: the selection caught nothing (fix the
+/// pattern), the signals were never dumped (fix the *simulation*, no query will
+/// help), the window sits past the end of the trace (fix the time), or the
+/// signals genuinely held still (the answer is "nothing happened").
+pub(super) fn empty_window_reason(
+    wave: &mut Wave,
+    selected: &[Sid],
+    selective: bool,
+    t0: i64,
+    ts: f64,
+) -> String {
+    // Cheapest first. Only the last test decodes anything, so a window that is
+    // simply out of range never pays for a scan of the selection.
+    if selected.is_empty() && selective {
+        return SELECTION_EMPTY.to_string();
+    }
+    if let Some((_, mx)) = wave.time_range() {
+        if t0 > mx {
+            return format!(
+                "the window begins at {}, after the last event at {}",
+                crate::format::fmt_time(t0, ts),
+                crate::format::fmt_time(mx, ts)
+            );
+        }
+    }
+    let undumped = undumped_count(wave, selected);
+    if undumped == Some(selected.len()) && !selected.is_empty() {
+        let n = selected.len();
+        return if n == 1 {
+            NEVER_DUMPED_ONE.to_string()
+        } else {
+            format!("the {n} selected signals {NEVER_DUMPED_MANY}")
+        };
+    }
+    // Some of the selection was never dumped, but not all of it — the rest is
+    // genuinely quiet, and both halves are worth saying.
+    match undumped {
+        // Positional, not `{n}`: `concat!` builds the format string at expansion
+        // time, so implicit named-argument capture cannot see the bindings.
+        Some(n) if n > 0 => format!(
+            concat!(
+                "no value changes in the window; {} of the {} selected signals ",
+                "carry no recorded data at all",
+            ),
+            n,
+            selected.len()
+        ),
+        _ => "no value changes in the window".to_string(),
+    }
 }
 
 /// The set of selected sids as an explicit sorted vec (all signals if `None`).
@@ -198,6 +469,68 @@ pub(super) fn rjust(s: &str, width: usize) -> String {
         out.push_str(s);
         out
     }
+}
+
+/// The `window` member: the parsed `--begin`/`--end` as both ticks and text.
+///
+/// Every command that takes a window emits this, so a run that came back empty
+/// can be told apart from one whose window landed somewhere unintended. A
+/// fractional value that rounded to a neighbouring tick shows up here as the
+/// tick it became.
+pub(super) fn window_json(t0: i64, t1: Option<i64>, ts: f64) -> Json {
+    let end_h = t1.map(|t| crate::format::fmt_time(t, ts));
+    Obj::new()
+        .push("begin_ticks", Json::Int(t0))
+        .push("begin_h", Json::str(crate::format::fmt_time(t0, ts)))
+        .push("end_ticks", Json::opt_int(t1))
+        .push("end_h", opt_time(end_h.as_deref()))
+        .build()
+}
+
+/// A `(ticks, human)` pair under `<name>_ticks` / `<name>_h`.
+///
+/// The one spelling for a time in the JSON output. Each used to be written
+/// three times — `time`/`time_ticks`/`time_h`, `at`/`at_ticks`/`at_h` — where
+/// the bare key duplicated one of the other two, and did not even agree with
+/// itself across commands: `time` was the tick count, `at` and `begin` were the
+/// rendered string.
+pub(super) fn push_time(obj: Obj, name: &str, ticks: i64, ts: f64) -> Obj {
+    obj.push(format!("{name}_ticks"), Json::Int(ticks))
+        .push(format!("{name}_h"), Json::str(crate::format::fmt_time(ticks, ts)))
+}
+
+/// [`push_time`] for a time that may be absent, writing `null` to both keys so
+/// the pair is present either way.
+pub(super) fn push_opt_time(obj: Obj, name: &str, ticks: Option<i64>, ts: f64) -> Obj {
+    obj.push(format!("{name}_ticks"), Json::opt_int(ticks))
+        .push(
+            format!("{name}_h"),
+            match ticks {
+                Some(t) => Json::str(crate::format::fmt_time(t, ts)),
+                None => Json::Null,
+            },
+        )
+}
+
+/// The four count fields every command carries, in one fixed order.
+///
+/// `shown` is what came back, `total` how many there were; `total_is_exact` is
+/// false only where the command stops counting once the limit is met. Written
+/// through one helper so the set and the order cannot drift per command.
+pub(super) fn push_counts(obj: Obj, shown: usize, total: usize, exact: bool, trunc: bool) -> Obj {
+    obj.push("shown", Json::Int(shown as i64))
+        .push("truncated", Json::Bool(trunc))
+        .push("total", Json::Int(total as i64))
+        .push("total_is_exact", Json::Bool(exact))
+}
+
+/// The text-mode window header, matching [`window_json`].
+pub(super) fn window_line(t0: i64, t1: Option<i64>, ts: f64) -> String {
+    format!(
+        "Window: {}..{}",
+        crate::format::fmt_time(t0, ts),
+        t1.map(|t| crate::format::fmt_time(t, ts)).unwrap_or_else(|| "(end)".to_string())
+    )
 }
 
 pub(super) fn opt_time(s: Option<&str>) -> Json {

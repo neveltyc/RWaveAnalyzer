@@ -6,7 +6,7 @@
 use crate::cli::Args;
 use crate::format::fmt_time;
 use crate::json::{Json, Obj};
-use crate::model::Wave;
+use crate::model::{Sid, Wave};
 use super::common::*;
 
 /// One collected `dump` event with its value already formatted. Shared by the
@@ -19,16 +19,29 @@ struct DumpRow {
     type_str: &'static str,
 }
 
+/// Everything `dump` computed: the rows, the clip decision, the resolved
+/// window, and what the selection actually caught.
+struct DumpData {
+    rows: Vec<DumpRow>,
+    truncated: bool,
+    t0: i64,
+    t1: Option<i64>,
+    selected: Vec<Sid>,
+    matched: MatchReport,
+}
+
 /// Collect the in-window events (already clipped to `--limit`, value strings
 /// formatted), choosing the memory-bounded collector for large/unfiltered
 /// selections and the eager heap-merge for small ones — both produce the same
-/// ordered rows. Returns `(rows, truncated)`.
-fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), String> {
+/// ordered rows.
+fn dump_collect(wave: &mut Wave, args: &Args) -> Result<DumpData, String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let sel = match_selection(wave, args)?;
+    let selection = selection_of(args)?;
+    let sel = match_selection(wave, &selection);
     let limit = limit_of(args);
     let selected = selected_sids(wave, &sel);
+    let matched = match_report(wave, &selection, &selected);
     let sel_ref = sel.as_deref();
 
     let mut rows: Vec<DumpRow> = Vec::new();
@@ -74,24 +87,24 @@ fn dump_collect(wave: &mut Wave, args: &Args) -> Result<(Vec<DumpRow>, bool), St
         });
         truncated = trunc;
     }
-    Ok((rows, truncated))
+    Ok(DumpData { rows, truncated, t0, t1, selected, matched })
 }
 
 pub(super) fn compute_dump(wave: &mut Wave, args: &Args) -> Result<Json, String> {
     let ts = wave.ts_sec();
     let verbose = args.verbose;
-    let (rows, truncated) = dump_collect(wave, args)?;
+    let d = dump_collect(wave, args)?;
+    let (rows, truncated) = (&d.rows, d.truncated);
     let shown = rows.len();
     let mut arr: Vec<Json> = Vec::with_capacity(shown);
     let mut last_t = i64::MIN;
     let mut last_th = String::new();
-    for r in &rows {
+    for r in rows {
         if r.tick != last_t {
             last_t = r.tick;
             last_th = fmt_time(r.tick, ts);
         }
         let mut o = Obj::new()
-            .push("time", Json::Int(r.tick))
             .push("time_ticks", Json::Int(r.tick))
             .push("time_h", Json::str(last_th.clone()))
             .push("path", Json::str(r.path.clone()))
@@ -110,29 +123,45 @@ pub(super) fn compute_dump(wave: &mut Wave, args: &Args) -> Result<Json, String>
         (shown, false)
     };
     let obj = Obj::new()
-        .push("shown", Json::Int(shown as i64))
-        .push("truncated", Json::Bool(trunc_final));
-    let obj = push_trunc_hint(obj, trunc_final, shown, total_field, false, "events")
-        .push("events", Json::Array(arr))
-        .extend(total_json_fields(total_field, trunc_final))
-        .build();
+        .push("window", window_json(d.t0, d.t1, ts))
+        .push("matched", d.matched.json())
+        .push("selected", Json::Int(d.selected.len() as i64));
+    let obj = push_counts(obj, shown, total_field, !trunc_final, trunc_final);
+    let mut hints = Hints::new();
+    hints.push_opt(trunc_hint(trunc_final, shown, total_field, false, "events"));
+    hints.push_opt(d.matched.alias_note());
+    if shown == 0 {
+        hints.push(empty_window_reason(wave, &d.selected, d.matched.selective, d.t0, ts));
+    }
+    let obj = hints.attach(obj).push("events", Json::Array(arr)).build();
     Ok(obj)
 }
 
 pub(super) fn text_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let ts = wave.ts_sec();
     let verbose = args.verbose;
-    let (rows, truncated) = dump_collect(wave, args)?;
+    let d = dump_collect(wave, args)?;
+    let (rows, truncated) = (&d.rows, d.truncated);
     let shown = rows.len();
+    println!("{}", window_line(d.t0, d.t1, ts));
+    if let Some(h) = d.matched.header() {
+        println!("{h}");
+    }
+    if let Some(note) = d.matched.alias_note() {
+        println!("Note: {note}");
+    }
     if shown == 0 {
-        println!("(no changes in range)");
+        println!(
+            "(no events: {})",
+            empty_window_reason(wave, &d.selected, d.matched.selective, d.t0, ts)
+        );
         return Ok(());
     }
     let mut out = String::new();
     let mut cur = i64::MIN;
     let mut last_t = i64::MIN;
     let mut last_th = String::new();
-    for r in &rows {
+    for r in rows {
         if r.tick != last_t {
             last_t = r.tick;
             last_th = fmt_time(r.tick, ts);

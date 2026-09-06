@@ -71,6 +71,9 @@ pub struct Args {
     /// Subtractive counterpart of `--filter`: same pattern language, applied
     /// last. Usable on its own to carve noise out of a whole-file query.
     pub exclude: Option<String>,
+    /// `--exact`: a wildcard-free `--filter`/`--exclude` pattern must be the
+    /// whole name, not a substring of it.
+    pub exact: bool,
     pub at: Option<String>,
     /// Search conditions. Each element is one `--condition` clause (a
     /// comma-separated AND list); repeating `--condition` ORs the clauses
@@ -111,6 +114,7 @@ pub struct Defaults {
     pub depth: Option<i64>,
     pub filter: Option<String>,
     pub exclude: Option<String>,
+    pub exact: bool,
     pub at: Option<String>,
     /// Default `--condition` clause group; a batch line with any `--condition`
     /// of its own replaces this whole group (see [`parse_batch_line`]).
@@ -173,12 +177,12 @@ Commands:
   tree      <file> [SCOPE] [--depth N] [--of SIGNAL]
                                                 Browse the hierarchy: child scopes of SCOPE, or --of's full ancestor chain
   trace     <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]
-                                                Experimental, off unless RWAVE_TRACE_EN=1: what drives SIGNAL (--load: what
-                                                reads it), with file:line. Needs an FSDB opened through the built-in Verdi
-                                                NPI backend. The design library is read from the FSDB itself; --kdb is only
-                                                for when it has moved.
+                                                What drives SIGNAL (--load: what reads it), with file:line. Needs an FSDB
+                                                opened through the built-in Verdi NPI backend. The design library is read
+                                                from the FSDB itself; --kdb is only for when it has moved. On by default;
+                                                RWAVE_TRACE_EN=0 turns it off.
 
-Selection options (all four on every command except info, tree, and trace;
+Selection options (all five on every command except info, tree, and trace;
 tree takes --scope and --depth only):
   --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
                     name ('*' and '?' allowed); a path matches as a segment-aligned
@@ -189,6 +193,11 @@ tree takes --scope and --depth only):
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
+  --exact           A wildcard-free --filter/--exclude pattern must be the whole
+                    name, not a substring of it: 'req' then means req and not
+                    req_strobe. Patterns with '*'/'?' are anchored either way.
+                    Also applies to search's --condition/--show names. A vector's
+                    name includes its range, so use 'state[2:0]', not 'state'.
 
 tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
 N levels below the matched scope root, tree counting scopes where list counts
@@ -198,8 +207,15 @@ the root. It ignores --filter and --exclude.
 Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
 instance named after it; one containing a '.' or '/' matches the whole path. Either
-way, no '*' or '?' means substring, and '*'/'?' make it an anchored glob ('[' and
-']' stay literal, for bus ranges). An empty value ('') means "not given".
+way, no '*' or '?' means substring (--exact makes it the whole name instead), and
+'*'/'?' make it an anchored glob ('[' and ']' stay literal, for bus ranges). An
+empty value ('') means "not given".
+
+dump, summary, snapshot and compare print what the selection caught before the
+rows —
+"Matched N signals: ..." — so a pattern that reached further than intended is
+visible without a second query. Where a waveform declares one signal under
+several names, the matched name and the name the rows carry are both shown.
 
 Selection is decided per alias path: a signal is kept when any one of its paths
 clears every option, and list prints only the paths that did. search resolves its
@@ -214,17 +230,21 @@ Global options:
   --version     Print version and exit
   -h, --help    Print this help and exit
 
-Batch mode (--batch): each stdin line is a command minus the leading 'rwave';
-results are emitted in input order. With --json each result is one NDJSON line
-{{"id","ok","result"|"error"}}; without it, each result is preceded by a
-'#label' header line. A trailing '#label' on an input line sets that result's
-id (otherwise a 1-based sequence number is used); blank lines and lines starting
-with '#' are skipped. [global-opts] become per-command defaults; each selection
-option overrides its own default, and a line lifts one it does not want with an
-empty value (--filter '').
+Batch mode (--batch): open the file once, then run one command per stdin line;
+a large waveform is slow to open, so pay that cost once. Blank and '#' lines
+are skipped and a trailing '#tag' names a result. A line is what you would type
+after 'rwave' minus the file: 'list --filter clk', 'dump --begin 1us --end 2us'.
+
+Results come back in input order: with --json one NDJSON line each,
+{{"id","ok","result"|"error"}}; without it a '#label' header before each. A failed
+line is ok:false and does not stop the run, which still exits 0 — check every
+line. [global-opts] are per-command defaults; a line overrides one, or lifts it
+with an empty value (--filter '').
 
 Supports both VCD and FST inputs; the format is auto-detected.
 Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
+A flag a command does not read is an error, not silence, so a mistyped time is
+reported rather than ignored.
 "#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
@@ -290,6 +310,7 @@ struct Acc {
     depth: Option<i64>,
     filter: Option<String>,
     exclude: Option<String>,
+    exact: bool,
     at: Option<String>,
     condition: Vec<String>,
     show: Option<String>,
@@ -314,6 +335,7 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
         match tok.as_str() {
             "--json" => acc.json = true,
             "--batch" => acc.batch = true,
+            "--exact" => acc.exact = true,
             "--verbose" => acc.verbose = true,
             "--control" => acc.control = true,
             "--driver" => {
@@ -474,80 +496,94 @@ fn dir_override(acc: &Acc) -> Option<bool> {
 
 /// Reject flags that do not belong to the command they were given with.
 ///
-/// Scoping is per command, not global: `--kdb` is `trace`'s business and no
-/// concern of `list`'s. The parser keeps one global flag table, so without this
-/// a command-specific flag would be quietly accepted and ignored everywhere.
+/// The parser keeps one global flag table, so without this a flag no command
+/// reads is accepted and ignored — and a *malformed value* on it goes with it,
+/// unparsed: `list f.vcd --begin nonsense` used to exit 0.
 ///
-/// Applied to what *this* invocation spelled out, never to values inherited
-/// from a `--batch` line — a session-wide `--kdb` default is there for the
-/// `trace` lines and must not make every `list` line fail.
-///
-/// Deliberately limited to the new flags and the two new commands. The seven
-/// original commands still tolerate the original flags they ignore
-/// (`list … --at 5` has always been accepted); tightening that is a change to
-/// shipped behaviour and belongs in its own commit, not this one.
+/// Applied only to what this invocation spelled out. Values inherited from a
+/// `--batch` line are exempt: a session-wide default is there for the lines
+/// that can use it.
 fn check_command_flags(command: &Command, acc: &Acc) -> Result<(), String> {
-    let only = |flag: &str, owner: &str| -> Result<(), String> {
-        Err(format!("{flag} is only valid for {owner}"))
-    };
-    let is_trace = matches!(command, Command::Trace);
-    let is_tree = matches!(command, Command::Tree);
-
-    if !is_trace {
-        if acc.driver {
-            return only("--driver", "trace");
-        }
-        if acc.load {
-            return only("--load", "trace");
-        }
-        if acc.control {
-            return only("--control", "trace");
-        }
-        if acc.kdb.is_some() {
-            return only("--kdb", "trace");
-        }
-        if acc.top.is_some() {
-            return only("--top", "trace");
-        }
-    }
-    if !is_tree && acc.of.is_some() {
-        return only("--of", "tree");
-    }
-    // The new commands are new, so restricting what they accept cannot break
-    // anything that already works.
-    let given = |v: &Option<String>| v.is_some();
-    if is_tree {
-        for (given_flag, name) in [
-            (given(&acc.filter), "--filter"),
-            (given(&acc.exclude), "--exclude"),
-            (given(&acc.at), "--at"),
-            (given(&acc.begin), "--begin"),
-            (given(&acc.end), "--end"),
-            (given(&acc.show), "--show"),
-            (!acc.condition.is_empty(), "--condition"),
-        ] {
-            if given_flag {
-                return Err(format!("{name} does not apply to tree"));
-            }
-        }
-    }
-    if is_trace {
-        for (given_flag, name) in [
-            (given(&acc.scope), "--scope"),
-            (acc.depth.is_some(), "--depth"),
-            (given(&acc.filter), "--filter"),
-            (given(&acc.exclude), "--exclude"),
-            (given(&acc.begin), "--begin"),
-            (given(&acc.end), "--end"),
-            (given(&acc.show), "--show"),
-            (!acc.condition.is_empty(), "--condition"),
-        ] {
-            if given_flag {
-                return Err(format!("{name} does not apply to trace"));
-            }
+    // Order fixes which flag a multiply-wrong invocation is told about first.
+    let given: &[(bool, &str)] = &[
+        (acc.begin.is_some(), "--begin"),
+        (acc.end.is_some(), "--end"),
+        (acc.at.is_some(), "--at"),
+        (acc.scope.is_some(), "--scope"),
+        (acc.depth.is_some(), "--depth"),
+        (acc.filter.is_some(), "--filter"),
+        (acc.exclude.is_some(), "--exclude"),
+        (acc.exact, "--exact"),
+        (!acc.condition.is_empty(), "--condition"),
+        (acc.show.is_some(), "--show"),
+        (acc.driver, "--driver"),
+        (acc.load, "--load"),
+        (acc.control, "--control"),
+        (acc.kdb.is_some(), "--kdb"),
+        (acc.top.is_some(), "--top"),
+        (acc.of.is_some(), "--of"),
+    ];
+    for (present, flag) in given {
+        if *present && !accepts_flag(command, flag) {
+            return Err(format!(
+                "{flag} does not apply to {}{}",
+                cmd_name(command),
+                misuse_hint(command, flag)
+            ));
         }
     }
     Ok(())
+}
+
+/// Does `command` read `flag` at all? The one place the answer lives; a command
+/// that stops consuming a flag has to be taken out of the row here, which is
+/// what keeps the CLI from drifting back into accepting flags it ignores.
+fn accepts_flag(command: &Command, flag: &str) -> bool {
+    use Command::*;
+    match flag {
+        // A time window: only the three commands that scan a span of time.
+        "--begin" | "--end" => matches!(command, Dump | Summary | Search),
+        // A single instant. `trace --at` picks the moment to explain.
+        "--at" => matches!(command, Snapshot | Compare | Trace),
+        // `tree` navigates the hierarchy, so it takes the structural half of
+        // the selection options but not the pattern half.
+        "--scope" | "--depth" => {
+            matches!(command, List | Dump | Summary | Snapshot | Compare | Search | Tree)
+        }
+        "--filter" | "--exclude" | "--exact" => {
+            matches!(command, List | Dump | Summary | Snapshot | Compare | Search)
+        }
+        "--condition" | "--show" => matches!(command, Search),
+        "--driver" | "--load" | "--control" | "--kdb" | "--top" => matches!(command, Trace),
+        "--of" => matches!(command, Tree),
+        // Global flags (`--json`, `--limit`, `--verbose`) reach every command.
+        _ => true,
+    }
+}
+
+/// The trailing half of a rejection message: what to reach for instead.
+///
+/// Only for the mix-ups worth a sentence — a time flag on a point-in-time
+/// command and the reverse, and the selection options on the two commands that
+/// select nothing. Everything else reads clearly enough from the flag name.
+fn misuse_hint(command: &Command, flag: &str) -> &'static str {
+    use Command::*;
+    match (command, flag) {
+        (Snapshot, "--begin" | "--end") => "; snapshot reads one instant, named by --at",
+        (Compare, "--begin" | "--end") => "; compare reads two instants, named by --at T1,T2",
+        (_, "--begin" | "--end") => {
+            "; dump, summary and search are the commands that take a window"
+        }
+        (Dump | Summary | Search, "--at") => "; use --begin/--end for a time window",
+        (_, "--at") => "; snapshot, compare and trace are the commands that read one instant",
+        (Info, _) => "; info describes the file as a whole and selects nothing",
+        (Trace, _) => "; trace works from the signal named on the command line",
+        (Tree, "--filter" | "--exclude" | "--exact") => "; tree selects with --scope and --depth",
+        (_, "--condition" | "--show") => "; only search takes them",
+        (_, "--driver" | "--load" | "--control" | "--kdb" | "--top") => "; only trace takes it",
+        (_, "--of") => "; only tree takes it",
+        _ => "",
+    }
 }
 
 /// `--of` walks up from a signal; `--scope` and `--depth` walk down from a
@@ -674,6 +710,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         depth: acc.depth,
         filter: acc.filter,
         exclude: acc.exclude,
+        exact: acc.exact,
         at: acc.at,
         condition: acc.condition,
         show: acc.show,
@@ -729,6 +766,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             depth: acc.depth,
             filter: acc.filter,
             exclude: acc.exclude,
+            exact: acc.exact,
             at: acc.at,
             condition: acc.condition,
             show: acc.show,
@@ -801,6 +839,11 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
     let depth = if scope_cleared { None } else { acc.depth.or(defaults.depth) };
     let filter = acc.filter.or_else(|| defaults.filter.clone());
     let exclude = acc.exclude.or_else(|| defaults.exclude.clone());
+    // Additive like `--verbose`: a session-wide `--exact` cannot be lifted for
+    // one line, because there is no value to blank out. A line that wants
+    // substring matching under an exact-by-default session writes the wildcard
+    // itself (`--filter '*name*'`).
+    let exact = acc.exact || defaults.exact;
     let at = acc.at.or_else(|| defaults.at.clone());
     // A line carrying any `--condition` of its own replaces the entire default
     // clause group; with none, the default group is inherited wholesale.
@@ -832,6 +875,7 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         depth,
         filter,
         exclude,
+        exact,
         at,
         condition,
         show,
@@ -945,7 +989,7 @@ pub fn split_line(line: &str) -> Result<(Vec<String>, Option<String>), String> {
     Ok((tokens, label))
 }
 
-fn cmd_name(c: &Command) -> &'static str {
+pub fn cmd_name(c: &Command) -> &'static str {
     match c {
         Command::Info => "info",
         Command::List => "list",
@@ -1043,28 +1087,129 @@ mod tests {
         assert!(!parse_batch_line(&v, "f.fsdb", &none).unwrap().load);
     }
 
-    /// Options introduced for one command must not become silently-ignored
-    /// noise on the others.
+    /// A flag a command does not read must not be silently-ignored noise on it.
+    /// Silence there hides a *malformed* value too: the command that ignores
+    /// `--begin` never parses it, so `list --begin banana` used to exit 0.
     #[test]
-    fn command_specific_flags_are_rejected_elsewhere() {
+    fn inapplicable_flags_are_rejected() {
         for (cmd, flag, val) in [
+            // Command-specific flags elsewhere.
             ("list", "--kdb", Some("x")),
             ("list", "--top", Some("x")),
             ("summary", "--of", Some("clk")),
             ("dump", "--driver", None),
             ("snapshot", "--load", None),
+            ("dump", "--condition", Some("a=1")),
+            ("list", "--show", Some("clk")),
+            // A time window on commands that read no span of time.
+            ("info", "--begin", Some("1ns")),
+            ("list", "--begin", Some("1ns")),
+            ("list", "--end", Some("1ns")),
+            ("snapshot", "--begin", Some("1ns")),
+            ("compare", "--end", Some("1ns")),
+            // A malformed value is rejected for being on the wrong command,
+            // rather than accepted for never being looked at.
+            ("list", "--begin", Some("banana")),
+            // A single instant on commands that scan a window.
+            ("dump", "--at", Some("1ns")),
+            ("summary", "--at", Some("1ns")),
+            ("search", "--at", Some("1ns")),
+            ("list", "--at", Some("1ns")),
+            // Selection on the two commands that select nothing.
+            ("info", "--filter", Some("clk")),
+            ("info", "--scope", Some("tb")),
+            ("trace", "--filter", Some("clk")),
+            // `tree` navigates rather than pattern-matches.
+            ("tree", "--filter", Some("clk")),
+            ("tree", "--exclude", Some("clk")),
+            ("tree", "--exact", None),
         ] {
             let mut argv = vec![cmd.to_string(), "f.vcd".to_string(), flag.to_string()];
             if let Some(v) = val {
                 argv.push(v.to_string());
             }
             match p(&argv.iter().map(String::as_str).collect::<Vec<_>>()) {
-                ParseOutcome::Error(m) => {
-                    assert!(m.contains("only valid for"), "{cmd} {flag}: {m}")
-                }
+                ParseOutcome::Error(m) => assert!(
+                    m.contains(flag) && m.contains(cmd),
+                    "{cmd} {flag}: message should name both: {m}"
+                ),
                 other => panic!("{cmd} {flag} was accepted: {}", outcome_kind(&other)),
             }
         }
+    }
+
+    /// The other direction: the commands that *do* read a flag keep taking it.
+    /// Without this the check above could be tightened into uselessness.
+    #[test]
+    fn applicable_flags_are_still_accepted() {
+        for cmd in [
+            vec!["dump", "f.vcd", "--begin", "1ns", "--end", "2ns"],
+            vec!["summary", "f.vcd", "--begin", "1ns"],
+            vec!["search", "f.vcd", "--condition", "a=1", "--end", "2ns"],
+            vec!["snapshot", "f.vcd", "--at", "1ns"],
+            vec!["compare", "f.vcd", "--at", "1ns,2ns"],
+            vec!["trace", "f.vcd", "clk", "--at", "1ns"],
+            vec!["tree", "f.vcd", "--scope", "tb", "--depth", "2"],
+            vec!["list", "f.vcd", "--filter", "clk", "--exact"],
+            vec!["dump", "f.vcd", "--exclude", "clk", "--exact"],
+            vec!["search", "f.vcd", "--condition", "a=1", "--exact"],
+        ] {
+            match p(&cmd) {
+                ParseOutcome::Run(_) => {}
+                other => panic!("{cmd:?} was rejected: {}", outcome_kind(&other)),
+            }
+        }
+    }
+
+    /// A `--batch` default reaches the lines that can use it and is ignored by
+    /// the rest, so a session-wide `--begin` must not make every `list` line
+    /// fail the applicability check.
+    #[test]
+    fn batch_defaults_bypass_the_applicability_check() {
+        let defaults = Defaults {
+            begin: Some("1ns".to_string()),
+            kdb: Some("/x".to_string()),
+            ..Defaults::default()
+        };
+        let line = vec!["list".to_string()];
+        let args = parse_batch_line(&line, "f.vcd", &defaults).expect("inherited default is fine");
+        assert_eq!(args.begin.as_deref(), Some("1ns"));
+        // Written out on the line itself, it is still an error.
+        let line: Vec<String> = ["list", "--begin", "1ns"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_batch_line(&line, "f.vcd", &Defaults::default()).is_err());
+    }
+
+    /// The batch lines shown in `--help` have to be lines `--batch` accepts.
+    /// An example that does not parse is worse than no example.
+    #[test]
+    fn the_help_text_batch_examples_parse() {
+        let help = help_text();
+        for example in ["list --filter clk", "dump --begin 1us --end 2us"] {
+            assert!(help.contains(example), "--help no longer shows {example:?}");
+            let tokens: Vec<String> = example.split(' ').map(str::to_string).collect();
+            parse_batch_line(&tokens, "f.vcd", &Defaults::default())
+                .unwrap_or_else(|e| panic!("--help shows {example:?}, which does not parse: {e}"));
+        }
+        // The trailing-tag form the same paragraph describes.
+        let (tokens, label) = split_line("list --filter clk  #clocks").expect("tokenizes");
+        assert_eq!(label.as_deref(), Some("clocks"));
+        parse_batch_line(&tokens, "f.vcd", &Defaults::default()).expect("tagged line parses");
+    }
+
+    /// `--exact` is additive across the batch merge, like `--verbose`.
+    #[test]
+    fn exact_is_inherited_by_batch_lines() {
+        let defaults = Defaults { exact: true, ..Defaults::default() };
+        let line = vec!["dump".to_string()];
+        let args = parse_batch_line(&line, "f.vcd", &defaults).expect("parses");
+        assert!(args.exact);
+        let args = parse_batch_line(
+            &["dump".to_string(), "--exact".to_string()],
+            "f.vcd",
+            &Defaults::default(),
+        )
+        .expect("parses");
+        assert!(args.exact);
     }
 
     #[test]

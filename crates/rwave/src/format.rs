@@ -517,11 +517,27 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
     }
     for (u, f) in UNITS {
         let scaled = sec / f;
-        if (-1000.0 < scaled && scaled < 1000.0) || *u == "s" {
+        // Range-test the value that will be *printed*, not the raw quotient.
+        // At a 1ps timescale 1us is exactly 1e-6 s, and 1e-6 / 1e-9 is
+        // 999.9999999999999: it passes a bare `< 1000` test, and `fmt_g` then
+        // rounds it to "1000" — giving "1000ns" under a rule that had already
+        // decided ns was too small. Which side of the boundary the quotient
+        // lands on depends on how the seconds were arrived at, so the same
+        // instant printed from two timescales disagreed.
+        if (-1000.0 < round_sig(scaled) && round_sig(scaled) < 1000.0) || *u == "s" {
             return format!("{}{}", fmt_g(scaled), u);
         }
     }
     format!("{}s", fmt_g(sec))
+}
+
+/// `x` rounded to the six significant digits [`fmt_g`] renders, so a caller can
+/// ask what a value will look like before deciding how to label it.
+fn round_sig(x: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    format!("{x:.5e}").parse().unwrap_or(x)
 }
 
 /// Render a Unix timestamp as `YYYY-MM-DD HH:MM:SS UTC`.
@@ -791,6 +807,29 @@ mod tests {
         assert!(parse_time("5 ns", ts).is_err()); // space
         assert!(parse_time("-5", ts).is_err()); // negative
         assert_eq!(parse_time("-0", ts).unwrap(), 0); // -0 ok
+    }
+
+    /// The unit and the digits have to agree. A quotient that rounds up to
+    /// 1000 belongs in the next unit up, and whether it does was a matter of
+    /// which timescale the seconds came from.
+    #[test]
+    fn fmt_time_unit_matches_the_printed_digits() {
+        // 1us, reached three ways: 1e6 ticks of 1ps, 1e3 ticks of 1ns, and
+        // 1 tick of 1us. Same instant, so the same rendering.
+        assert_eq!(fmt_time(1_000_000, 1e-12), "1us");
+        assert_eq!(fmt_time(1_000, 1e-9), "1us");
+        assert_eq!(fmt_time(1, 1e-6), "1us");
+        // Every boundary, from the coarsest timescale that reaches it.
+        assert_eq!(fmt_time(1_000, 1e-15), "1ps");
+        assert_eq!(fmt_time(1_000_000, 1e-15), "1ns");
+        assert_eq!(fmt_time(1_000_000_000, 1e-15), "1us");
+        assert_eq!(fmt_time(1_000_000_000_000, 1e-15), "1ms");
+        assert_eq!(fmt_time(1_000_000_000_000_000, 1e-15), "1s");
+        // Just under a boundary still uses the smaller unit.
+        assert_eq!(fmt_time(999_999, 1e-12), "999.999ns");
+        // And a value that only *rounds* to 1000 moves up rather than
+        // printing "1000" of the smaller unit.
+        assert_eq!(fmt_time(999_999_999, 1e-15), "1us");
     }
 
     #[test]
