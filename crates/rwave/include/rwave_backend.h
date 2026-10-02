@@ -1,5 +1,5 @@
 /*
- * rwave backend ABI v1.
+ * rwave backend ABI.
  *
  * External backends implement this ABI in a cdylib; rwave dlopens it at
  * runtime, located via $RWAVE_PLUGIN_<EXT>. The built-in wlf/fsdb
@@ -97,7 +97,7 @@ typedef void (*RwaveEmit)(
 );
 
 /* The backend vtable. Returned by rwave_backend(). Field order is
- * stable; future ABI v1 revisions may only append. */
+ * stable; future ABI revisions may only append. */
 typedef struct {
     uint32_t        abi_version;   /* must equal RWAVE_BACKEND_ABI_VERSION */
     const char     *name;          /* format token — equals the file

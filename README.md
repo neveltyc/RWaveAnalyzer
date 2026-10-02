@@ -503,7 +503,7 @@ MIT，见 [LICENSE](LICENSE)，覆盖 rwave 自己的代码。vendor 进来的�
 的许可证：`vendor/wellen` 和 `vendor/fst-reader` 都是 BSD-3-Clause，各自的许可证
 文件保留在它们自己的目录里。
 
-因为 rwave 是以单个静态链接的二进制发布的，下载到的 release 文件周围没有仓库，
+因为 rwave 是以单个自包含的二进制发布的，下载到的 release 文件周围没有仓库，
 所以它的依赖在二进制再分发时要求的那些声明，都汇总在
 [third-party-licenses.md](third-party-licenses.md) 里，随每次 release 一起发布。
 依赖变动之后，重新生成它：

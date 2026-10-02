@@ -67,10 +67,15 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
+      # `triple` here only preinstalls that target's std lib; the Build step
+      # passes the `target` label to scripts/build-release.sh, which resolves
+      # the triple itself. The glibc-2.17 baseline for linux-amd64 is pinned
+      # there, as the `.2.17` suffix cargo-zigbuild reads — the Rust target
+      # stays x86_64-unknown-linux-gnu, since a musl-static CRT cannot dlopen.
       matrix:
         include:
           - target: linux-amd64
-            triple: x86_64-unknown-linux-musl
+            triple: x86_64-unknown-linux-gnu
             runs-on: ubuntu-latest
             needs-zigbuild: true
           - target: linux-arm64

@@ -58,8 +58,8 @@ vtable in this order:
    (uppercase format token), an absolute path to a backend cdylib.
    Example: `RWAVE_PLUGIN_FSDB=/abs/path/to/librwave_fsdb_backend.so`.
    If set and the file exists, rwave `dlopen`s it.
-2. **Built-in** — `wlf`/`fsdb` where compiled in (amd64; WLF also on
-   windows), the compiled-in vtable.
+2. **Built-in** — `wlf`/`fsdb` where compiled in (linux-amd64), the
+   compiled-in vtable.
 3. Otherwise rwave emits the "no backend" error (below).
 
 That is the whole rule: one env var per format, or a built-in. No search
@@ -332,6 +332,7 @@ A plugin is conformant if:
 |--------|------|-----------|-------|
 | `wlf`  | built-in | `libwlf.so` (`$RWAVE_WLF_LIB`) | Mentor/Questa; linux-amd64 |
 | `fsdb` | built-in | `libNPI.so` (under `$VERDI_HOME`; `$RWAVE_FSDB_LIB` overrides) | Synopsys Verdi NPI; needs a Verdi-Ultra license; linux-amd64 |
+| `fsdb` | external — [rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) (`$RWAVE_PLUGIN_FSDB`) | FsdbReader | Source-only, no vendor binaries shipped; you build it against your own Verdi, but it needs no Verdi-Ultra license at runtime. Wins over the built-in. |
 
 To register an external plugin, send a PR adding a row.
 

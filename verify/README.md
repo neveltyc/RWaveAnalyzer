@@ -17,8 +17,8 @@ cargo build --release
 bash verify/run.sh
 ```
 
-Expected: `RESULT: PASS=N FAIL=0`. The exact `N` is stable per stimulus
-set (currently 174 for `run.sh`).
+Expected: `RESULT: PASS=N FAIL=0`. `N` depends on the stimulus set, so the
+count is not pinned here.
 
 ## Stimulus sets
 
