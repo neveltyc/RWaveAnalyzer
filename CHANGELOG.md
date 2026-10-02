@@ -6,6 +6,28 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-10-02
+
+### Added
+- **Don't-care bits in `search` targets.** A condition compares a whole value,
+  so "bit 2 of `status` is 1" — 128 distinct values on an 8-bit bus — could not
+  be asked; the only route was dumping the bus and decoding it outside the
+  tool, which runs into `--limit` on long traces. A `?` in a binary literal now
+  matches any bit value, like `?` in a Verilog `casez` item: `status=b?????1??`
+  tests one bit, `state=b10??` a field. Unlike Verilog, a leading `?` does not
+  extend, and `z` is an ordinary cared bit, so a pattern can still look for `z`. Both sides are left-extended by the VCD rule
+  first, so a short literal still pads with `0` (write every bit to leave the
+  high bits free), and a mask runs against compressed dumps such as iverilog's
+  `b1xxxx`. Under `!=`, only the cared bits must be known: an `x` under a `?`
+  does not block the match. `?` needs the `b`/`0b` prefix (a bare `1??0` is
+  rejected with a hint), and a mask on a real, string or event signal is an
+  error rather than a term that can never hold. A plain 4-state literal is now
+  the same comparison with every bit cared, which changes two edge cases: extra
+  leading zeros beyond the signal width are harmless (`b00x1` on a 2-bit signal
+  used to match nothing), and a malformed value longer than its declared width
+  reads as all-`x`, as it already displays. A `1`/`x`/`z` above the width still
+  never matches.
+
 ## [0.3.0] — 2026-09-06
 
 `--json` output has a fixed shape now, and `trace` is on by default. Both are

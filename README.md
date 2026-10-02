@@ -174,7 +174,8 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
   下还会带一个 `hint` 字段。
 - **条件**（`search` 用）是一串用逗号连起来的 AND 条件，每项是 `SIG=VAL`、
   `SIG!=VAL` 或 `changed(SIG)`；值可以写十进制、十六进制（`0xff`）、二进制
-  （`b1010`）或 4 态。写 `changed(SIG)` 会切换到事件模式，报告 SIG 翻转、同时子句
+  （`b1010`）或 4 态；二进制字面量里的 `?` 是无关位，类似 Verilog `casez` 分支里的 `?`
+  （`status=b?????1??` 检查 8 位总线的第 2 位）。写 `changed(SIG)` 会切换到事件模式，报告 SIG 翻转、同时子句
   其余部分也成立的那些时刻。重复写 `--condition`，就是把这些子句用 OR 连接（它们
   要么都包含 `changed()`，要么都不包含）；字符串内部不支持 OR。
 

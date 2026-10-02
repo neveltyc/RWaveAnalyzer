@@ -243,6 +243,9 @@ with an empty value (--filter '').
 
 Supports both VCD and FST inputs; the format is auto-detected.
 Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
+Condition values: decimal 5, hex 0xff, binary b1010, 4-state b1x0z. A '?' in a binary
+literal is a don't-care bit: status=b?????1?? tests bit 2 of an 8-bit bus (a short
+literal pads with 0, so write every bit; quote the condition in the shell).
 A flag a command does not read is an error, not silence, so a mistyped time is
 reported rather than ignored.
 "#,
