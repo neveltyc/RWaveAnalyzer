@@ -1,0 +1,17 @@
+# Pinned so a new rustc stable cannot redden main on its own: 1.99.0
+# (2026-09-28) made `invalid_runtime_symbol_definitions` deny by default and
+# both linux-amd64 jobs failed with no commit in between.
+#
+# 1.96.0 is what this repo is developed against locally, so CI and the
+# maintainer's machine run the same compiler. Moving the pin forward later is
+# safe — the FSDB `open` declaration compiles clean on 1.96 and 1.99 alike.
+#
+# No `targets` list: scripts/build-release.sh runs `rustup target add` for the
+# triple it builds, and that lands on this pinned toolchain. Listing all four
+# would make every host download every std. No `components` either — nothing
+# in CI runs clippy or rustfmt.
+#
+# Only honored where cargo is a rustup proxy (CI, `rustup run`); a cargo
+# symlinked straight into a toolchain dir ignores this file.
+[toolchain]
+channel = "1.96.0"

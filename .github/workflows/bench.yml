@@ -50,8 +50,8 @@ jobs:
           # for a manual dispatch this is null and falls back to the default ref.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
