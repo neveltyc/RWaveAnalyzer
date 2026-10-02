@@ -461,7 +461,10 @@ struct StdioSilence {
 impl StdioSilence {
     fn new() -> Option<Self> {
         unsafe extern "C" {
-            fn open(path: *const c_char, flags: c_int) -> c_int;
+            // Variadic to match libc's `open(const char*, int, ...)`: rustc
+            // rejects a same-named extern with a non-variadic prototype as an
+            // invalid definition of a symbol std's own runtime provides.
+            fn open(path: *const c_char, flags: c_int, ...) -> c_int;
             fn dup(fd: c_int) -> c_int;
             fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
         }
