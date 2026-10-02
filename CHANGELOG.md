@@ -28,6 +28,14 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   reads as all-`x`, as it already displays. A `1`/`x`/`z` above the width still
   never matches.
 
+### Fixed
+- **A binary target and a decimal one with the same digits were de-duplicated
+  as one term.** `search` folds repeated terms and clauses by the target as
+  written, but a binary target was keyed on its digits with the `b` dropped, so
+  `--condition bus=b10 --condition bus=10` (2 and 10) answered only the clause
+  written first, and the AND clause `bus=b10,bus=10` reported the intervals of
+  one term instead of none. The key now keeps the prefix.
+
 ## [0.3.0] — 2026-09-06
 
 `--json` output has a fixed shape now, and `trace` is on by default. Both are

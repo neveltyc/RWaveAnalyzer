@@ -88,3 +88,38 @@ fn mask_errors() {
     assert!(err.contains("needs a binary prefix"), "{err}");
     let _ = std::fs::remove_file(&vcd);
 }
+
+/// Like `spans`, but with each element of `conds` as its own `--condition`.
+fn or_spans(vcd: &std::path::Path, conds: &[&str]) -> Vec<(u64, u64)> {
+    let mut args = vec!["search".to_string(), vcd.to_str().unwrap().to_string()];
+    for c in conds {
+        args.push("--condition".into());
+        args.push(c.to_string());
+    }
+    args.extend(["--begin", "0", "--end", "60ns", "--json"].map(String::from));
+    let out = Command::new(env!("CARGO_BIN_EXE_rwave")).args(&args).output().expect("spawn rwave");
+    assert!(out.status.success(), "{conds:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rows = stdout.split("\"rows\":").nth(1).expect("rows key");
+    rows.split("\"begin_ticks\":")
+        .skip(1)
+        .map(|row| {
+            let num = |s: &str| s.split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap();
+            (num(row), num(row.split("\"end_ticks\":").nth(1).unwrap()))
+        })
+        .collect()
+}
+
+#[test]
+fn binary_and_decimal_targets_with_the_same_digits_do_not_fold() {
+    // bus is 2 (b10) in [10,20) and 10 in [20,40). The binary body `10` used
+    // to share a de-dup key with the decimal `10`, so one clause or term was
+    // silently dropped and the answer depended on the order written.
+    let vcd = write_vcd("dedup");
+    assert_eq!(or_spans(&vcd, &["bus=b10", "bus=10"]), [(10, 40)]);
+    assert_eq!(or_spans(&vcd, &["bus=10", "bus=b10"]), [(10, 40)]);
+    // As an AND clause the two can never hold together.
+    assert_eq!(spans(&vcd, "bus=b10,bus=10"), []);
+    assert_eq!(spans(&vcd, "bus=10,bus=b10"), []);
+    let _ = std::fs::remove_file(&vcd);
+}

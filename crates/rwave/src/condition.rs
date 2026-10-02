@@ -257,11 +257,12 @@ fn parse_binary_body(body: &str, raw: &str, text: &str) -> Result<Target, ValueP
         )));
     }
     if let Some(n) = BigUint::from_binary(body) {
-        Ok(Target { raw: body.to_string(), int: Some(n) })
+        // Keep the prefix: `raw` is the spelling the de-dup key reads, and a
+        // bare body would fold `b1010` (10) into the decimal `1010`.
+        Ok(Target { raw: raw.to_string(), int: Some(n) })
     } else if is_mask_bits(body) {
         Ok(Target { raw: body.to_string(), int: None })
     } else {
-        let _ = raw;
         Err(ValueParseError(format!(
             "invalid binary target {}; expected only 0/1/x/z, or ? for a don't-care bit", crate::format::pyrepr(text)
         )))
@@ -767,6 +768,17 @@ mod tests {
         let t = mask("b1?");
         // (search rejects a mask on a non-logic signal before it gets here.)
         assert!(!condition_match(None, Some("3.0"), Op::Eq, &t, 64));
+    }
+
+    #[test]
+    fn dedup_key_keeps_the_base() {
+        // b1010 is 10, 1010 is one thousand and ten: never the same term.
+        let bin = parse_target_value("b1010").unwrap();
+        let dec = parse_target_value("1010").unwrap();
+        assert_ne!(bin.dedup_key(), dec.dedup_key());
+        assert_ne!(parse_target_value("0b1010").unwrap().dedup_key(), dec.dedup_key());
+        // The same spelling still folds.
+        assert_eq!(bin.dedup_key(), parse_target_value("B1010").unwrap().dedup_key());
     }
 
     #[test]
