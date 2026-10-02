@@ -85,6 +85,15 @@ or `changed(SIG)`.
   lookup, or give the full path (a full path bypasses selection).
 - Values: decimal (`5`), hex (`0xff`), binary (`b1010` / `0b1010`),
   4-state (`b1x0z`), or bare `x`/`z`.
+- **Don't-care bits:** `?` in a binary literal matches any bit value, like
+  `?` in a Verilog `casez` item — `status=b?????1??` holds wherever bit 2 of an 8-bit
+  `status` is 1, and `state=b10??` on a 4-bit `state` tests its top two bits.
+  A short literal still pads with `0` (so `b1??` on 8 bits requires the top
+  five bits to be 0): check the width with `list` and write every bit. `?`
+  needs the `b`/`0b` prefix and works only on logic signals. Under `!=`, an
+  `x`/`z` sitting under a `?` does not block a match; only the cared bits
+  must be known. Unlike Verilog, a leading `?` does not extend and `z` is a
+  cared bit. Quote the condition so the shell does not glob the `?`.
 - `!=` does **not** match `x`/`z` ("unknown is not evidence of
   difference"). To find unknowns, ask explicitly with `sig=x`.
 - `changed(SIG)`: edge predicate, true at exactly the ticks where SIG

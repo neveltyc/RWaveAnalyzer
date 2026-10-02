@@ -197,6 +197,15 @@ fn resolve_conditions(
         let sid = resolve_one_signal(wave, sel, &c.pattern, role, mode)?;
         let info = wave.signal(sid);
         let term = match c.term {
+            TermBody::Level { ref target, .. } if target.is_mask() && info.kind != ValueKind::Bits => {
+                // A real/string/event value has no bits for `?` to skip; the
+                // term could only ever be false, so say so instead.
+                return Err(format!(
+                    "condition {}: a don't-care (?) target is a bit pattern and needs a logic signal; {} is not one",
+                    crate::format::pyrepr(&c.original),
+                    info.path
+                ));
+            }
             TermBody::Level { op, target, value_text } => ResolvedTerm::Level {
                 op,
                 target,
