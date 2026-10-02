@@ -207,10 +207,10 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
         };
     }
     if let Some(body) = raw.strip_prefix("0b") {
-        return parse_binary_body(body, &raw, text);
+        return parse_binary_body(body, text);
     }
     if let Some(body) = raw.strip_prefix('b') {
-        return parse_binary_body(body, &raw, text);
+        return parse_binary_body(body, text);
     }
     if raw.starts_with('+') {
         return Err(ValueParseError(
@@ -247,7 +247,7 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
     }
 }
 
-fn parse_binary_body(body: &str, raw: &str, text: &str) -> Result<Target, ValueParseError> {
+fn parse_binary_body(body: &str, text: &str) -> Result<Target, ValueParseError> {
     if body.is_empty() {
         return Err(ValueParseError("binary target must contain at least one bit".into()));
     }
@@ -257,9 +257,10 @@ fn parse_binary_body(body: &str, raw: &str, text: &str) -> Result<Target, ValueP
         )));
     }
     if let Some(n) = BigUint::from_binary(body) {
-        // Keep the prefix: `raw` is the spelling the de-dup key reads, and a
-        // bare body would fold `b1010` (10) into the decimal `1010`.
-        Ok(Target { raw: raw.to_string(), int: Some(n) })
+        // Keep the base: `raw` is what the de-dup key reads, and a bare body
+        // would fold `b1010` (10) into the decimal `1010`. `b` and `0b` are
+        // one base, so both spell it `b`.
+        Ok(Target { raw: format!("b{body}"), int: Some(n) })
     } else if is_mask_bits(body) {
         Ok(Target { raw: body.to_string(), int: None })
     } else {
@@ -776,9 +777,9 @@ mod tests {
         let bin = parse_target_value("b1010").unwrap();
         let dec = parse_target_value("1010").unwrap();
         assert_ne!(bin.dedup_key(), dec.dedup_key());
-        assert_ne!(parse_target_value("0b1010").unwrap().dedup_key(), dec.dedup_key());
-        // The same spelling still folds.
+        // The same base still folds, whichever binary prefix spells it.
         assert_eq!(bin.dedup_key(), parse_target_value("B1010").unwrap().dedup_key());
+        assert_eq!(bin.dedup_key(), parse_target_value("0b1010").unwrap().dedup_key());
     }
 
     #[test]

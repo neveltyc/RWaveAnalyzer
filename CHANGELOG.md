@@ -15,8 +15,8 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   tool, which runs into `--limit` on long traces. A `?` in a binary literal now
   matches any bit value, like `?` in a Verilog `casez` item: `status=b?????1??`
   tests one bit, `state=b10??` a field. Unlike Verilog, a leading `?` does not
-  extend, and `z` is an ordinary cared bit, so a pattern can still look for `z`. Both sides are left-extended by the VCD rule
-  first, so a short literal still pads with `0` (write every bit to leave the
+  extend, and `z` is an ordinary cared bit, so a pattern can still look for
+  `z`. Both sides are left-extended by the VCD rule first, so a short literal still pads with `0` (write every bit to leave the
   high bits free), and a mask runs against compressed dumps such as iverilog's
   `b1xxxx`. Under `!=`, only the cared bits must be known: an `x` under a `?`
   does not block the match. `?` needs the `b`/`0b` prefix (a bare `1??0` is
@@ -34,7 +34,8 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
   written, but a binary target was keyed on its digits with the `b` dropped, so
   `--condition bus=b10 --condition bus=10` (2 and 10) answered only the clause
   written first, and the AND clause `bus=b10,bus=10` reported the intervals of
-  one term instead of none. The key now keeps the prefix.
+  one term instead of none. The key now keeps the base (`b10` and `0b10`, one
+  spelling of one base, still fold).
 
 ## [0.3.0] — 2026-09-06
 

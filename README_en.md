@@ -183,7 +183,8 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 - **Conditions** (`search`) are a comma-separated AND-list of `SIG=VAL`,
   `SIG!=VAL`, or `changed(SIG)`; values are decimal, hex (`0xff`), binary
   (`b1010`), or 4-state; a `?` in a binary literal is a don't-care bit, like `?`
-  in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus).
+  in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus; a
+  short literal pads with 0, so write every bit).
   `changed(SIG)` switches to event mode — the instants SIG
   transitions while the rest of the clause holds. Repeat `--condition` to OR the
   clauses (all must contain a `changed()` term, or none may); there is no
