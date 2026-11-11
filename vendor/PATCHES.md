@@ -44,9 +44,10 @@ entry when updating a vendor copy.
   body (`b !`) is 0. A real that does not parse is NaN; a string value
   without its `s` prefix is kept as written. A 1-bit value takes pymtl3's
   `0b` prefix like a vector does, a bare `b`/`B` is 0, and a stray letter
-  (`bb`) is x. A value change on an id no `$var` declared (`1!!`) is skipped
+  (`bb`, `b0b`) is x, as on a vector. A value change on an id no `$var` declared (`1!!`) is skipped
   with one warning per process, on both the dense-id path (`wavemem.rs`) and
-  the id-map path (`vcd.rs`, `lookup.get`).
+  the id-map path (`vcd.rs`, `lookup.get`, which hands the miss on as
+  `u64::MAX`; `stream.rs` skips it too).
   Upstream panics on each (or, for a 1-bit id, reads the last character).
 - **On next sync:** re-apply; upstream still panics.
 

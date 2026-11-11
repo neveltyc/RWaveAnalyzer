@@ -102,6 +102,9 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     // Anything else goes to a temp file renamed over the real target (through
     // a symlink, not over it) on success.
     let (abs, temp, file) = if let Some(file) = fd_target(&abs).map_err(cannot)? {
+        if is_same_file(&file, input) {
+            return Err("--output must not be the waveform file itself".to_string().into());
+        }
         (abs, None, file)
     } else {
         match std::fs::metadata(&abs) {
@@ -136,15 +139,14 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
 }
 
 /// `p` with symlinks followed, a dangling one included (`canonicalize` fails
-/// on that, and the rename would then replace the link itself); when a link
-/// was followed, its directory is normalized for the receipt. A chain that
-/// does not end within 40 hops is a loop.
+/// on that, and the rename would then replace the link itself), its
+/// directory canonicalized so the receipt names where the file landed. A
+/// chain that does not end within 40 hops is a loop.
 fn follow_links(p: &std::path::Path) -> io::Result<PathBuf> {
     let mut p = p.to_path_buf();
-    for hop in 0..40 {
+    for _ in 0..40 {
         match std::fs::read_link(&p) {
             Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
-            Err(_) if hop == 0 => return Ok(p),
             Err(_) => {
                 return Ok(match (p.parent().map(std::fs::canonicalize), p.file_name()) {
                     (Some(Ok(dir)), Some(name)) => dir.join(name),
@@ -157,27 +159,21 @@ fn follow_links(p: &std::path::Path) -> io::Result<PathBuf> {
 }
 
 /// A copy of the descriptor `p` names, if it (or a link on the way to the
-/// file) is a descriptor path.
+/// file) is a descriptor path, in any spelling the kernel accepts: the path
+/// is matched both as given and with its directory canonicalized, which
+/// turns `/proc/self`, `/proc/thread-self` and `/dev/../dev/fd` into
+/// `/proc/<pid>[/task/<tid>]` and `/dev/fd`.
 #[cfg(unix)]
 fn fd_target(p: &std::path::Path) -> io::Result<Option<File>> {
-    use std::os::fd::BorrowedFd;
-    let own = format!("/proc/{}/fd/", std::process::id());
     let mut p = p.to_path_buf();
     for _ in 0..40 {
-        let fd = p.to_str().and_then(|s| match s {
-            "/dev/stdin" => Some(0),
-            "/dev/stdout" => Some(1),
-            "/dev/stderr" => Some(2),
-            _ => ["/dev/fd/", "/proc/self/fd/", own.as_str()]
-                .iter()
-                .find_map(|pre| s.strip_prefix(pre))
-                .and_then(|n| n.parse::<i32>().ok()),
-        });
+        let canon = match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+            (Some(Ok(dir)), Some(name)) => Some(dir.join(name)),
+            _ => None,
+        };
+        let fd = std::iter::once(&p).chain(canon.as_ref()).find_map(|q| q.to_str().and_then(fd_number));
         if let Some(fd) = fd {
-            // SAFETY: the descriptor is only duplicated (fcntl F_DUPFD), which
-            // reports EBADF for one that is not open rather than touching it.
-            let dup = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
-            return Ok(Some(File::from(dup)));
+            return dup_fd(fd).map(Some);
         }
         match std::fs::read_link(&p) {
             Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
@@ -185,6 +181,83 @@ fn fd_target(p: &std::path::Path) -> io::Result<Option<File>> {
         }
     }
     Ok(None)
+}
+
+/// The descriptor a path names: `/dev/std{in,out,err}`, `/dev/fd/N`, and on
+/// Linux `/proc/{self,thread-self,<pid>}[/task/<tid>]/fd/N` for this process.
+#[cfg(unix)]
+fn fd_number(s: &str) -> Option<i32> {
+    match s {
+        "/dev/stdin" => return Some(0),
+        "/dev/stdout" => return Some(1),
+        "/dev/stderr" => return Some(2),
+        _ => {}
+    }
+    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    let n = if let Some(n) = s.strip_prefix("/dev/fd/") {
+        n
+    } else {
+        // procfs exists on Linux only; elsewhere these are ordinary paths.
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let rest = s.strip_prefix("/proc/")?;
+        let (who, rest) = rest.split_once('/')?;
+        let own = std::process::id().to_string();
+        if !matches!(who, "self" | "thread-self") && who != own {
+            return None;
+        }
+        let rest = match rest.strip_prefix("task/") {
+            Some(t) => {
+                let (tid, r) = t.split_once('/')?;
+                if !digits(tid) {
+                    return None;
+                }
+                r
+            }
+            None => rest,
+        };
+        rest.strip_prefix("fd/")?
+    };
+    // The kernel's spelling only: digits, no sign, no leading zero.
+    if !digits(n) || (n.len() > 1 && n.starts_with('0')) {
+        return None;
+    }
+    n.parse::<i32>().ok()
+}
+
+/// Duplicate `fd`, failing with EBADF when it is not open.
+#[cfg(unix)]
+fn dup_fd(fd: i32) -> io::Result<File> {
+    use std::os::fd::BorrowedFd;
+    unsafe extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    const F_GETFD: i32 = 1; // the same on Linux and macOS
+    // SAFETY: F_GETFD only reads the descriptor flags; it fails for a
+    // descriptor that is not open, so `borrow_raw` below gets an open one.
+    if unsafe { fcntl(fd, F_GETFD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is open (checked above) and is only borrowed to be
+    // duplicated; the original stays owned by whoever opened it.
+    let dup = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+    Ok(File::from(dup))
+}
+
+/// Is the open `file` the waveform at `input`?
+#[cfg(unix)]
+fn is_same_file(file: &File, input: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(input)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_file(_: &File, _: &str) -> bool {
+    false
 }
 
 #[cfg(not(unix))]

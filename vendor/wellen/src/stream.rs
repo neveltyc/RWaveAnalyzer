@@ -385,8 +385,12 @@ where
             return;
         }
         // check to see if the signal should be included
+        // rwave patch: the id-map path hands an undeclared id over as
+        // u64::MAX; it has no SignalRef, so skip it rather than unwrap.
         if let Some(encoding) = self.get_encoding(id) {
-            let signal_ref = SignalRef::from_index(id as usize).unwrap();
+            let Some(signal_ref) = SignalRef::from_index(id as usize) else {
+                return;
+            };
             let time = self.time.unwrap();
             self.buf.update_vcd(encoding, value);
             (self.callback)(time, signal_ref, (&self.buf).into())

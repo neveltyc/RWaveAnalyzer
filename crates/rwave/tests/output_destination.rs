@@ -121,6 +121,40 @@ fn output_targets_that_cannot_be_right_are_refused() {
         let body = std::fs::read_to_string(d.join("ap.txt")).unwrap();
         assert!(body.starts_with("HEADER\nWindow:") && body.contains("to /dev/stdout"), "{body}");
     }
+    #[cfg(unix)]
+    {
+        // Descriptor paths: a bad number or a read-only descriptor is an
+        // error that leaves the file alone; the waveform itself is refused.
+        assert_eq!(run(&d, &["dump", "w.vcd", "-o", "/dev/fd/-1"]).status.code(), Some(1));
+        std::fs::write(d.join("ro.txt"), "KEEP").unwrap();
+        let ro = std::fs::File::open(d.join("ro.txt")).unwrap();
+        let o = Command::new(rwave()).current_dir(&d).args(["dump", "w.vcd", "-o", "/dev/stdin"])
+            .stdin(ro).output().unwrap();
+        assert_eq!(o.status.code(), Some(1));
+        assert_eq!(std::fs::read_to_string(d.join("ro.txt")).unwrap(), "KEEP");
+        let wave = std::fs::OpenOptions::new().append(true).open(d.join("w.vcd")).unwrap();
+        let o = Command::new(rwave()).current_dir(&d).args(["dump", "w.vcd", "-o", "/dev/stdout"])
+            .stdout(wave).output().unwrap();
+        assert_eq!(o.status.code(), Some(2));
+        assert_eq!(std::fs::read_to_string(d.join("w.vcd")).unwrap(), VCD);
+        // A link to /dev/stdout writes into stdout.
+        std::os::unix::fs::symlink("/dev/stdout", d.join("tostd")).unwrap();
+        let o = run(&d, &["dump", "w.vcd", "-o", "tostd"]);
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(out.starts_with("Window:") && out.contains("Wrote "), "{out}");
+        // Linux spellings of a descriptor keep a redirect's earlier content.
+        if cfg!(target_os = "linux") {
+            for path in ["/proc/self/fd/1", "/proc/thread-self/fd/1", "/dev/../dev/fd/1"] {
+                std::fs::write(d.join("lx.txt"), "HEAD\n").unwrap();
+                let f = std::fs::OpenOptions::new().append(true).open(d.join("lx.txt")).unwrap();
+                let o = Command::new(rwave()).current_dir(&d).args(["dump", "w.vcd", "-o", path])
+                    .stdout(f).output().unwrap();
+                assert!(o.status.success(), "{path}");
+                let body = std::fs::read_to_string(d.join("lx.txt")).unwrap();
+                assert!(body.starts_with("HEAD\nWindow:") && body.contains("Wrote "), "{path}: {body}");
+            }
+        }
+    }
     // A failed run leaves an existing target as it was.
     std::fs::write(d.join("keep.txt"), "KEEP").unwrap();
     let o = run(&d, &["search", "w.vcd", "--condition", "state=99", "-o", "keep.txt"]);
