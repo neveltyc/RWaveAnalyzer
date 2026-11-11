@@ -39,8 +39,8 @@ enum Dest {
 
 struct FileSink {
     w: BufWriter<File>,
-    /// `None` when writing straight to a target that is not a regular file
-    /// (`/dev/null`, a FIFO), which cannot be replaced by a rename.
+    /// `None` when writing straight to a descriptor path, a device or a FIFO
+    /// (`/dev/stdout`, `/dev/null`), which cannot be replaced by a rename.
     temp: Option<PathBuf>,
     target: PathBuf,
     lines: u64,
@@ -94,31 +94,26 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     }
     let shown = abs.display().to_string();
     let cannot = |e: io::Error| CmdError::env(format!("cannot write --output {shown}: {e}"));
-    // An existing target is written where it lives: through a symlink rather
-    // than over it, and straight into a device or FIFO, which no rename can
-    // replace. So is a link whose chain does not end at the file it opens
-    // (`/dev/stdout` with stdout redirected resolves through `/dev/fd`).
-    let in_place = |abs: PathBuf| -> Result<(PathBuf, Option<PathBuf>, File), CmdError> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&abs)
-            .map_err(cannot)?;
-        Ok((abs, None, file))
-    };
-    let (abs, temp, file) = match std::fs::metadata(&abs) {
-        Ok(m) if !m.is_file() => in_place(abs)?,
-        found => {
-            let real = follow_links(&abs).map_err(cannot)?;
-            // `/dev/fd/N` and `/proc/self/fd/N` name an open file, not a place
-            // a sibling temp file could be renamed over.
-            let fd_path = real.starts_with("/dev") || real.starts_with("/proc");
-            if found.is_ok_and(|m| fd_path || !same_file(&m, &real)) {
-                in_place(abs)?
-            } else {
+    // A path naming an open descriptor (`/dev/stdout`, `/dev/fd/3`,
+    // `/proc/self/fd/1`) is written through a copy of that descriptor, which
+    // keeps its offset and append mode: reopening it on Linux resolves to the
+    // file behind it, and a rename there would replace what the shell opened.
+    // A device or FIFO is written where it is, since no rename can replace it.
+    // Anything else goes to a temp file renamed over the real target (through
+    // a symlink, not over it) on success.
+    let (abs, temp, file) = if let Some(file) = fd_target(&abs).map_err(cannot)? {
+        (abs, None, file)
+    } else {
+        match std::fs::metadata(&abs) {
+            Ok(m) if !m.is_file() => {
+                let file = std::fs::OpenOptions::new().write(true).open(&abs).map_err(cannot)?;
+                (abs, None, file)
+            }
+            _ => {
+                let real = follow_links(&abs).map_err(cannot)?;
                 let mut temp = real.clone().into_os_string();
-            temp.push(format!(".{}.part", std::process::id()));
-            let temp = PathBuf::from(temp);
+                temp.push(format!(".{}.part", std::process::id()));
+                let temp = PathBuf::from(temp);
                 let file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -141,13 +136,15 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
 }
 
 /// `p` with symlinks followed, a dangling one included (`canonicalize` fails
-/// on that, and the rename would then replace the link itself), and its
-/// directory normalized. A chain that does not end within 40 hops is a loop.
+/// on that, and the rename would then replace the link itself); when a link
+/// was followed, its directory is normalized for the receipt. A chain that
+/// does not end within 40 hops is a loop.
 fn follow_links(p: &std::path::Path) -> io::Result<PathBuf> {
     let mut p = p.to_path_buf();
-    for _ in 0..40 {
+    for hop in 0..40 {
         match std::fs::read_link(&p) {
             Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
+            Err(_) if hop == 0 => return Ok(p),
             Err(_) => {
                 return Ok(match (p.parent().map(std::fs::canonicalize), p.file_name()) {
                     (Some(Ok(dir)), Some(name)) => dir.join(name),
@@ -159,16 +156,40 @@ fn follow_links(p: &std::path::Path) -> io::Result<PathBuf> {
     Err(io::Error::other("too many levels of symbolic links"))
 }
 
-/// Is `real` the file `m` describes?
+/// A copy of the descriptor `p` names, if it (or a link on the way to the
+/// file) is a descriptor path.
 #[cfg(unix)]
-fn same_file(m: &std::fs::Metadata, real: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(real).is_ok_and(|r| r.dev() == m.dev() && r.ino() == m.ino())
+fn fd_target(p: &std::path::Path) -> io::Result<Option<File>> {
+    use std::os::fd::BorrowedFd;
+    let own = format!("/proc/{}/fd/", std::process::id());
+    let mut p = p.to_path_buf();
+    for _ in 0..40 {
+        let fd = p.to_str().and_then(|s| match s {
+            "/dev/stdin" => Some(0),
+            "/dev/stdout" => Some(1),
+            "/dev/stderr" => Some(2),
+            _ => ["/dev/fd/", "/proc/self/fd/", own.as_str()]
+                .iter()
+                .find_map(|pre| s.strip_prefix(pre))
+                .and_then(|n| n.parse::<i32>().ok()),
+        });
+        if let Some(fd) = fd {
+            // SAFETY: the descriptor is only duplicated (fcntl F_DUPFD), which
+            // reports EBADF for one that is not open rather than touching it.
+            let dup = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+            return Ok(Some(File::from(dup)));
+        }
+        match std::fs::read_link(&p) {
+            Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(not(unix))]
-fn same_file(_: &std::fs::Metadata, _: &std::path::Path) -> bool {
-    true
+fn fd_target(_: &std::path::Path) -> io::Result<Option<File>> {
+    Ok(None)
 }
 
 /// Write formatted text to the result destination (what [`out!`] expands to).

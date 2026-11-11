@@ -464,7 +464,6 @@ pub struct Encoder {
     has_new_data: bool,
     /// Tracks if we are skipping a timestep because it came with an invalid time.
     skipping_time_step: bool,
-    warned_unknown_id: bool,
     /// Finished blocks
     blocks: Vec<Block>,
 }
@@ -485,7 +484,6 @@ impl Encoder {
             signals,
             has_new_data: false,
             skipping_time_step: false,
-            warned_unknown_id: false,
             blocks: Vec::default(),
         }
     }
@@ -530,8 +528,9 @@ impl Encoder {
             // rwave patch: a change on an id no `$var` declared (a garbled
             // line such as `1!!`) is dropped instead of aborting the parse.
             let Some(signal) = self.signals.get_mut(id as usize).and_then(Option::as_mut) else {
-                if !self.warned_unknown_id {
-                    self.warned_unknown_id = true;
+                // Once per process: each parse thread has its own encoder.
+                static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("WARN: value change on an undeclared id; skipping such lines");
                 }
                 return;

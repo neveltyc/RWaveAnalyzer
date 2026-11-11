@@ -386,7 +386,8 @@ fn is_real_literal(s: &str) -> bool {
 ///   number of more than `width` bits, or a pattern with a 1/x/z above bit
 ///   `width-1`, can never be equal — and `!=` would always hold — so it is an
 ///   error rather than a plausible empty answer.
-/// * string: compares as text, the number as written included (`s=5`, `s=-1`).
+/// * string: compares the target text exactly as written (`s=5`, `s=-1`,
+///   `s=0b101`, case kept).
 pub fn resolve_target(
     mut t: Target,
     kind: crate::format::ValueKind,
@@ -454,7 +455,8 @@ pub fn resolve_target(
             t.neg = false;
             Ok(t)
         }
-        ValueKind::Str => Ok(Target { int: None, neg: false, real: None, ..t }),
+        // As written: `raw` was normalized for numbers and bit patterns.
+        ValueKind::Str => Ok(Target::bits(value_text.trim().to_string())),
         // A zero-width logic signal has no bits to hold a two's complement.
         _ if t.neg => Err(format!(
             "negative target {shown} needs a signal with a width; {path} has none"
@@ -1077,9 +1079,9 @@ mod tests {
             assert!(fit(bits, Real, 64).unwrap_err().contains("bit pattern"), "{bits}");
         }
         assert!(fit("1", Event, 0).unwrap_err().contains("changed(top.s)"));
-        for text in ["5", "-1", "1.5", "0x5"] {
+        for text in ["5", "-1", "1.5", "0x5", "0b101", "b1x", "X"] {
             let t = fit(text, Str, 0).unwrap();
-            assert!(value_matches(None, &text.to_lowercase(), &t, 0), "{text}");
+            assert!(value_matches(None, text, &t, 0), "{text}");
             assert!(!value_matches(None, "6", &t, 0), "{text}");
         }
         assert!(fit("-1", crate::format::ValueKind::Bits, 0).unwrap_err().contains("has none"));

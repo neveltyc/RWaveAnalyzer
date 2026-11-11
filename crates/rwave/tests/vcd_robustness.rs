@@ -101,3 +101,15 @@ fn pymtl_prefix_uppercase_empty_and_undeclared_ids() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(err.matches("undeclared id").count(), 1, "{err}");
 }
+
+#[test]
+fn stray_letters_on_a_scalar_read_as_x_and_sparse_ids_skip() {
+    // `bb`/`bB`/`b0bb` are not a bit (x, as on a vector). A long id makes
+    // wellen use its id map, whose miss on `1!!` must skip, not panic.
+    let head = "$timescale 1ns $end\n$scope module t $end\n$var wire 1 ! a $end\n\
+        $var wire 1 ~~~~~~ b $end\n$upscope $end\n$enddefinitions $end\n";
+    let body = format!("{head}#0\n0!\n0~~~~~~\n#1\nbb !\n#2\n0!\n#3\nbB !\n#4\n0!\n#5\nb0bb !\n1!!\n#6\n1~~~~~~\n");
+    let out = run_on("rwave_robust_sparse.vcd", body.as_bytes(), &["--json", "dump"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(values(&out.stdout), ["0", "0", "bx", "0", "bx", "0", "bx", "1"]);
+}

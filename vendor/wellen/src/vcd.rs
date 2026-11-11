@@ -1238,7 +1238,9 @@ impl ParseBodyOutput for VcdEncoder<'_> {
                         return Err(VcdParseError::VcdEmptyId);
                     }
                 },
-                Some(lookup) => lookup[id].index() as u64,
+                // rwave patch: an undeclared id maps past every signal, which the
+            // encoder skips with a warning, instead of panicking here.
+            Some(lookup) => lookup.get(id).map_or(u64::MAX, |r| r.index() as u64),
             };
 
             if has_escape {
@@ -1502,7 +1504,9 @@ where
                     return Err(VcdParseError::VcdEmptyId);
                 }
             },
-            Some(lookup) => lookup[id].index() as u64,
+            // rwave patch: an undeclared id maps past every signal, which the
+            // encoder skips with a warning, instead of panicking here.
+            Some(lookup) => lookup.get(id).map_or(u64::MAX, |r| r.index() as u64),
         };
 
         if has_escape {
@@ -1642,23 +1646,14 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
     let len =
         NonZeroU32::new(len).expect("decode_vcd_bit_vec_change should only be called for len > 0");
     if len.get() == 1 {
-        // Simplify parsing of non-compliant output by checking last character
-        let value_char = match value.last() {
-            // special handling for empty values which we always treat as zero
-            None => b'0',
-            // special handling for zero-length vector
-            Some(b'b' | b'B') => b'0',
-            Some(v) => *v,
-        };
-
-        // rwave patch: a malformed value reads as x instead of aborting the
-        // whole parse, or of reading its last character: a real written to a
-        // logic id (`r1 !` would read as 1) or a multi-bit body (`b1x0 !`).
+        // rwave patch: strip the `b`/`B` and pymtl3's `0b` first, then read
+        // the one bit left. An empty body is 0 (upstream's zero-length rule);
+        // a real (`r1`), a 1/x/z above the bit (`b1x0`) or a stray letter
+        // (`bB`) is x, as on a vector.
         let body = match value.first() {
             Some(b'b' | b'B') => &value[1..],
             _ => value,
         };
-        // pymtl3 writes an extra `0b` on every bit vector, 1-bit ones too.
         let body = match body {
             [b'0', b'b', rest @ ..] if !rest.is_empty() => rest,
             _ => body,
@@ -1666,6 +1661,7 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
         // Leading zeros carry no value (`b01` is 1).
         let excess = &body[..body.len().saturating_sub(1)];
         let malformed = matches!(value.first(), Some(b'r' | b'R')) || excess.iter().any(|b| *b != b'0');
+        let value_char = body.last().copied().unwrap_or(b'0');
         let (states, bit_value) = States::from_ascii_bit(value_char)
             .filter(|_| !malformed)
             .unwrap_or_else(|| States::from_ascii_bit(b'x').unwrap());

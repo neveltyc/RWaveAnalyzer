@@ -112,7 +112,20 @@ fn output_targets_that_cannot_be_right_are_refused() {
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let body = std::fs::read_to_string(d.join("so.txt")).unwrap();
         assert!(body.starts_with("Window:") && body.contains("to /dev/stdout"), "{body}");
+        // Appending to it keeps what was there (the descriptor is shared).
+        std::fs::write(d.join("ap.txt"), "HEADER\n").unwrap();
+        let ap = std::fs::OpenOptions::new().append(true).open(d.join("ap.txt")).unwrap();
+        let o = Command::new(rwave()).current_dir(&d).args(["dump", "w.vcd", "-o", "/dev/stdout"])
+            .stdout(ap).output().unwrap();
+        assert!(o.status.success());
+        let body = std::fs::read_to_string(d.join("ap.txt")).unwrap();
+        assert!(body.starts_with("HEADER\nWindow:") && body.contains("to /dev/stdout"), "{body}");
     }
+    // A failed run leaves an existing target as it was.
+    std::fs::write(d.join("keep.txt"), "KEEP").unwrap();
+    let o = run(&d, &["search", "w.vcd", "--condition", "state=99", "-o", "keep.txt"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(std::fs::read_to_string(d.join("keep.txt")).unwrap(), "KEEP");
     let _ = std::fs::remove_dir_all(&d);
 }
 
