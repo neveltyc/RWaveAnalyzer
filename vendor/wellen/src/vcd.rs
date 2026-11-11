@@ -1647,7 +1647,7 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
             // special handling for empty values which we always treat as zero
             None => b'0',
             // special handling for zero-length vector
-            Some(b'b') => b'0',
+            Some(b'b' | b'B') => b'0',
             Some(v) => *v,
         };
 
@@ -1657,6 +1657,11 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
         let body = match value.first() {
             Some(b'b' | b'B') => &value[1..],
             _ => value,
+        };
+        // pymtl3 writes an extra `0b` on every bit vector, 1-bit ones too.
+        let body = match body {
+            [b'0', b'b', rest @ ..] if !rest.is_empty() => rest,
+            _ => body,
         };
         // Leading zeros carry no value (`b01` is 1).
         let excess = &body[..body.len().saturating_sub(1)];

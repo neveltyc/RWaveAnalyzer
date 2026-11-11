@@ -260,21 +260,15 @@ impl Selection {
     /// signal exactly ([`Filters::prefer_exact`]), judged over the alias paths
     /// `--scope`/`--depth` leave in reach: a name taken elsewhere in the design
     /// must not narrow a fragment that, inside the scope, only appears as a
-    /// substring. `--exclude` is settled first and `--filter` judged on what it
-    /// leaves, so an excluded exact hit does not narrow the filter to nothing.
+    /// substring. `--filter` and `--exclude` are judged independently:
+    /// `--exclude` stays the last gate and never changes what `--filter` means.
     /// Call once, before matching.
     pub fn prime(&mut self, signals: &[SignalInfo]) {
-        if let Some(mut f) = self.exclude.take() {
+        let (mut include, mut exclude) = (self.include.take(), self.exclude.take());
+        for f in [&mut include, &mut exclude].into_iter().flatten() {
             f.prefer_exact(alias_names(signals, |_, sc| self.structural_ok(sc)));
-            self.exclude = Some(f);
         }
-        if let Some(mut f) = self.include.take() {
-            f.prefer_exact(alias_names(signals, |p, sc| {
-                self.structural_ok(sc)
-                    && !self.exclude.as_ref().is_some_and(|e| e.matches_path_leaf(p, leaf_of(p, sc)))
-            }));
-            self.include = Some(f);
-        }
+        (self.include, self.exclude) = (include, exclude);
     }
 
     /// Prime a name pattern (a `search` `--condition`/`--show` name) over the

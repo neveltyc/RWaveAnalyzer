@@ -96,23 +96,36 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     let cannot = |e: io::Error| CmdError::env(format!("cannot write --output {shown}: {e}"));
     // An existing target is written where it lives: through a symlink rather
     // than over it, and straight into a device or FIFO, which no rename can
-    // replace.
+    // replace. So is a link whose chain does not end at the file it opens
+    // (`/dev/stdout` with stdout redirected resolves through `/dev/fd`).
+    let in_place = |abs: PathBuf| -> Result<(PathBuf, Option<PathBuf>, File), CmdError> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&abs)
+            .map_err(cannot)?;
+        Ok((abs, None, file))
+    };
     let (abs, temp, file) = match std::fs::metadata(&abs) {
-        Ok(m) if !m.is_file() => {
-            let file = std::fs::OpenOptions::new().write(true).open(&abs).map_err(cannot)?;
-            (abs, None, file)
-        }
-        _ => {
-            let real = follow_links(abs);
-            let mut temp = real.clone().into_os_string();
+        Ok(m) if !m.is_file() => in_place(abs)?,
+        found => {
+            let real = follow_links(&abs).map_err(cannot)?;
+            // `/dev/fd/N` and `/proc/self/fd/N` name an open file, not a place
+            // a sibling temp file could be renamed over.
+            let fd_path = real.starts_with("/dev") || real.starts_with("/proc");
+            if found.is_ok_and(|m| fd_path || !same_file(&m, &real)) {
+                in_place(abs)?
+            } else {
+                let mut temp = real.clone().into_os_string();
             temp.push(format!(".{}.part", std::process::id()));
             let temp = PathBuf::from(temp);
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)
-                .map_err(cannot)?;
-            (real, Some(temp), file)
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)
+                    .map_err(cannot)?;
+                (real, Some(temp), file)
+            }
         }
     };
     let sink = FileSink {
@@ -128,15 +141,34 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
 }
 
 /// `p` with symlinks followed, a dangling one included (`canonicalize` fails
-/// on that, and the rename would then replace the link itself).
-fn follow_links(mut p: PathBuf) -> PathBuf {
+/// on that, and the rename would then replace the link itself), and its
+/// directory normalized. A chain that does not end within 40 hops is a loop.
+fn follow_links(p: &std::path::Path) -> io::Result<PathBuf> {
+    let mut p = p.to_path_buf();
     for _ in 0..40 {
         match std::fs::read_link(&p) {
             Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
-            Err(_) => break,
+            Err(_) => {
+                return Ok(match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+                    (Some(Ok(dir)), Some(name)) => dir.join(name),
+                    _ => p,
+                });
+            }
         }
     }
-    p
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+/// Is `real` the file `m` describes?
+#[cfg(unix)]
+fn same_file(m: &std::fs::Metadata, real: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(real).is_ok_and(|r| r.dev() == m.dev() && r.ino() == m.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(_: &std::fs::Metadata, _: &std::path::Path) -> bool {
+    true
 }
 
 /// Write formatted text to the result destination (what [`out!`] expands to).
@@ -259,7 +291,8 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
                 } else {
                     format!("Wrote {} lines ({} bytes) to {path}", f.lines, f.bytes)
                 };
-                println!("{receipt}");
+                // A receipt that cannot be written has nowhere to be reported.
+                let _ = writeln!(io::stdout(), "{receipt}");
             }
             Ok(())
         }

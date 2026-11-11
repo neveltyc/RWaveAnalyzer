@@ -200,10 +200,10 @@ impl Filters {
         let mut pending: Vec<usize> = (0..self.pats.len())
             .filter(|i| matches!(self.pats[*i].kind, PatKind::Plain { exact: false, .. }))
             .collect();
+        if pending.is_empty() {
+            return;
+        }
         for (path, leaf) in names {
-            if pending.is_empty() {
-                break;
-            }
             let (path, leaf) = (path.to_lowercase(), leaf.to_lowercase());
             pending.retain(|i| {
                 let p = &mut self.pats[*i];
@@ -219,6 +219,9 @@ impl Filters {
                     _ => true,
                 }
             });
+            if pending.is_empty() {
+                break;
+            }
         }
     }
 

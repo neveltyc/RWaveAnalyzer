@@ -464,6 +464,7 @@ pub struct Encoder {
     has_new_data: bool,
     /// Tracks if we are skipping a timestep because it came with an invalid time.
     skipping_time_step: bool,
+    warned_unknown_id: bool,
     /// Finished blocks
     blocks: Vec<Block>,
 }
@@ -484,6 +485,7 @@ impl Encoder {
             signals,
             has_new_data: false,
             skipping_time_step: false,
+            warned_unknown_id: false,
             blocks: Vec::default(),
         }
     }
@@ -525,10 +527,16 @@ impl Encoder {
         );
         if !self.skipping_time_step {
             let time_idx = (self.time_table.len() - 1) as TimeTableIdx;
-            self.signals[id as usize]
-                .as_mut()
-                .unwrap()
-                .add_vcd_change(time_idx, value);
+            // rwave patch: a change on an id no `$var` declared (a garbled
+            // line such as `1!!`) is dropped instead of aborting the parse.
+            let Some(signal) = self.signals.get_mut(id as usize).and_then(Option::as_mut) else {
+                if !self.warned_unknown_id {
+                    self.warned_unknown_id = true;
+                    eprintln!("WARN: value change on an undeclared id; skipping such lines");
+                }
+                return;
+            };
+            signal.add_vcd_change(time_idx, value);
             self.has_new_data = true;
         }
     }

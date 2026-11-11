@@ -92,6 +92,26 @@ fn output_targets_that_cannot_be_right_are_refused() {
         assert!(run(&d, &["dump", "w.vcd", "-o", "link.txt"]).status.success());
         assert!(std::fs::symlink_metadata(d.join("link.txt")).unwrap().file_type().is_symlink());
         assert!(std::fs::read_to_string(d.join("real.txt")).unwrap().starts_with("Window:"));
+        // A relative chain through another directory: written through, and
+        // the receipt names the normalized real file.
+        std::fs::create_dir_all(d.join("a")).unwrap();
+        std::fs::create_dir_all(d.join("b")).unwrap();
+        std::os::unix::fs::symlink("../b/far.txt", d.join("a/lnk")).unwrap();
+        let o = run(&d, &["dump", "w.vcd", "-o", "a/lnk"]);
+        let receipt = String::from_utf8_lossy(&o.stdout);
+        assert!(d.join("b/far.txt").exists() && receipt.trim_end().ends_with("/b/far.txt"), "{receipt}");
+        // A loop is an error, and the links survive.
+        std::os::unix::fs::symlink("loopB", d.join("loopA")).unwrap();
+        std::os::unix::fs::symlink("loopA", d.join("loopB")).unwrap();
+        assert_eq!(run(&d, &["dump", "w.vcd", "-o", "loopA"]).status.code(), Some(1));
+        assert!(std::fs::symlink_metadata(d.join("loopA")).unwrap().file_type().is_symlink());
+        // /dev/stdout with stdout redirected to a file writes into that file.
+        let so = std::fs::File::create(d.join("so.txt")).unwrap();
+        let o = Command::new(rwave()).current_dir(&d).args(["dump", "w.vcd", "-o", "/dev/stdout"])
+            .stdout(so).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let body = std::fs::read_to_string(d.join("so.txt")).unwrap();
+        assert!(body.starts_with("Window:") && body.contains("to /dev/stdout"), "{body}");
     }
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -135,16 +155,19 @@ fn batch_error_lines_carry_their_exit_status() {
     let mut child = Command::new(rwave())
         .current_dir(&d)
         .args(["--batch", "--json", "w.vcd"])
+        .env("RWAVE_TRACE_EN", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"search --condition state=99\nbogus\ninfo\n").unwrap();
+    child.stdin.take().unwrap().write_all(b"search --condition state=99\nbogus\ninfo\ntrace clk\n").unwrap();
     let o = child.wait_with_output().unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].contains("\"ok\":false") && lines[0].ends_with("\"exit\":2}"), "{out}");
     assert!(lines[1].ends_with("\"exit\":2}"), "{out}");
     assert!(lines[2].contains("\"ok\":true"), "{out}");
+    // trace switched off is the environment's failure.
+    assert!(lines[3].ends_with("\"exit\":1}"), "{out}");
     let _ = std::fs::remove_dir_all(&d);
 }

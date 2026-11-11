@@ -87,3 +87,17 @@ fn malformed_scalar_real_and_string_values() {
         ["0", "0x0", "1.5", "hi", "bx", "0x3", "NaN", "b1", "0", "bxxxx", "bx", "1"]
     );
 }
+
+#[test]
+fn pymtl_prefix_uppercase_empty_and_undeclared_ids() {
+    // pymtl3 writes `0b` on 1-bit values too; `B` alone is an empty body (0);
+    // a change on an undeclared id (`1!!`, `0?`) is skipped with one warning.
+    let head = "$timescale 1ns $end\n$scope module t $end\n$var wire 1 ! clk $end\n\
+        $upscope $end\n$enddefinitions $end\n";
+    let body = format!("{head}#0\nb0b0 !\n#1\nb0b1 !\n#2\nB !\n#3\n1!!\n0?\n#4\n1!\n");
+    let out = run_on("rwave_robust_pymtl.vcd", body.as_bytes(), &["--json", "dump"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(values(&out.stdout), ["0", "1", "0", "1"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err.matches("undeclared id").count(), 1, "{err}");
+}

@@ -598,8 +598,9 @@ fn an_exact_name_wins_only_within_the_scope_in_reach() {
     assert_eq!(rows(&out), ["top.status", "top.u_bcm21_sync_status.d_p"], "{out}");
     let out = ok_stdout(&vcd, &["list", "--scope", "u_dma", "--filter", "status"]);
     assert_eq!(rows(&out), ["top.u_dma.status_q"], "{out}");
-    // An exact hit that --exclude drops does not narrow the filter either.
+    // --exclude is the last gate and never changes what --filter means:
+    // dropping the named signal leaves nothing, not the substring matches.
     let out = ok_stdout(&vcd, &["list", "--filter", "status", "--exclude", "top.status"]);
-    assert_eq!(rows(&out), ["top.u_dma.status_q"], "{out}");
+    assert!(rows(&out).is_empty(), "{out}");
     let _ = std::fs::remove_file(&vcd);
 }
