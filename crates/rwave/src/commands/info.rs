@@ -93,6 +93,8 @@ pub(super) fn compute_info(wave: &mut Wave, _args: &Args) -> Result<Json, String
         .push("file", Json::str(d.path.clone()))
         .push("size_bytes", Json::Int(d.size_bytes))
         .push("timescale", Json::str(d.timescale.clone()))
+        // No timescale declared: ticks are read as 1ps, which `_h` times use.
+        .push("timescale_assumed", Json::Bool(d.timescale.is_empty()))
         .push("date", Json::str(d.date.clone()))
         .push("version", Json::str(d.version.clone()))
         .push(

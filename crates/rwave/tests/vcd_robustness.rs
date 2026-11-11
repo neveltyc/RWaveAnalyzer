@@ -64,6 +64,8 @@ fn missing_timescale_is_announced() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("declares no $timescale"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Timescale : (none declared; 1ps assumed)"));
+    let out = run_on("rwave_robust_nots.vcd", body.as_bytes(), &["--json", "info"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"timescale\":\"\",\"timescale_assumed\":true"));
 }
 
 #[test]

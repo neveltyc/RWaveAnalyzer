@@ -191,24 +191,35 @@ impl Filters {
     }
 
     /// Switch each wildcard-free pattern to whole-name matching when one of
-    /// `names` — the lower-cased `(path, leaf)` pairs the pattern can reach —
-    /// equals it. Asking for `top.sig3` then means that signal, not
-    /// `top.sig30`..`top.sig39` too; a pattern no name equals keeps its
-    /// substring reach, so exploring with a fragment still works.
-    pub fn prefer_exact(&mut self, names: &[(String, String)]) {
-        for p in &mut self.pats {
-            if let PatKind::Plain { lit, exact: exact @ false } = &mut p.kind {
-                *exact = names.iter().any(|(path, leaf)| match p.domain {
-                    Domain::Path => p.domain.names(path, lit),
-                    Domain::Leaf => p.domain.names(leaf, lit),
-                });
+    /// `names` — the `(path, leaf)` pairs the pattern can reach — equals it.
+    /// Asking for `top.sig3` then means that signal, not `top.sig30`..`top.sig39`
+    /// too; a pattern no name equals keeps its substring reach, so exploring
+    /// with a fragment still works. Streams the names, lower-casing each once,
+    /// and stops as soon as every pattern has its answer.
+    pub fn prefer_exact<'a>(&mut self, names: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        let mut pending: Vec<usize> = (0..self.pats.len())
+            .filter(|i| matches!(self.pats[*i].kind, PatKind::Plain { exact: false, .. }))
+            .collect();
+        for (path, leaf) in names {
+            if pending.is_empty() {
+                break;
             }
+            let (path, leaf) = (path.to_lowercase(), leaf.to_lowercase());
+            pending.retain(|i| {
+                let p = &mut self.pats[*i];
+                let hay = match p.domain {
+                    Domain::Path => &path,
+                    Domain::Leaf => &leaf,
+                };
+                match &mut p.kind {
+                    PatKind::Plain { lit, exact } if p.domain.names(hay, lit) => {
+                        *exact = true;
+                        false
+                    }
+                    _ => true,
+                }
+            });
         }
-    }
-
-    /// Does any wildcard-free pattern still wait for [`prefer_exact`](Self::prefer_exact)?
-    pub fn needs_names(&self) -> bool {
-        self.pats.iter().any(|p| matches!(p.kind, PatKind::Plain { exact: false, .. }))
     }
 
     /// [`matches_lower`](Self::matches_lower) for callers that hold the
@@ -225,11 +236,12 @@ impl Domain {
     fn names(self, hay: &str, lit: &str) -> bool {
         match self {
             Domain::Leaf => names_exactly(hay, lit),
-            Domain::Path => SEPARATORS.iter().fold(names_exactly(hay, lit), |hit, sep| {
-                hit || hay
-                    .match_indices(*sep)
-                    .any(|(i, _)| names_exactly(&hay[i + 1..], lit))
-            }),
+            Domain::Path => {
+                names_exactly(hay, lit)
+                    || hay
+                        .char_indices()
+                        .any(|(i, c)| SEPARATORS.contains(&c) && names_exactly(&hay[i + 1..], lit))
+            }
         }
     }
 }
@@ -456,9 +468,7 @@ mod tests {
 
     fn primed(pat: &str, names: &[(&str, &str)]) -> Filters {
         let mut f = Filters::parse_csv(pat).unwrap();
-        let names: Vec<(String, String)> =
-            names.iter().map(|(p, l)| (p.to_string(), l.to_string())).collect();
-        f.prefer_exact(&names);
+        f.prefer_exact(names.iter().copied());
         f
     }
 

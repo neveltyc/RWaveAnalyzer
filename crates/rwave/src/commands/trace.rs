@@ -135,10 +135,16 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, CmdError> {
 
     // The waveform names the design it came from; `--kdb` overrides it.
     let recorded = wave.design_query().and_then(|dq| dq.recorded_design_dir());
-    // From here on, a failure is the design library's or the licence's, not
-    // the request's.
-    let kdb = probe_kdb(args.kdb.as_deref(), recorded.as_deref())
-        .map_err(|m| CmdError::env(m.into_error()))?;
+    // A `--kdb` the user gave that does not hold a design library is the
+    // request's error; the recorded one going missing is the environment's.
+    let kdb = probe_kdb(args.kdb.as_deref(), recorded.as_deref()).map_err(|m| {
+        if args.kdb.is_some() {
+            CmdError::from(m.into_error())
+        } else {
+            CmdError::env(m.into_error())
+        }
+    })?;
+    // From here on, a failure is the design library's or the licence's.
 
     let dq = wave
         .design_query()

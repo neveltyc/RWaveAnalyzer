@@ -66,7 +66,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
             Err(msg) => {
                 // Malformed line (e.g. an unterminated quote): a failed command.
                 seq += 1;
-                emit(inv.json, &seq.to_string(), Err(msg));
+                emit(inv.json, &seq.to_string(), Err(msg.into()));
                 crate::out::flush();
                 continue;
             }
@@ -83,7 +83,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
         match cli::parse_batch_line(&tokens, &inv.file, &inv.defaults) {
             Ok(args) => {
                 if inv.json {
-                    emit(true, &id, commands::compute(wave, &args).map_err(|e| e.msg));
+                    emit(true, &id, commands::compute(wave, &args));
                 } else {
                     // Text mode: header, then the command's normal text output
                     // (identical to the single-command text path), or one
@@ -97,7 +97,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
                     }
                 }
             }
-            Err(msg) => emit(inv.json, &id, Err(msg)),
+            Err(msg) => emit(inv.json, &id, Err(msg.into())),
         }
         crate::out::flush();
     }
@@ -109,7 +109,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
 /// plus either nothing (the caller printed the body) or an `Error:` line. This
 /// helper only ever handles the JSON framing and the text *error* framing; the
 /// text success body is printed by the caller via the command's own renderer.
-fn emit(json: bool, id: &str, result: Result<Json, String>) {
+fn emit(json: bool, id: &str, result: Result<Json, commands::CmdError>) {
     if json {
         let obj = match result {
             Ok(value) => Obj::new()
@@ -117,10 +117,13 @@ fn emit(json: bool, id: &str, result: Result<Json, String>) {
                 .push("ok", Json::Bool(true))
                 .push("result", value)
                 .build(),
-            Err(msg) => Obj::new()
+            // `exit` is the status the line would have exited with on its own:
+            // 2 fix the line, 1 the file or environment.
+            Err(e) => Obj::new()
                 .push("id", Json::str(id))
                 .push("ok", Json::Bool(false))
-                .push("error", Json::str(msg))
+                .push("error", Json::str(e.msg))
+                .push("exit", Json::Int(if e.env { 1 } else { 2 }))
                 .build(),
         };
         crate::outln!("{}", obj.to_compact_string());
@@ -128,8 +131,8 @@ fn emit(json: bool, id: &str, result: Result<Json, String>) {
         // Text mode reaches here only for the parse-error path (the success
         // body is printed by the caller). Render the header + error line.
         crate::outln!("#{id}");
-        if let Err(msg) = result {
-            crate::outln!("Error: {msg}");
+        if let Err(e) = result {
+            crate::outln!("Error: {}", e.msg);
         }
     }
 }

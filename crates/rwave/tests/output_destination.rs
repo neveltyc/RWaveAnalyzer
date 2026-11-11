@@ -128,3 +128,23 @@ fn exit_status_says_who_can_fix_it() {
     assert_eq!(code(&["info", "missing.vcd"]), Some(1)); // the file
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn batch_error_lines_carry_their_exit_status() {
+    let d = dir("batchexit");
+    let mut child = Command::new(rwave())
+        .current_dir(&d)
+        .args(["--batch", "--json", "w.vcd"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"search --condition state=99\nbogus\ninfo\n").unwrap();
+    let o = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].contains("\"ok\":false") && lines[0].ends_with("\"exit\":2}"), "{out}");
+    assert!(lines[1].ends_with("\"exit\":2}"), "{out}");
+    assert!(lines[2].contains("\"ok\":true"), "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -454,6 +454,10 @@ pub fn resolve_target(
             t.neg = false;
             Ok(t)
         }
+        // Two's complement needs a logic signal with a width.
+        _ if t.neg => Err(format!(
+            "negative target {shown} needs a logic signal; {path} is not one"
+        )),
         _ => Ok(t),
     }
 }
@@ -1073,6 +1077,7 @@ mod tests {
         }
         assert!(fit("1", Event, 0).unwrap_err().contains("changed(top.s)"));
         assert!(fit("1", Str, 0).is_ok());
+        assert!(fit("-1", Str, 0).unwrap_err().contains("needs a logic signal"));
     }
 
     #[test]

@@ -574,16 +574,7 @@ pub(super) fn resolve_signal_path(
         return Ok(exact.into_iter().next().unwrap());
     }
     let mut filters = crate::filter::Filters::parse(&[pat]).map_err(|e| format!("{role}: {e}"))?;
-    if filters.needs_names() {
-        let mut names = Vec::new();
-        for info in wave.signals() {
-            for (path, scope) in info.alias_pairs() {
-                let leaf = crate::model::leaf_of(path, scope);
-                names.push((path.to_lowercase(), leaf.to_lowercase()));
-            }
-        }
-        filters.prefer_exact(&names);
-    }
+    filters.prefer_exact(crate::select::alias_names(wave.signals(), |_, _| true));
     let mut hits: Vec<(String, String)> = Vec::new();
     for i in 0..wave.signal_count() {
         for (path, scope) in wave.signal(i).alias_pairs() {

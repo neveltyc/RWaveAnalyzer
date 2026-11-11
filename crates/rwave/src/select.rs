@@ -260,18 +260,20 @@ impl Selection {
     /// signal exactly ([`Filters::prefer_exact`]), judged over the alias paths
     /// `--scope`/`--depth` leave in reach: a name taken elsewhere in the design
     /// must not narrow a fragment that, inside the scope, only appears as a
-    /// substring. Call once, before matching.
+    /// substring. `--exclude` is settled first and `--filter` judged on what it
+    /// leaves, so an excluded exact hit does not narrow the filter to nothing.
+    /// Call once, before matching.
     pub fn prime(&mut self, signals: &[SignalInfo]) {
-        let wants = |f: &Option<Filters>| f.as_ref().is_some_and(Filters::needs_names);
-        if !wants(&self.include) && !wants(&self.exclude) {
-            return;
+        if let Some(mut f) = self.exclude.take() {
+            f.prefer_exact(alias_names(signals, |_, sc| self.structural_ok(sc)));
+            self.exclude = Some(f);
         }
-        let names = self.names_where(signals, |_, sc| self.structural_ok(sc));
-        if let Some(f) = &mut self.include {
-            f.prefer_exact(&names);
-        }
-        if let Some(f) = &mut self.exclude {
-            f.prefer_exact(&names);
+        if let Some(mut f) = self.include.take() {
+            f.prefer_exact(alias_names(signals, |p, sc| {
+                self.structural_ok(sc)
+                    && !self.exclude.as_ref().is_some_and(|e| e.matches_path_leaf(p, leaf_of(p, sc)))
+            }));
+            self.include = Some(f);
         }
     }
 
@@ -279,26 +281,7 @@ impl Selection {
     /// alias paths this selection keeps — the paths the pattern is then tried
     /// against by [`keeps_signal_matching`](Self::keeps_signal_matching).
     pub fn prime_pattern(&self, signals: &[SignalInfo], pat: &mut Filters) {
-        if pat.needs_names() {
-            pat.prefer_exact(&self.names_where(signals, |p, sc| self.keeps_alias(p, sc)));
-        }
-    }
-
-    /// Lower-cased `(path, leaf)` of every alias path passing `keep`.
-    fn names_where(
-        &self,
-        signals: &[SignalInfo],
-        keep: impl Fn(&str, &str) -> bool,
-    ) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for info in signals {
-            for (p, sc) in info.alias_pairs() {
-                if keep(p, sc) {
-                    out.push((p.to_lowercase(), leaf_of(p, sc).to_lowercase()));
-                }
-            }
-        }
-        out
+        pat.prefer_exact(alias_names(signals, |p, sc| self.keeps_alias(p, sc)));
     }
 
     /// The gates that decide whether a path is *shown*: everything except
@@ -371,6 +354,18 @@ impl Selection {
             pat.matches_path_leaf(p, leaf_of(p, sc))
         })
     }
+}
+
+/// `(path, leaf)` of every alias path passing `keep`, lazily.
+pub fn alias_names<'a>(
+    signals: &'a [SignalInfo],
+    keep: impl Fn(&str, &str) -> bool + 'a,
+) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    signals
+        .iter()
+        .flat_map(|info| info.alias_pairs())
+        .filter(move |(p, sc)| keep(p, sc))
+        .map(|(p, sc)| (p, leaf_of(p, sc)))
 }
 
 #[cfg(test)]
