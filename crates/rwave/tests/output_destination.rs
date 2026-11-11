@@ -113,7 +113,8 @@ fn output_targets_that_cannot_be_right_are_refused() {
             .stdout(so).output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let body = std::fs::read_to_string(d.join("so.txt")).unwrap();
-        assert!(body.starts_with("Window:") && body.contains("to /dev/stdout"), "{body}");
+        // The receipt is left out: it would land in the result.
+        assert!(body.starts_with("Window:") && !body.contains("Wrote "), "{body}");
         // Appending to it keeps what was there (the descriptor is shared).
         std::fs::write(d.join("ap.txt"), "HEADER\n").unwrap();
         let ap = std::fs::OpenOptions::new().append(true).open(d.join("ap.txt")).unwrap();
@@ -121,7 +122,7 @@ fn output_targets_that_cannot_be_right_are_refused() {
             .stdout(ap).output().unwrap();
         assert!(o.status.success());
         let body = std::fs::read_to_string(d.join("ap.txt")).unwrap();
-        assert!(body.starts_with("HEADER\nWindow:") && body.contains("to /dev/stdout"), "{body}");
+        assert!(body.starts_with("HEADER\nWindow:") && !body.contains("Wrote "), "{body}");
     }
     #[cfg(unix)]
     {
@@ -143,7 +144,7 @@ fn output_targets_that_cannot_be_right_are_refused() {
         std::os::unix::fs::symlink("/dev/stdout", d.join("tostd")).unwrap();
         let o = run(&d, &["dump", "w.vcd", "-o", "tostd"]);
         let out = String::from_utf8_lossy(&o.stdout);
-        assert!(out.starts_with("Window:") && out.contains("Wrote "), "{out}");
+        assert!(out.starts_with("Window:") && !out.contains("Wrote "), "{out}");
         // Linux spellings of a descriptor keep a redirect's earlier content.
         if cfg!(target_os = "linux") {
             for path in ["/proc/self/fd/1", "/proc/thread-self/fd/1", "/dev/../dev/fd/1"] {
@@ -153,7 +154,7 @@ fn output_targets_that_cannot_be_right_are_refused() {
                     .stdout(f).output().unwrap();
                 assert!(o.status.success(), "{path}");
                 let body = std::fs::read_to_string(d.join("lx.txt")).unwrap();
-                assert!(body.starts_with("HEAD\nWindow:") && body.contains("Wrote "), "{path}: {body}");
+                assert!(body.starts_with("HEAD\nWindow:") && !body.contains("Wrote "), "{path}: {body}");
             }
         }
     }

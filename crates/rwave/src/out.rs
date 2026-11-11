@@ -34,8 +34,9 @@ enum Dest {
     /// file-size limit must not end as a short result with exit 0.
     Pipe { w: BufWriter<io::Stdout>, failed: Option<io::Error> },
     /// A terminal: stdout, or an `--output` target that is one (`None` =
-    /// stdout). Same 1 MiB budget and cut either way, no receipt.
-    Tty { left: usize, to: Option<File> },
+    /// stdout). Same 1 MiB budget and cut either way, no receipt. A write
+    /// error on an `--output` terminal is kept and reported at [`finish`].
+    Tty { left: usize, to: Option<File>, failed: Option<io::Error> },
     File(FileSink),
 }
 
@@ -48,6 +49,9 @@ struct FileSink {
     lines: u64,
     bytes: u64,
     failed: Option<io::Error>,
+    /// Print the receipt on stdout: not when the target is stdout itself,
+    /// where it would land in the result.
+    receipt: bool,
 }
 
 impl Write for FileSink {
@@ -68,7 +72,7 @@ fn with_dest<R>(f: impl FnOnce(&mut Dest) -> R) -> R {
     let mut guard = SINK.lock().unwrap_or_else(|e| e.into_inner());
     let dest = guard.get_or_insert_with(|| {
         if io::stdout().is_terminal() {
-            Dest::Tty { left: TERMINAL_BUDGET, to: None }
+            Dest::Tty { left: TERMINAL_BUDGET, to: None, failed: None }
         } else {
             Dest::Pipe { w: BufWriter::with_capacity(1 << 16, io::stdout()), failed: None }
         }
@@ -135,9 +139,10 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     // stdout on a terminal gets: the 1 MiB cut, not an unbounded write.
     if temp.is_none() && file.is_terminal() {
         *SINK.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some(file) });
+            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some(file), failed: None });
         return Ok(());
     }
+    let receipt = !is_stdout(&file);
     let sink = FileSink {
         w: BufWriter::with_capacity(1 << 16, file),
         temp,
@@ -145,6 +150,7 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
         lines: 0,
         bytes: 0,
         failed: None,
+        receipt,
     };
     *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dest::File(sink));
     Ok(())
@@ -264,6 +270,23 @@ fn dup_fd(fd: i32) -> io::Result<File> {
     Ok(File::from(dup))
 }
 
+/// Is the open `file` the one our stdout writes to?
+#[cfg(unix)]
+fn is_stdout(file: &File) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let out = io::stdout().as_fd().try_clone_to_owned().map(File::from);
+    match (file.metadata(), out.and_then(|o| o.metadata())) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_stdout(_: &File) -> bool {
+    false
+}
+
 /// Is the open `file` the waveform at `input`?
 #[cfg(unix)]
 fn is_same_file(file: &File, input: &str) -> bool {
@@ -303,15 +326,23 @@ pub fn emit(args: fmt::Arguments) {
                 }
             }
         }
-        Dest::Tty { left, to } => {
+        Dest::Tty { left, to, failed } => {
+            if failed.is_some() {
+                return;
+            }
             let text = fmt::format(args);
+            let named = to.is_some();
             let mut stdout: Box<dyn Write> = match to {
                 Some(f) => Box::new(f),
                 None => Box::new(io::stdout().lock()),
             };
             if text.len() <= *left {
                 *left -= text.len();
-                let _ = stdout.write_all(text.as_bytes());
+                if let Err(e) = stdout.write_all(text.as_bytes()) {
+                    if named {
+                        *failed = Some(e);
+                    }
+                }
                 return;
             }
             // Over budget: end on the last whole line that fits. Only output
@@ -370,7 +401,8 @@ pub fn flush() {
 pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String> {
     let dest = SINK.lock().unwrap_or_else(|e| e.into_inner()).take();
     match dest {
-        None | Some(Dest::Tty { .. }) => Ok(()),
+        None | Some(Dest::Tty { failed: None, .. }) => Ok(()),
+        Some(Dest::Tty { failed: Some(e), .. }) => Err(format!("cannot write --output: {e}")),
         Some(Dest::Pipe { mut w, failed }) => {
             match failed.map_or_else(|| w.flush(), Err) {
                 Ok(()) => Ok(()),
@@ -394,7 +426,7 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
             if let Err(e) = published {
                 return Err(format!("cannot write --output {}: {e}", f.target.display()));
             }
-            if ok {
+            if ok && f.receipt {
                 let path = f.target.display().to_string();
                 let receipt = if json {
                     crate::json::Obj::new()

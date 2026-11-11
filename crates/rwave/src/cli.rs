@@ -233,8 +233,8 @@ Global options:
   --batch       Load <file> once, then read commands (one per line) from stdin
   -o, --output FILE
                 Write the whole result to FILE (only on success); stdout gets a
-                one-line receipt. Without it, output to a terminal stops after
-                1 MiB (exit 3); pipes and redirects get everything.
+                one-line receipt. A terminal, stdout or FILE, stops after 1 MiB
+                (exit 3); pipes, redirects and files get everything.
   --version     Print version and exit
   -h, --help    Print this help and exit
 
@@ -244,9 +244,9 @@ are skipped and a trailing '#tag' names a result. A line is what you would type
 after 'rwave' minus the file: 'list --filter clk', 'dump --begin 1us --end 2us'.
 
 Results come back in input order: with --json one NDJSON line each,
-{{"id","ok","result"|"error"}}; without it a '#label' header before each. A failed
-line is ok:false and does not stop the run, which still exits 0 — check every
-line. [global-opts] are per-command defaults; a line overrides one, or lifts it
+{{"id","ok","result"|"error","exit"}}; without it a '#label' header before each. A
+failed line is ok:false with the exit status it would have alone, and does not
+stop the run, which still exits 0 — check every line. [global-opts] are per-command defaults; a line overrides one, or lifts it
 with an empty value (--filter '').
 
 Supports both VCD and FST inputs; the format is auto-detected.
