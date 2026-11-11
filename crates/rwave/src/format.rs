@@ -81,6 +81,24 @@ fn unit_factor(unit: &str) -> Option<f64> {
     UNITS.iter().find(|(u, _)| *u == unit).map(|(_, f)| *f)
 }
 
+/// The same units in whole femtoseconds, for exact tick arithmetic.
+const UNITS_FS: &[(&str, i128)] = &[
+    ("fs", 1),
+    ("ps", 1_000),
+    ("ns", 1_000_000),
+    ("us", 1_000_000_000),
+    ("ms", 1_000_000_000_000),
+    ("s", 1_000_000_000_000_000),
+];
+
+/// One tick in whole femtoseconds, when the timescale is one (every
+/// `1|10|100 fs..s` timescale is). `None` sends callers to the float path.
+fn tick_fs(ts_sec: f64) -> Option<i128> {
+    let f = ts_sec * 1e15;
+    let r = f.round();
+    (r >= 1.0 && r < 1e30 && (f - r).abs() <= r * 1e-9).then_some(r as i128)
+}
+
 /// A signal's formatting-relevant metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -265,6 +283,11 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
 
     // Try to match  sign? number unit?
     if let Some((sign, num, unit)) = match_time(stripped) {
+        if let (Some(unit), Some(tf), false) = (unit, tick_fs(ts_sec), sign == '-') {
+            if let Some(ticks) = exact_ticks(num, unit, tf) {
+                return check_time_range(ticks, s);
+            }
+        }
         if sign == '-' && !num.trim_matches(['0', '.']).is_empty() {
             return Err(TimeParseError(format!(
                 "time must be non-negative; got {}", pyrepr(s)
@@ -329,6 +352,36 @@ pub fn parse_time(s: &str, ts_sec: f64) -> Result<i64, TimeParseError> {
         let v = parse_ticks_decimal(stripped, s)?;
         check_time_range(v, s)
     }
+}
+
+/// `num unit` in whole ticks of `tf` femtoseconds, computed exactly: a float
+/// product can land a hair off a half tick and round the wrong way. A value
+/// between two ticks rounds half-to-even, with a warning naming the tick used.
+/// `None` on overflow or a value past i64, leaving the caller's float path to
+/// report it.
+fn exact_ticks(num: &str, unit: &str, tf: i128) -> Option<i64> {
+    let unit_fs = UNITS_FS.iter().find(|(u, _)| *u == unit)?.1;
+    let (int, frac) = num.split_once('.').unwrap_or((num, ""));
+    let mut mant: i128 = 0;
+    for b in int.bytes().chain(frac.bytes()) {
+        mant = mant.checked_mul(10)?.checked_add((b - b'0') as i128)?;
+    }
+    let n = mant.checked_mul(unit_fs)?;
+    let d = 10i128.checked_pow(frac.len() as u32)?.checked_mul(tf)?;
+    let (mut q, r) = (n / d, n % d);
+    if r != 0 {
+        if 2 * r > d || (2 * r == d && q % 2 == 1) {
+            q += 1;
+        }
+        let ticks = i64::try_from(q).ok()?;
+        eprintln!(
+            "Warning: {num}{unit} falls between ticks of {}; using {}",
+            fmt_time_fs(tf),
+            fmt_time_fs(q * tf)
+        );
+        return Some(ticks);
+    }
+    i64::try_from(q).ok()
 }
 
 /// Parse a bare integer-ticks string into `i64`, distinguishing three error
@@ -499,17 +552,20 @@ fn match_time(s: &str) -> Option<(char, &str, Option<&str>)> {
     None
 }
 
-/// Format internal ticks to a human-readable string (matching `fmt_time`).
+/// Format internal ticks to a human-readable string.
 ///
-/// Picks the smallest unit u where |scaled| < 1000 (preferring natural
-/// boundaries), e.g. timescale 1ns -> tick 5 prints `5ns`, tick 17534700
-/// prints `17.5347us`. Tick 0 always prints `0s`.
+/// Picks the smallest unit u where |scaled| < 1000, e.g. timescale 1ns ->
+/// tick 5 prints `5ns`, tick 17534712 prints `17.534712ms`. Every tick digit
+/// is kept, so distinct ticks never print alike. Tick 0 always prints `0s`.
 pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
     if ticks == 0 {
         return "0s".to_string();
     }
     if !ts_sec.is_finite() || ts_sec <= 0.0 {
         return "?".to_string();
+    }
+    if let Some(tf) = tick_fs(ts_sec) {
+        return fmt_time_fs(ticks as i128 * tf);
     }
     let sec = ticks as f64 * ts_sec;
     if !sec.is_finite() {
@@ -529,6 +585,26 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
         }
     }
     format!("{}s", fmt_g(sec))
+}
+
+/// Exact decimal rendering of a femtosecond count in the smallest unit below
+/// 1000 (seconds past that).
+fn fmt_time_fs(total: i128) -> String {
+    let mag = total.unsigned_abs();
+    let sign = if total < 0 { "-" } else { "" };
+    for (u, div) in UNITS_FS {
+        let div = *div as u128;
+        if mag < 1000 * div || *u == "s" {
+            let (q, r) = (mag / div, mag % div);
+            if r == 0 {
+                return format!("{sign}{q}{u}");
+            }
+            let width = div.ilog10() as usize;
+            let frac = format!("{r:0width$}");
+            return format!("{sign}{q}.{}{u}", frac.trim_end_matches('0'));
+        }
+    }
+    unreachable!("the seconds unit always matches")
 }
 
 /// `x` rounded to the six significant digits [`fmt_g`] renders, so a caller can
@@ -825,11 +901,35 @@ mod tests {
         assert_eq!(fmt_time(1_000_000_000, 1e-15), "1us");
         assert_eq!(fmt_time(1_000_000_000_000, 1e-15), "1ms");
         assert_eq!(fmt_time(1_000_000_000_000_000, 1e-15), "1s");
-        // Just under a boundary still uses the smaller unit.
+        // Just under a boundary still uses the smaller unit, every digit kept.
         assert_eq!(fmt_time(999_999, 1e-12), "999.999ns");
-        // And a value that only *rounds* to 1000 moves up rather than
-        // printing "1000" of the smaller unit.
-        assert_eq!(fmt_time(999_999_999, 1e-15), "1us");
+        assert_eq!(fmt_time(999_999_999, 1e-15), "999.999999ns");
+    }
+
+    /// Distinct ticks print distinctly; %g-style rounding made 17534712ns and
+    /// 17534713ns both `17.5347ms`.
+    #[test]
+    fn fmt_time_keeps_every_tick_digit() {
+        assert_eq!(fmt_time(17_534_712, 1e-9), "17.534712ms");
+        assert_eq!(fmt_time(17_534_713, 1e-9), "17.534713ms");
+        assert_eq!(fmt_time(3, 1e-13), "300fs");
+        assert_eq!(fmt_time(12_345, 1e-11), "123.45ns");
+        assert_eq!(fmt_time(i64::MAX, 1e-15), "9223.372036854775807s");
+        assert_eq!(fmt_time(5, 100.0), "500s");
+        // A timescale that is not a whole number of fs keeps the float path.
+        assert_eq!(fmt_time(3, 1e-18), "0.003fs");
+    }
+
+    #[test]
+    fn unit_times_convert_exactly() {
+        assert_eq!(parse_time("17.534712ms", 1e-9).unwrap(), 17_534_712);
+        assert_eq!(parse_time("0.3ps", 1e-13).unwrap(), 3);
+        assert_eq!(parse_time("1.5ns", 1e-9).unwrap(), 2); // half to even
+        assert_eq!(parse_time("2.5ns", 1e-9).unwrap(), 2);
+        assert_eq!(parse_time("2.51ns", 1e-9).unwrap(), 3);
+        assert_eq!(parse_time("1s", 1e-15).unwrap(), 1_000_000_000_000_000);
+        assert!(parse_time("10000s", 1e-15).is_err()); // past i64 ticks
+        assert_eq!(parse_time(".5us", 1e-9).unwrap(), 500);
     }
 
     #[test]
@@ -838,7 +938,7 @@ mod tests {
         assert_eq!(fmt_time(0, ts), "0s");
         assert_eq!(fmt_time(5, ts), "5ns");
         assert_eq!(fmt_time(1000, ts), "1us");
-        // 17_534_700 ticks * 1ns = 1.75347e-2 s = 17.5347 ms.
+        // 17_534_700 ticks * 1ns = 17.5347 ms.
         assert_eq!(fmt_time(17534700, ts), "17.5347ms");
         assert_eq!(fmt_time(100, ts), "100ns");
     }
