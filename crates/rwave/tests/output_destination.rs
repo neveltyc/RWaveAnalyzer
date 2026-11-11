@@ -82,6 +82,8 @@ fn output_targets_that_cannot_be_right_are_refused() {
     assert_eq!(o.status.code(), Some(1));
     let o = run(&d, &["dump", "w.vcd", "-o", ""]);
     assert_eq!(o.status.code(), Some(2));
+    let o = run(&d, &["dump", "w.vcd", "-o", "/dev/fd/1/"]);
+    assert_eq!(o.status.code(), Some(2), "a trailing slash names a directory");
     // A device is written in place, not replaced through a temp file.
     #[cfg(unix)]
     {

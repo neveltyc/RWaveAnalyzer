@@ -80,6 +80,9 @@ fn with_dest<R>(f: impl FnOnce(&mut Dest) -> R) -> R {
 /// names a directory or the waveform is the request's error; one that cannot
 /// be created is the environment's.
 pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
+    if target.ends_with('/') {
+        return Err(format!("cannot write --output {target}: it names a directory").into());
+    }
     let abs = std::path::absolute(target)
         .map_err(|e| CmdError::env(format!("cannot write --output {target}: {e}")))?;
     if abs.is_dir() {
@@ -104,6 +107,11 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     let (abs, temp, file) = if let Some(file) = fd_target(&abs).map_err(cannot)? {
         if is_same_file(&file, input) {
             return Err("--output must not be the waveform file itself".to_string().into());
+        }
+        // Our own stdout on a terminal: the ordinary terminal path, with its
+        // 1 MiB cut, rather than an unbounded write to the screen.
+        if file.is_terminal() && is_stdout(&file) {
+            return Ok(());
         }
         (abs, None, file)
     } else {
@@ -203,11 +211,17 @@ fn fd_number(s: &str) -> Option<i32> {
         }
         let rest = s.strip_prefix("/proc/")?;
         let (who, rest) = rest.split_once('/')?;
-        let own = std::process::id().to_string();
+        // Our pid as procfs numbers it, which differs from getpid() when /proc
+        // was mounted in another pid namespace.
+        let own = std::fs::read_link("/proc/self").ok()?;
+        let own = own.to_str()?;
         if !matches!(who, "self" | "thread-self") && who != own {
             return None;
         }
         let rest = match rest.strip_prefix("task/") {
+            // A task path is trusted only in its canonical form, which exists
+            // only for a real thread of ours.
+            Some(_) if who != own => return None,
             Some(t) => {
                 let (tid, r) = t.split_once('/')?;
                 if !digits(tid) {
@@ -219,7 +233,8 @@ fn fd_number(s: &str) -> Option<i32> {
         };
         rest.strip_prefix("fd/")?
     };
-    // The kernel's spelling only: digits, no sign, no leading zero.
+    // Linux's spelling: digits, no sign, no leading zero (macOS also takes
+    // `01`; such a path is then opened as an ordinary device instead).
     if !digits(n) || (n.len() > 1 && n.starts_with('0')) {
         return None;
     }
@@ -243,6 +258,23 @@ fn dup_fd(fd: i32) -> io::Result<File> {
     // duplicated; the original stays owned by whoever opened it.
     let dup = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
     Ok(File::from(dup))
+}
+
+/// Is the open `file` this process's stdout?
+#[cfg(unix)]
+fn is_stdout(file: &File) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let out = io::stdout().as_fd().try_clone_to_owned().map(File::from);
+    match (file.metadata(), out.and_then(|o| o.metadata())) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino() && a.rdev() == b.rdev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_stdout(_: &File) -> bool {
+    false
 }
 
 /// Is the open `file` the waveform at `input`?
@@ -431,4 +463,27 @@ macro_rules! out {
     ($($arg:tt)*) => {
         $crate::out::emit(format_args!($($arg)*))
     };
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::fd_number;
+
+    #[test]
+    fn descriptor_spellings() {
+        for (path, fd) in [("/dev/stdin", 0), ("/dev/stdout", 1), ("/dev/stderr", 2), ("/dev/fd/0", 0), ("/dev/fd/12", 12)] {
+            assert_eq!(fd_number(path), Some(fd), "{path}");
+        }
+        for path in ["/dev/fd/-1", "/dev/fd/+1", "/dev/fd/01", "/dev/fd/", "/dev/fd/1x", "/dev/fd/99999999999", "/dev/stdout2"] {
+            assert_eq!(fd_number(path), None, "{path}");
+        }
+        if cfg!(target_os = "linux") {
+            assert_eq!(fd_number("/proc/self/fd/1"), Some(1));
+            assert_eq!(fd_number("/proc/thread-self/fd/3"), Some(3));
+            assert_eq!(fd_number("/proc/self/task/1/fd/1"), None, "a task path counts only canonical");
+            assert_eq!(fd_number("/proc/0/fd/1"), None, "another process");
+        } else {
+            assert_eq!(fd_number("/proc/self/fd/1"), None);
+        }
+    }
 }

@@ -54,7 +54,9 @@ impl<V> SignalMap<V> {
     pub fn get_index(&self, k: u64) -> Option<&V> {
         match &self.0 {
             Smi::Dense(v) => v.get(k as usize).and_then(|o| o.as_ref()),
-            Smi::Sparse(m) => m.get(&SignalRef::from_index(k as usize).unwrap()),
+            // rwave patch: an index past every SignalRef (the u64::MAX an
+            // undeclared VCD id maps to) is simply absent.
+            Smi::Sparse(m) => SignalRef::from_index(k as usize).and_then(|r| m.get(&r)),
         }
     }
 

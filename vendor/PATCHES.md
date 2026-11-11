@@ -47,7 +47,8 @@ entry when updating a vendor copy.
   (`bb`, `b0b`) is x, as on a vector. A value change on an id no `$var` declared (`1!!`) is skipped
   with one warning per process, on both the dense-id path (`wavemem.rs`) and
   the id-map path (`vcd.rs`, `lookup.get`, which hands the miss on as
-  `u64::MAX`; `stream.rs` skips it too).
+  `u64::MAX`). `signal/map.rs` `get_index` and `stream.rs` treat that index
+  as absent (only `wellen::stream`, which rwave does not use, reaches them).
   Upstream panics on each (or, for a 1-bit id, reads the last character).
 - **On next sync:** re-apply; upstream still panics.
 
