@@ -43,9 +43,10 @@ fn fail(json: bool, command: Option<&Command>, msg: &str) {
 
 fn main() -> ExitCode {
     // On Unix, restore default SIGPIPE so piping into `head` etc. doesn't
-    // abort the process with a broken-pipe error mid-write.
+    // abort the process with a broken-pipe error mid-write, and ignore
+    // SIGXFSZ so a file-size limit is a write error we report.
     #[cfg(unix)]
-    restore_sigpipe();
+    init_signals();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_hook(info);
@@ -142,10 +143,13 @@ fn exit_for(e: &commands::CmdError) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn restore_sigpipe() {
-    // SAFETY: setting SIG_DFL for SIGPIPE is a standard, well-defined call.
+fn init_signals() {
+    // SAFETY: setting SIG_DFL/SIG_IGN dispositions is a standard, well-defined call.
     unsafe {
         let _ = libc_signal(SIGPIPE, SIG_DFL);
+        // A file-size limit then fails the write (EFBIG), which is reported
+        // and cleans up an unfinished --output file, instead of killing us.
+        let _ = libc_signal(SIGXFSZ, SIG_IGN);
     }
 }
 
@@ -154,7 +158,11 @@ fn restore_sigpipe() {
 #[cfg(unix)]
 const SIGPIPE: i32 = 13;
 #[cfg(unix)]
+const SIGXFSZ: i32 = 25; // the same on Linux (x86_64, aarch64) and macOS
+#[cfg(unix)]
 const SIG_DFL: usize = 0;
+#[cfg(unix)]
+const SIG_IGN: usize = 1;
 
 #[cfg(unix)]
 unsafe extern "C" {

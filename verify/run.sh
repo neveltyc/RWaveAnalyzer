@@ -363,6 +363,11 @@ if [[ -w /dev/full ]]; then
   $RW --limit 0 dump "$TTYD/big.vcd" > /dev/full 2>/dev/null
   [[ $? -eq 1 ]] && ok || bad "write to /dev/full exits 1"
 fi
+# A file-size limit is a reported write failure (exit 1) that removes the
+# unfinished --output file, not a kill by SIGXFSZ.
+( ulimit -f 8; $RW --limit 0 dump "$TTYD/big.vcd" -o "$TTYD/lim.txt" >/dev/null 2>&1; echo $? > "$TTYD/lim.rc" )
+[[ "$(cat "$TTYD/lim.rc")" -eq 1 ]] && ! ls "$TTYD"/lim.txt* >/dev/null 2>&1 \
+  && ok || bad "file-size limit exits 1 and leaves no .part (rc=$(cat "$TTYD/lim.rc"))"
 # A batch line's stderr warning comes after its own header.
 printf '$timescale 10ps $end\n$scope module t $end\n$var wire 1 ! a $end\n$upscope $end\n$enddefinitions $end\n#0\n0!\n#5\n1!\n' > "$TTYD/ps.vcd"
 order=$(printf 'info\ndump --begin 0.015ns\n' | $RW --batch "$TTYD/ps.vcd" 2>&1 | grep -n '^#2\|Warning' | cut -d: -f2 | tr -d '\n')

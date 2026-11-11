@@ -674,7 +674,9 @@ unsafe extern "C" fn emit_trampoline(
         ValueKind::Bits => {
             RawValue::Bits(BitStr::from_ascii_iter(value_str.len(), value_str.chars()))
         }
-        ValueKind::Real => RawValue::Real(value_str.parse().unwrap_or(0.0)),
+        // A real the plugin renders in a form Rust does not parse reads as NaN,
+        // as on the VCD path, never as a 0.0 that `dac=0` would match.
+        ValueKind::Real => RawValue::Real(value_str.trim().parse().unwrap_or(f64::NAN)),
         ValueKind::Str => RawValue::Str(value_str.to_string()),
         ValueKind::Event => RawValue::Event,
     };
