@@ -434,29 +434,29 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let total = d.ordered.len();
     let (shown_n, trunc) = clip_len(total, limit);
 
-    println!("{}", window_line(d.t0, d.t1, ts));
+    crate::outln!("{}", window_line(d.t0, d.t1, ts));
     if let Some(h) = d.matched.header() {
-        println!("{h}");
+        crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
-        println!("Note: {note}");
+        crate::outln!("Note: {note}");
     }
-    println!(
+    crate::outln!(
         "Selected: {}, Defined: {}, Undefined: {}",
         d.counts.selected, d.counts.defined, d.counts.undefined
     );
-    println!(
+    crate::outln!(
         "Active: {}, Static: {}, Unknown: {}",
         d.counts.active, d.counts.static_, d.counts.unknown
     );
     if let Some(note) = stale_window_note(wave, &d, ts) {
-        println!("Note: {note}");
+        crate::outln!("Note: {note}");
     }
     let mut current = "";
     for r in d.ordered.iter().take(shown_n) {
         if r.kind != current {
             current = r.kind;
-            println!("\n{}", current.to_uppercase());
+            crate::outln!("\n{}", current.to_uppercase());
         }
         // Text rows carry the same sparse marker as the JSON `unknown` field.
         let mark = if r.unknown { " unknown" } else { "" };
@@ -471,7 +471,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                     None => String::new(),
                 };
                 if args.verbose {
-                    println!(
+                    crate::outln!(
                         "  {} w={} {} chg={}{} init={}{} last={} first@{} last@{} uniq={}{}",
                         ljust(&r.path, 45),
                         r.width,
@@ -487,7 +487,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                         mark
                     );
                 } else {
-                    println!(
+                    crate::outln!(
                         "  {} chg={}{} init={}{} last={}{}",
                         ljust(&r.path, 45),
                         r.changes,
@@ -501,7 +501,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
             }
             "static" => {
                 if args.verbose {
-                    println!(
+                    crate::outln!(
                         "  {} w={} {} value={}{}{}",
                         ljust(&r.path, 45),
                         r.width,
@@ -511,7 +511,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                         mark
                     );
                 } else {
-                    println!(
+                    crate::outln!(
                         "  {} value={}{}{}",
                         ljust(&r.path, 45),
                         r.value.as_deref().unwrap_or(""),
@@ -521,7 +521,7 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                 }
             }
             _ => {
-                println!(
+                crate::outln!(
                     "  {} w={} {}",
                     ljust(&r.path, 45),
                     r.width,
@@ -531,10 +531,10 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
         }
     }
     if d.counts.defined == 0 && d.counts.undefined == 0 {
-        println!("(no selected signals)");
+        crate::outln!("(no selected signals)");
     }
     if trunc {
-        println!("{}", trunc_line(shown_n, total, "rows"));
+        crate::outln!("{}", trunc_line(shown_n, total, "rows"));
     }
     Ok(())
 }

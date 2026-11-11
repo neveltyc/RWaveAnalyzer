@@ -33,6 +33,7 @@ pub mod filter;
 pub mod format;
 pub mod json;
 pub mod model;
+pub mod out;
 pub mod plugin;
 pub mod select;
 

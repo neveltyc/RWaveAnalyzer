@@ -87,9 +87,9 @@ pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String>
 pub(super) fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let (entries, shown_n, trunc, selective) = list_entries(wave, args)?;
     let total = entries.len();
-    println!("Matched: {}/{}", total, wave.signal_count());
+    crate::outln!("Matched: {}/{}", total, wave.signal_count());
     if total == 0 {
-        println!(
+        crate::outln!(
             "{}",
             if selective {
                 "no match; try a broader filter or run without --filter to browse"
@@ -99,7 +99,7 @@ pub(super) fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
         );
     }
     for e in entries.iter().take(shown_n) {
-        println!(
+        crate::outln!(
             "  {} {}  {}",
             ljust(&e.path, 60),
             rjust(&e.width.to_string(), 5),
@@ -107,7 +107,7 @@ pub(super) fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
         );
     }
     if trunc {
-        println!("{}", trunc_line(shown_n, total, "signals"));
+        crate::outln!("{}", trunc_line(shown_n, total, "signals"));
     }
     Ok(())
 }

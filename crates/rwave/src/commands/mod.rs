@@ -35,6 +35,29 @@ mod trace;
 mod tree;
 
 use crate::cli::{cmd_name, Args, Command};
+
+/// A command failure, sorted by who can fix it: the request (a flag, a name,
+/// a condition, a time — exit 2, change the command) or the environment the
+/// answer depends on (a design library, a licence, an output file — exit 1,
+/// changing the command will not help). Messages built as plain `String`s are
+/// request errors; the few environment failures say so with [`CmdError::env`].
+#[derive(Debug)]
+pub struct CmdError {
+    pub msg: String,
+    pub env: bool,
+}
+
+impl CmdError {
+    pub fn env(msg: impl Into<String>) -> CmdError {
+        CmdError { msg: msg.into(), env: true }
+    }
+}
+
+impl From<String> for CmdError {
+    fn from(msg: String) -> CmdError {
+        CmdError { msg, env: false }
+    }
+}
 use crate::json::Json;
 use crate::model::Wave;
 
@@ -53,7 +76,7 @@ use tree::{compute_tree, text_tree};
 /// shared [`compute`] functions; text output uses the per-command `text_*`
 /// renderers. Batch mode reuses these very same functions, which is what keeps
 /// batch output byte-identical to the equivalent single-command call.
-pub fn run(wave: &mut Wave, args: &Args) -> Result<(), String> {
+pub fn run(wave: &mut Wave, args: &Args) -> Result<(), CmdError> {
     if args.json {
         let value = compute(wave, args)?;
         print_json(&value);
@@ -65,25 +88,25 @@ pub fn run(wave: &mut Wave, args: &Args) -> Result<(), String> {
 /// Render a command's text output to stdout, without the `--json` branch. Shared
 /// by the single-command text path ([`run`]) and the batch runner's text mode,
 /// so a batch text block is identical to the equivalent single command.
-pub fn render_text(wave: &mut Wave, args: &Args) -> Result<(), String> {
-    match args.command {
-        Command::Info => text_info(wave, args),
-        Command::List => text_list(wave, args),
-        Command::Dump => text_dump(wave, args),
-        Command::Summary => text_summary(wave, args),
-        Command::Snapshot => text_snapshot(wave, args),
-        Command::Compare => text_compare(wave, args),
-        Command::Search => text_search(wave, args),
-        Command::Tree => text_tree(wave, args),
-        Command::Trace => text_trace(wave, args),
-    }
+pub fn render_text(wave: &mut Wave, args: &Args) -> Result<(), CmdError> {
+    Ok(match args.command {
+        Command::Info => text_info(wave, args)?,
+        Command::List => text_list(wave, args)?,
+        Command::Dump => text_dump(wave, args)?,
+        Command::Summary => text_summary(wave, args)?,
+        Command::Snapshot => text_snapshot(wave, args)?,
+        Command::Compare => text_compare(wave, args)?,
+        Command::Search => text_search(wave, args)?,
+        Command::Tree => text_tree(wave, args)?,
+        Command::Trace => return text_trace(wave, args),
+    })
 }
 
 /// Compute a command's `--json` result as a [`Json`] value, without printing it.
 /// This is the single source of truth for structured output: the single-command
 /// `--json` path ([`run`]) and the batch runner both call it, so a batch
 /// `result` is byte-for-byte identical to the equivalent `rwave --json …`.
-pub fn compute(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+pub fn compute(wave: &mut Wave, args: &Args) -> Result<Json, CmdError> {
     Ok(with_command(&args.command, compute_body(wave, args)?))
 }
 
@@ -106,16 +129,16 @@ fn with_command(command: &Command, value: Json) -> Json {
     }
 }
 
-fn compute_body(wave: &mut Wave, args: &Args) -> Result<Json, String> {
-    match args.command {
-        Command::Info => compute_info(wave, args),
-        Command::List => compute_list(wave, args),
-        Command::Dump => compute_dump(wave, args),
-        Command::Summary => compute_summary(wave, args),
-        Command::Snapshot => compute_snapshot(wave, args),
-        Command::Compare => compute_compare(wave, args),
-        Command::Search => compute_search(wave, args),
-        Command::Tree => compute_tree(wave, args),
-        Command::Trace => compute_trace(wave, args),
-    }
+fn compute_body(wave: &mut Wave, args: &Args) -> Result<Json, CmdError> {
+    Ok(match args.command {
+        Command::Info => compute_info(wave, args)?,
+        Command::List => compute_list(wave, args)?,
+        Command::Dump => compute_dump(wave, args)?,
+        Command::Summary => compute_summary(wave, args)?,
+        Command::Snapshot => compute_snapshot(wave, args)?,
+        Command::Compare => compute_compare(wave, args)?,
+        Command::Search => compute_search(wave, args)?,
+        Command::Tree => compute_tree(wave, args)?,
+        Command::Trace => return compute_trace(wave, args),
+    })
 }

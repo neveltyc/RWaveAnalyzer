@@ -318,32 +318,32 @@ pub(super) fn compute_tree(wave: &mut Wave, args: &Args) -> Result<Json, String>
 pub(super) fn text_tree(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let d = build(wave, args)?;
     match &d.of {
-        Some(sig) => println!("{sig} — ancestors (top-down)"),
+        Some(sig) => crate::outln!("{sig} — ancestors (top-down)"),
         None => {
             let where_ = match d.roots.len() {
                 0 => "(nothing)".to_string(),
                 1 => d.roots[0].clone(),
                 n => format!("{n} matching scopes"),
             };
-            println!("{where_} — {} scope(s), depth {}", d.total, d.depth);
+            crate::outln!("{where_} — {} scope(s), depth {}", d.total, d.depth);
         }
     }
     if d.nodes.is_empty() {
-        println!();
+        crate::outln!();
         if d.of.is_some() {
-            println!("  (top-level signal; no enclosing scope)");
+            crate::outln!("  (top-level signal; no enclosing scope)");
         } else {
-            println!("  (no scopes)");
+            crate::outln!("  (no scopes)");
             // A flat design has signals but no hierarchy at all — say so here,
             // because the usual place this is reported is below the node list
             // that does not exist.
             if d.root_signals > 0 {
-                println!("  ({} signal(s) at the file root)", d.root_signals);
+                crate::outln!("  ({} signal(s) at the file root)", d.root_signals);
             }
         }
         return Ok(());
     }
-    println!();
+    crate::outln!();
     // `--of` prints full paths so a line can be pasted straight into --scope.
     // Subtree mode indents instance names to show the shape, but spells each
     // *root* out in full: with a pattern like `--scope u_a` the roots are
@@ -362,13 +362,13 @@ pub(super) fn text_tree(wave: &mut Wave, args: &Args) -> Result<(), String> {
         if n.children > 0 {
             extra.push_str(&format!(", {} child scope(s)", n.children));
         }
-        println!("  {}  {}", ljust(&label(n), width), extra);
+        crate::outln!("  {}  {}", ljust(&label(n), width), extra);
     }
     if d.root_signals > 0 && d.of.is_none() {
-        println!("\n  ({} signal(s) at the file root, outside any scope)", d.root_signals);
+        crate::outln!("\n  ({} signal(s) at the file root, outside any scope)", d.root_signals);
     }
     if d.truncated {
-        println!("{}", trunc_line(d.shown, d.total, "scopes"));
+        crate::outln!("{}", trunc_line(d.shown, d.total, "scopes"));
     }
     Ok(())
 }

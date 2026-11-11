@@ -160,19 +160,19 @@ pub(super) fn text_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let (shown_n, trunc) = clip_len(total, limit);
     let unchanged = d.union_len - total;
 
-    println!("Compare: {} vs {}", fmt_time(d.ta, ts), fmt_time(d.tb, ts));
+    crate::outln!("Compare: {} vs {}", fmt_time(d.ta, ts), fmt_time(d.tb, ts));
     if let Some(h) = d.matched.header() {
-        println!("{h}");
+        crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
-        println!("Note: {note}");
+        crate::outln!("Note: {note}");
     }
-    println!("{} changed, {} unchanged", total, unchanged);
+    crate::outln!("{} changed, {} unchanged", total, unchanged);
     for df in d.diffs.iter().take(shown_n) {
-        println!("  {} {} -> {}", ljust(&df.path, 48), df.at_t1, df.at_t2);
+        crate::outln!("  {} {} -> {}", ljust(&df.path, 48), df.at_t1, df.at_t2);
     }
     if trunc {
-        println!("{}", trunc_line(shown_n, total, "diffs"));
+        crate::outln!("{}", trunc_line(shown_n, total, "diffs"));
     }
     Ok(())
 }

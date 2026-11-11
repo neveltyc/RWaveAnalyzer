@@ -764,18 +764,18 @@ fn search_event_text(
     truncated: bool,
 ) {
     if !events.is_empty() {
-        println!(
+        crate::outln!(
             "Found: {} event(s)",
             count_label(if truncated { events.len() + 1 } else { total }, truncated)
         );
         for e in events {
-            println!("  T={} {}", ljust(&e.time_h, 12), values_text(&e.values));
+            crate::outln!("  T={} {}", ljust(&e.time_h, 12), values_text(&e.values));
         }
         if truncated {
-            println!("{}", trunc_line_lb(events.len(), events.len() + 1, "events"));
+            crate::outln!("{}", trunc_line_lb(events.len(), events.len() + 1, "events"));
         }
     } else {
-        println!(
+        crate::outln!(
             "No event in {}..{} where {}.",
             fmt_time(s.t0, s.ts),
             fmt_time(s.t1, s.ts),
@@ -1105,7 +1105,7 @@ fn search_interval_text(
 ) {
     let noun = if has_show { "segment" } else { "interval" };
     if !results.is_empty() {
-        println!(
+        crate::outln!(
             "Found: {} {}(s)",
             count_label(if truncated { results.len() + 1 } else { total }, truncated),
             noun
@@ -1114,21 +1114,21 @@ fn search_interval_text(
             let bh = fmt_time(r.begin_ticks, s.ts);
             let eh = fmt_time(r.end_ticks, s.ts);
             if has_show {
-                println!(
+                crate::outln!(
                     "  {}..{} {}",
                     ljust(&bh, 12),
                     ljust(&eh, 12),
                     values_text(r.values.as_deref().unwrap_or(&[]))
                 );
             } else {
-                println!("  {}..{} {}", ljust(&bh, 12), ljust(&eh, 12), s.cond_text);
+                crate::outln!("  {}..{} {}", ljust(&bh, 12), ljust(&eh, 12), s.cond_text);
             }
         }
         if truncated {
-            println!("{}", trunc_line_lb(results.len(), results.len() + 1, &format!("{noun}s")));
+            crate::outln!("{}", trunc_line_lb(results.len(), results.len() + 1, &format!("{noun}s")));
         }
     } else {
-        println!(
+        crate::outln!(
             "No {} in {}..{} where {}.",
             noun,
             fmt_time(s.t0, s.ts),

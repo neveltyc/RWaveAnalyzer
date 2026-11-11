@@ -17,6 +17,7 @@
 
 use crate::backend::design::{probe_kdb, Direction, Hop, HopKind, TraceStatus};
 use crate::cli::Args;
+use super::CmdError;
 use crate::json::{Json, Obj};
 use crate::model::Wave;
 
@@ -91,11 +92,11 @@ fn enabled() -> bool {
     }
 }
 
-fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
+fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, CmdError> {
     // Before the arguments are even looked at: whether the command is available
     // does not depend on how it was spelled.
     if !enabled() {
-        return Err(TRACE_DISABLED.to_string());
+        return Err(CmdError::env(TRACE_DISABLED));
     }
     let target = args
         .target
@@ -125,7 +126,7 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     // Capability first: an ambiguous name is irrelevant if this file can never
     // answer at all.
     if wave.design_query().is_none() {
-        return Err(unsupported_message(wave));
+        return Err(unsupported_message(wave).into());
     }
 
     // Resolve against the waveform, so NPI gets a full hierarchical path and
@@ -134,14 +135,16 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
 
     // The waveform names the design it came from; `--kdb` overrides it.
     let recorded = wave.design_query().and_then(|dq| dq.recorded_design_dir());
+    // From here on, a failure is the design library's or the licence's, not
+    // the request's.
     let kdb = probe_kdb(args.kdb.as_deref(), recorded.as_deref())
-        .map_err(|m| m.into_error())?;
+        .map_err(|m| CmdError::env(m.into_error()))?;
 
     let dq = wave
         .design_query()
         .expect("capability re-checked after the probe");
-    dq.ensure_design(&kdb, args.top.as_deref())?;
-    let outcome = dq.trace(&path, dir, control)?;
+    dq.ensure_design(&kdb, args.top.as_deref()).map_err(CmdError::env)?;
+    let outcome = dq.trace(&path, dir, control).map_err(CmdError::env)?;
 
     let total = outcome.hops.len();
     let limit = limit_of(args);
@@ -208,7 +211,7 @@ fn build(wave: &mut Wave, args: &Args) -> Result<TraceData, String> {
     })
 }
 
-pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, String> {
+pub(super) fn compute_trace(wave: &mut Wave, args: &Args) -> Result<Json, CmdError> {
     let d = build(wave, args)?;
     let mut o = Obj::new()
         .push("signal", Json::str(d.signal.clone()))
@@ -337,7 +340,7 @@ fn loc_of(h: &Hop) -> String {
     }
 }
 
-pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
+pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), CmdError> {
     let d = build(wave, args)?;
     let noun = match (d.dir, d.total) {
         (Direction::Driver, 1) => "driver".to_string(),
@@ -346,15 +349,15 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
         (Direction::Load, n) => format!("{n} loads"),
     };
     let head = if d.total == 1 { format!("1 {noun}") } else { noun };
-    println!("{} — {head}", d.signal);
+    crate::outln!("{} — {head}", d.signal);
     if d.hops.is_empty() {
         // The header already said "0 drivers"; a status line would repeat it.
         if args.verbose {
-            println!("\nkdb: {}", d.kdb);
+            crate::outln!("\nkdb: {}", d.kdb);
         }
         return Ok(());
     }
-    println!();
+    crate::outln!();
 
     // Columns, so a long load list scans vertically instead of having to be
     // read line by line. Widths come from the data, as elsewhere in rwave.
@@ -383,7 +386,7 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
         };
         // `boundary` stays in --json only: for a `port` hop it is nearly always
         // true, so on screen it is a column that never distinguishes anything.
-        println!(
+        crate::outln!(
             "  {}  {}  {}",
             ljust(h.kind.tag(), kind_w),
             ljust(&loc_of(h), loc_w),
@@ -399,7 +402,7 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
             };
             // Line up under the statement column: the two separators between
             // kind/location/statement have to be counted too.
-            println!("  {}{rel}: {s}{val}", ljust("", kind_w + loc_w + 4));
+            crate::outln!("  {}{rel}: {s}{val}", ljust("", kind_w + loc_w + 4));
         }
     }
 
@@ -407,23 +410,23 @@ pub(super) fn text_trace(wave: &mut Wave, args: &Args) -> Result<(), String> {
     // does not already have. A `status: resolved` line after a list of drivers
     // says nothing, and echoing back the `--at` they just typed says less.
     if d.status != TraceStatus::Resolved {
-        println!();
+        crate::outln!();
 
         // Only the two statuses that can accompany a non-empty list; an empty
         // one returned above, and `Resolved` is what the list already shows.
         if d.status == TraceStatus::BoundaryOnly {
-            println!("driver is outside the traced hierarchy");
+            crate::outln!("driver is outside the traced hierarchy");
         }
     }
     if d.unresolved_in_wave > 0 {
-        println!("\n{} endpoint(s) not dumped in this waveform", d.unresolved_in_wave);
+        crate::outln!("\n{} endpoint(s) not dumped in this waveform", d.unresolved_in_wave);
     }
     if args.verbose {
-        println!("\nkdb: {}", d.kdb);
+        crate::outln!("\nkdb: {}", d.kdb);
     }
     if d.truncated {
         let n = if d.dir == Direction::Driver { "drivers" } else { "loads" };
-        println!("{}", trunc_line(d.shown, d.total, n));
+        crate::outln!("{}", trunc_line(d.shown, d.total, n));
     }
     Ok(())
 }

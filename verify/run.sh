@@ -96,12 +96,11 @@ if $RW --json search "$STIM/$SD.vcd" --condition 'changed(data)' 2>/dev/null \
 if $RW --json search "$STIM/$SD.vcd" --condition 'valid=1' 2>/dev/null \
      | grep -q '"mode":"interval"'; then ok; else bad "level-only stays interval mode"; fi
 
-# Mixing edge and level clauses has no single row shape. It is caught in setup
-# (resolving terms needs the file), so it is a runtime error — exit 1, not the
-# exit 2 of an argv usage error.
+# Mixing edge and level clauses has no single row shape. A request error, exit
+# 2 (exit 1 is for the file or environment).
 mix=$($RW search "$STIM/$SD.vcd" --condition 'changed(data)' --condition 'valid=1' 2>&1)
 mixcode=$?
-[[ "$mixcode" -eq 1 && "$mix" == *"cannot mix changed()"* ]] \
+[[ "$mixcode" -eq 2 && "$mix" == *"cannot mix changed()"* ]] \
   && ok || bad "mixed changed()/level clauses (exit=$mixcode)"
 
 # The removed --changed flag is an argv error (exit 2) that names the
@@ -164,7 +163,7 @@ $RW list "$HD.vcd" --scope u_m0 --depth 0 >/dev/null 2>&1
 
 # search resolves names within the selection; a full path bypasses it.
 amb=$($RW search "$HD.vcd" --condition 'cnt=1' 2>&1); ambcode=$?
-[[ "$ambcode" -eq 1 && "$amb" == *"--scope"* ]] \
+[[ "$ambcode" -eq 2 && "$amb" == *"--scope"* ]] \
   && ok || bad "ambiguous condition name points at --scope (exit=$ambcode)"
 if $RW search "$HD.vcd" --condition 'cnt=1' --scope u_m0.u_a >/dev/null 2>&1; then
   ok
@@ -214,8 +213,8 @@ b=$($RW --json tree "$HF" --scope u_m0 --depth 2 2>/dev/null)
 $RW --json tree "$HF" --of hier_deep.u_m1.u_b.cnt 2>/dev/null \
   | grep -q '"mode":"chain"' && ok || bad "tree --of emits a chain"
 # A bad --of name is a clean error, not a panic or an empty success.
-$RW tree "$HF" --of nope_not_here >/dev/null 2>&1; [[ $? -eq 1 ]] \
-  && ok || bad "tree --of unknown signal exits 1"
+$RW tree "$HF" --of nope_not_here >/dev/null 2>&1; [[ $? -eq 2 ]] \
+  && ok || bad "tree --of unknown signal exits 2"
 # When a name matches in several places, the rows must be distinguishable —
 # telling those instances apart is the whole point of asking.
 mr=$($RW tree "$HF" u_a --depth 3 2>/dev/null | grep -c 'hier_deep\.u_m[01]\.u_a')
@@ -241,9 +240,9 @@ printf '%s' "$(RWAVE_TRACE_EN='' $RW trace "$HF" clk 2>&1)" | grep -q "built-in 
   && ok || bad "an empty RWAVE_TRACE_EN leaves trace on"
 
 # Once enabled, trace still needs design connectivity, which no waveform-only
-# backend has.
+# backend has: the request asked the wrong file, exit 2.
 terr=$(RWAVE_TRACE_EN=1 $RW trace "$HF" hier_deep.u_m0.u_a.clk 2>&1); tcode=$?
-[[ "$tcode" -eq 1 ]] && ok || bad "trace on vcd exits 1 (got $tcode)"
+[[ "$tcode" -eq 2 ]] && ok || bad "trace on vcd exits 2 (got $tcode)"
 printf '%s' "$terr" | grep -q "built-in Verdi NPI backend" \
   && ok || bad "trace refusal names the required backend"
 # A missing signal argument is a usage error (exit 2), not a runtime one, and is
@@ -335,6 +334,28 @@ bfout=$($RW --batch --json /no/such/file.vcd </dev/null 2>/dev/null); bfcode=$?
 # Text mode: a '#label' header precedes the command's normal text body.
 txt=$(printf 'info  #ov\n' | $RW --batch "$BF" 2>/dev/null)
 [[ "$txt" == "#ov"* ]] && ok || bad "batch text header"
+
+# A terminal gets at most 1 MiB, then a notice and exit 3; a pipe gets all.
+echo "== terminal cap =="
+TTYD=$(mktemp -d)
+python3 - > "$TTYD/big.vcd" <<'PY'
+import sys
+w = sys.stdout.write
+w('$timescale 1ns $end\n$scope module top $end\n$var wire 1 ! clk $end\n$upscope $end\n$enddefinitions $end\n')
+for t in range(60000):
+    w('#%d\n%d!\n' % (t, t & 1))
+PY
+if script -q /dev/null true >/dev/null 2>&1; then   # BSD script (macOS)
+  script -q /dev/null "$RW" --limit 0 dump "$TTYD/big.vcd" > "$TTYD/tty.out" 2>&1; tcode=$?
+else                                                 # util-linux script
+  script -qec "$RW --limit 0 dump $TTYD/big.vcd" /dev/null > "$TTYD/tty.out" 2>&1; tcode=$?
+fi
+tsize=$(wc -c < "$TTYD/tty.out")
+[[ "$tcode" -eq 3 && "$tsize" -lt 1200000 ]] && grep -q "OUTPUT CUT" "$TTYD/tty.out" \
+  && ok || { bad "terminal cap (exit=$tcode, bytes=$tsize)"; head -c 300 "$TTYD/tty.out"; }
+psize=$($RW --limit 0 dump "$TTYD/big.vcd" | wc -c)
+[[ "$psize" -gt 4000000 ]] && ok || bad "pipe is uncapped ($psize bytes)"
+rm -rf "$TTYD"
 
 echo
 echo "== RESULT: PASS=$pass FAIL=$fail =="

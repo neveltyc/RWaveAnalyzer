@@ -143,15 +143,15 @@ pub(super) fn text_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let d = dump_collect(wave, args)?;
     let (rows, truncated) = (&d.rows, d.truncated);
     let shown = rows.len();
-    println!("{}", window_line(d.t0, d.t1, ts));
+    crate::outln!("{}", window_line(d.t0, d.t1, ts));
     if let Some(h) = d.matched.header() {
-        println!("{h}");
+        crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
-        println!("Note: {note}");
+        crate::outln!("Note: {note}");
     }
     if shown == 0 {
-        println!(
+        crate::outln!(
             "(no events: {})",
             empty_window_reason(wave, &d.selected, d.matched.selective, d.t0, ts)
         );
@@ -182,9 +182,9 @@ pub(super) fn text_dump(wave: &mut Wave, args: &Args) -> Result<(), String> {
             out.push_str(&format!("  {} = {}\n", ljust(&r.path, 55), r.value));
         }
     }
-    print!("{out}");
+    crate::out!("{out}");
     if truncated {
-        println!("{}", trunc_line_lb(shown, shown + 1, "events"));
+        crate::outln!("{}", trunc_line_lb(shown, shown + 1, "events"));
     }
     Ok(())
 }

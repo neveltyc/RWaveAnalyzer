@@ -165,27 +165,27 @@ pub(super) fn text_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> 
     let (shown_n, trunc) = clip_len(total, limit);
 
     if d.known_count == 0 {
-        println!("No known values at {}.", fmt_time(d.t_at, ts));
+        crate::outln!("No known values at {}.", fmt_time(d.t_at, ts));
     } else {
-        println!("Known snapshot @ {}", fmt_time(d.t_at, ts));
+        crate::outln!("Known snapshot @ {}", fmt_time(d.t_at, ts));
     }
     if let Some(h) = d.matched.header() {
-        println!("{h}");
+        crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
-        println!("Note: {note}");
+        crate::outln!("Note: {note}");
     }
     if args.verbose {
-        println!(
+        crate::outln!(
             "Selected: {}, Known: {}, Undefined: {}",
             d.selected_len, d.known_count, d.undef_len
         );
     }
     for r in d.rows.iter().take(shown_n) {
         if r.undefined {
-            println!("  {} = (undef)", ljust(&r.path, 55));
+            crate::outln!("  {} = (undef)", ljust(&r.path, 55));
         } else if args.verbose {
-            println!(
+            crate::outln!(
                 "  {} w={} {} = {}",
                 ljust(&r.path, 55),
                 r.width,
@@ -193,11 +193,11 @@ pub(super) fn text_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> 
                 r.value.as_deref().unwrap_or("")
             );
         } else {
-            println!("  {} = {}", ljust(&r.path, 55), r.value.as_deref().unwrap_or(""));
+            crate::outln!("  {} = {}", ljust(&r.path, 55), r.value.as_deref().unwrap_or(""));
         }
     }
     if trunc {
-        println!("{}", trunc_line(shown_n, total, "signals"));
+        crate::outln!("{}", trunc_line(shown_n, total, "signals"));
     }
     Ok(())
 }

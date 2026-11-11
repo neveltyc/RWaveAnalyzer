@@ -2,6 +2,15 @@
 // released under the MIT License (see LICENSE)
 
 //! `rwave` binary entry point.
+//!
+//! Exit status says who can fix a failure:
+//!
+//! | code | meaning |
+//! |---|---|
+//! | 0 | answered — an empty result too, which says why in `hint` / text |
+//! | 1 | the file or environment: cannot open/parse the waveform, design library, licence, `--output` |
+//! | 2 | the request: usage, flags, names, conditions, times — change the command |
+//! | 3 | terminal output cut at 1 MiB; the result is incomplete |
 
 use std::process::ExitCode;
 
@@ -10,6 +19,7 @@ use rwave::cli::{self, cmd_name, Command, ParseOutcome};
 use rwave::commands;
 use rwave::json::{Json, Obj};
 use rwave::model::Wave;
+use rwave::out;
 
 /// Report a failure on stderr, as JSON when the run asked for JSON.
 ///
@@ -56,33 +66,71 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         ParseOutcome::Run(args) => {
+            let cmd = Some(&args.command);
+            let name = Some(cmd_name(&args.command));
+            if let Some(target) = &args.output {
+                if let Err(e) = out::to_file(target, &args.file) {
+                    fail(args.json, cmd, &e.msg);
+                    return exit_for(&e);
+                }
+            }
             let mut wave = match Wave::open(&args.file) {
                 Ok(w) => w,
                 Err(e) => {
-                    fail(args.json, Some(&args.command), &e.to_string());
+                    let _ = out::finish(false, args.json, name);
+                    fail(args.json, cmd, &e.to_string());
                     return ExitCode::FAILURE;
                 }
             };
-            match commands::run(&mut wave, &args) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(msg) => {
-                    fail(args.json, Some(&args.command), &msg);
+            let result = commands::run(&mut wave, &args);
+            let published = out::finish(result.is_ok(), args.json, name);
+            match (result, published) {
+                (Ok(()), Ok(())) => ExitCode::SUCCESS,
+                (Ok(()), Err(msg)) => {
+                    fail(args.json, cmd, &msg);
                     ExitCode::FAILURE
+                }
+                (Err(e), _) => {
+                    fail(args.json, cmd, &e.msg);
+                    exit_for(&e)
                 }
             }
         }
         ParseOutcome::Batch(inv) => {
+            if let Some(target) = &inv.output {
+                if let Err(e) = out::to_file(target, &inv.file) {
+                    fail(inv.json, None, &e.msg);
+                    return exit_for(&e);
+                }
+            }
             // Load the file once; a load failure is fatal (no command could
             // run). Then stream commands from stdin against the loaded model.
             let mut wave = match Wave::open(&inv.file) {
                 Ok(w) => w,
                 Err(e) => {
+                    let _ = out::finish(false, inv.json, None);
                     fail(inv.json, None, &e.to_string());
                     return ExitCode::FAILURE;
                 }
             };
-            batch::run_batch(&mut wave, &inv)
+            let code = batch::run_batch(&mut wave, &inv);
+            match out::finish(code == ExitCode::SUCCESS, inv.json, None) {
+                Ok(()) => code,
+                Err(msg) => {
+                    fail(inv.json, None, &msg);
+                    ExitCode::FAILURE
+                }
+            }
         }
+    }
+}
+
+/// 1 for the environment's failures, 2 for the request's (see the table above).
+fn exit_for(e: &commands::CmdError) -> ExitCode {
+    if e.env {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::from(2)
     }
 }
 

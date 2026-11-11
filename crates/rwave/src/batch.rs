@@ -33,7 +33,7 @@
 //! cases that exit non-zero in single-command mode. Only the file failing to
 //! load (handled in `main`) or the command stream failing to read is fatal.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::process::ExitCode;
 
 use crate::cli::{self, BatchInvocation};
@@ -56,7 +56,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
                 // Invalid UTF-8 or an I/O error on the command stream: fatal. We
                 // cannot meaningfully continue reading commands.
                 eprintln!("Error: failed to read command stream: {e}");
-                let _ = io::stdout().flush();
+                crate::out::flush();
                 return ExitCode::FAILURE;
             }
         };
@@ -67,7 +67,7 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
                 // Malformed line (e.g. an unterminated quote): a failed command.
                 seq += 1;
                 emit(inv.json, &seq.to_string(), Err(msg));
-                let _ = io::stdout().flush();
+                crate::out::flush();
                 continue;
             }
         };
@@ -83,20 +83,20 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
         match cli::parse_batch_line(&tokens, &inv.file, &inv.defaults) {
             Ok(args) => {
                 if inv.json {
-                    emit(true, &id, commands::compute(wave, &args));
+                    emit(true, &id, commands::compute(wave, &args).map_err(|e| e.msg));
                 } else {
                     // Text mode: header, then the command's normal text output
                     // (identical to the single-command text path), or one
                     // Error line on failure.
-                    println!("#{id}");
+                    crate::outln!("#{id}");
                     if let Err(msg) = commands::render_text(wave, &args) {
-                        println!("Error: {msg}");
+                        crate::outln!("Error: {}", msg.msg);
                     }
                 }
             }
             Err(msg) => emit(inv.json, &id, Err(msg)),
         }
-        let _ = io::stdout().flush();
+        crate::out::flush();
     }
 
     ExitCode::SUCCESS
@@ -120,13 +120,13 @@ fn emit(json: bool, id: &str, result: Result<Json, String>) {
                 .push("error", Json::str(msg))
                 .build(),
         };
-        println!("{}", obj.to_compact_string());
+        crate::outln!("{}", obj.to_compact_string());
     } else {
         // Text mode reaches here only for the parse-error path (the success
         // body is printed by the caller). Render the header + error line.
-        println!("#{id}");
+        crate::outln!("#{id}");
         if let Err(msg) = result {
-            println!("Error: {msg}");
+            crate::outln!("Error: {msg}");
         }
     }
 }

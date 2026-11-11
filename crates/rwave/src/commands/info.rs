@@ -119,23 +119,23 @@ pub(super) fn compute_info(wave: &mut Wave, _args: &Args) -> Result<Json, String
 
 pub(super) fn text_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let d = info_data(wave);
-    println!("File      : {}", d.path);
-    println!("Size      : {} bytes", thousands(d.size_bytes));
+    crate::outln!("File      : {}", d.path);
+    crate::outln!("Size      : {} bytes", thousands(d.size_bytes));
     if !d.date.is_empty() {
-        println!("Date      : {}", d.date);
+        crate::outln!("Date      : {}", d.date);
     }
     if !d.version.is_empty() {
-        println!("Tool      : {}", d.version);
+        crate::outln!("Tool      : {}", d.version);
     }
     if d.timescale.is_empty() {
-        println!("Timescale : (none declared; 1ps assumed)");
+        crate::outln!("Timescale : (none declared; 1ps assumed)");
     } else {
-        println!("Timescale : {}", d.timescale);
+        crate::outln!("Timescale : {}", d.timescale);
     }
     if d.signal_count == d.reference_count {
-        println!("Signals   : {}", d.signal_count);
+        crate::outln!("Signals   : {}", d.signal_count);
     } else {
-        println!(
+        crate::outln!(
             "Signals   : {} unique ({} $var refs via aliases)",
             d.signal_count, d.reference_count
         );
@@ -146,20 +146,20 @@ pub(super) fn text_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(", ");
-    println!("Types     : {types_str}");
-    println!(
+    crate::outln!("Types     : {types_str}");
+    crate::outln!(
         "Time      : {} ~ {} ({})",
         d.time_min_h.as_deref().unwrap_or("None"),
         d.time_max_h.as_deref().unwrap_or("None"),
         d.duration_h.as_deref().unwrap_or("None")
     );
     for s in &d.scopes {
-        println!("  scope: {s}");
+        crate::outln!("  scope: {s}");
     }
     if !d.comments.is_empty() && args.verbose {
-        println!("Comments  :");
+        crate::outln!("Comments  :");
         for c in &d.comments {
-            println!("  - {c}");
+            crate::outln!("  - {c}");
         }
     }
     Ok(())

@@ -431,9 +431,9 @@ fn times_are_ticks_and_human_only() {
 /// A failure under `--json` is JSON, on stderr, with stdout left clean.
 #[test]
 fn errors_are_json_under_json() {
-    // Runtime error: the command is known, so it is named.
+    // Request error found while running: the command is known, so it is named.
     let (out, err, code) = raw(&["dump", "--begin", "banana"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 2);
     assert!(out.trim().is_empty(), "stdout should stay clean: {out}");
     let v = serde_lite::parse(&err);
     assert_eq!(v.get("command"), &Value::Str("dump".into()));

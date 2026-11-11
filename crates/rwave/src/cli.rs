@@ -98,6 +98,8 @@ pub struct Args {
     pub top: Option<String>,
     /// `tree`: print the full ancestor chain of this signal instead of a subtree.
     pub of: Option<String>,
+    /// `-o/--output FILE`: the whole result goes to FILE, a receipt to stdout.
+    pub output: Option<String>,
 }
 
 /// Global default options for a batch run, applied to every command unless a
@@ -136,6 +138,8 @@ pub struct Defaults {
 pub struct BatchInvocation {
     pub file: String,
     pub json: bool,
+    /// `-o/--output FILE` for the whole run.
+    pub output: Option<String>,
     pub defaults: Defaults,
 }
 
@@ -227,6 +231,10 @@ Global options:
   --limit N     Max rows/records to emit; default {lim}; 0 = unlimited
   --verbose     Show extra fields; if --limit is omitted, disables truncation
   --batch       Load <file> once, then read commands (one per line) from stdin
+  -o, --output FILE
+                Write the whole result to FILE (only on success); stdout gets a
+                one-line receipt. Without it, output to a terminal stops after
+                1 MiB (exit 3); pipes and redirects get everything.
   --version     Print version and exit
   -h, --help    Print this help and exit
 
@@ -245,9 +253,15 @@ Supports both VCD and FST inputs; the format is auto-detected.
 Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
 Condition values: decimal 5, hex 0xff, binary b1010, 4-state b1x0z. A '?' in a binary
 literal is a don't-care bit: status=b?????1?? tests bit 2 of an 8-bit bus (a short
-literal pads with 0, so write every bit; quote the condition in the shell).
+literal pads with 0, so write every bit; quote the condition in the shell). A
+negative decimal is two's complement in the signal's width (cnt=-1); a real signal
+compares numbers (temp=-1.5, dac=100). A value the signal cannot hold is an error.
 A flag a command does not read is an error, not silence, so a mistyped time is
 reported rather than ignored.
+
+Exit status: 0 answered (an empty result too; it says why), 1 the file or
+environment failed (open/parse, design library, licence, --output), 2 the request
+is wrong (flags, names, conditions, times), 3 terminal output cut.
 "#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
@@ -260,7 +274,7 @@ reported rather than ignored.
 /// for --filter", not "print version").
 const VALUE_FLAGS: &[&str] = &[
     "--limit", "--begin", "--end", "--scope", "--depth", "--filter", "--exclude",
-    "--at", "--condition", "--show", "--kdb", "--top", "--of",
+    "--at", "--condition", "--show", "--kdb", "--top", "--of", "--output", "-o",
 ];
 
 /// Parse a slice of argv tokens (excluding argv[0]).
@@ -323,6 +337,7 @@ struct Acc {
     kdb: Option<String>,
     top: Option<String>,
     of: Option<String>,
+    output: Option<String>,
     command: Option<Command>,
     positionals: Vec<String>,
 }
@@ -421,6 +436,14 @@ fn accumulate(argv: &[String], acc: &mut Acc, batch_mode: bool) -> Result<(), St
             "--of" => {
                 i += 1;
                 acc.of = Some(require_value(argv, i, "--of")?);
+            }
+            "--output" | "-o" => {
+                i += 1;
+                let v = require_value(argv, i, tok)?;
+                if v.trim().is_empty() {
+                    return Err(format!("{tok} requires a file path"));
+                }
+                acc.output = Some(v);
             }
             "--changed" => {
                 return Err(
@@ -723,6 +746,7 @@ fn resolve_single(acc: Acc) -> Result<ParseOutcome, String> {
         kdb: acc.kdb,
         top: acc.top,
         of: acc.of,
+        output: acc.output,
     }))
 }
 
@@ -760,6 +784,7 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
     Ok(ParseOutcome::Batch(BatchInvocation {
         file,
         json: acc.json,
+        output: acc.output,
         defaults: Defaults {
             limit: acc.limit,
             verbose: acc.verbose,
@@ -790,6 +815,9 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
 pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> Result<Args, String> {
     let mut acc = Acc::default();
     accumulate(tokens, &mut acc, false)?;
+    if acc.output.is_some() {
+        return Err("--output applies to the whole batch run; give it on the rwave --batch command line".into());
+    }
     let command = match &acc.command {
         Some(c) => c.clone(),
         None => {
@@ -888,6 +916,7 @@ pub fn parse_batch_line(tokens: &[String], file: &str, defaults: &Defaults) -> R
         kdb,
         top,
         of,
+        output: None,
     })
 }
 

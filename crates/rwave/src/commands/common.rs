@@ -428,7 +428,7 @@ pub(super) fn selected_sids(wave: &Wave, sids: &Option<Vec<Sid>>) -> Vec<Sid> {
 
 /// Print a JSON value compactly followed by a newline (matches Python `print`).
 pub(super) fn print_json(j: &Json) {
-    println!("{}", j.to_compact_string());
+    crate::outln!("{}", j.to_compact_string());
 }
 
 /// Format a decoded [`RawValue`] for display using the signal's kind/width.
