@@ -65,6 +65,7 @@ entry when updating a vendor copy.
 
 - **Files:** `vendor/wellen/src/{stream.rs,wavemem.rs,fst.rs}`.
 - **Change:** `println!` → `eprintln!` for the "time decreased" warning and
-  the FST VHDL type notes; on stdout they broke `--json` output. The
+  the FST VHDL type notes; on stdout they broke `--json` output. rwave's own
+  warnings (this one, the undeclared-id one) use rwave's `Warning:` prefix. The
   statistics printers stay on stdout (rwave never calls them).
 - **On next sync:** re-apply.

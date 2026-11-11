@@ -674,9 +674,7 @@ unsafe extern "C" fn emit_trampoline(
         ValueKind::Bits => {
             RawValue::Bits(BitStr::from_ascii_iter(value_str.len(), value_str.chars()))
         }
-        // A real the plugin renders in a form Rust does not parse reads as NaN,
-        // as on the VCD path, never as a 0.0 that `dac=0` would match.
-        ValueKind::Real => RawValue::Real(value_str.trim().parse().unwrap_or(f64::NAN)),
+        ValueKind::Real => RawValue::Real(parse_plugin_real(value_str)),
         ValueKind::Str => RawValue::Str(value_str.to_string()),
         ValueKind::Event => RawValue::Event,
     };
@@ -798,8 +796,28 @@ fn map_type_str(s: &str) -> &'static str {
     }
 }
 
+/// A real as a plugin renders it: trimmed, and NaN when Rust does not parse
+/// it (as on the VCD path), never a 0.0 that `dac=0` would match. Every NaN is
+/// the one canonical NaN: change folding compares bits, and `-nan` vs `nan`
+/// from a C printf would otherwise record changes nobody can see.
+fn parse_plugin_real(s: &str) -> f64 {
+    match s.trim().parse::<f64>() {
+        Ok(v) if !v.is_nan() => v,
+        _ => f64::NAN,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_reals_parse_trimmed_and_nan_is_canonical() {
+        assert_eq!(super::parse_plugin_real(" 1.5 "), 1.5);
+        assert_eq!(super::parse_plugin_real("-0"), 0.0);
+        for s in ["nan", "-nan", "NaN", "1.#INF", "1.0D3", ""] {
+            assert_eq!(super::parse_plugin_real(s).to_bits(), f64::NAN.to_bits(), "{s}");
+        }
+    }
+
     use super::*;
 
     fn bits(s: &str) -> RawValue {

@@ -497,7 +497,7 @@ impl Encoder {
                 }
                 Ordering::Greater => {
                     eprintln!(
-                        "WARN: time decreased from {} to {}. Skipping!",
+                        "Warning: time decreased from {} to {}; skipping that time step",
                         *prev_time, time
                     );
                     self.skipping_time_step = true;
@@ -531,7 +531,7 @@ impl Encoder {
                 // Once per process: each parse thread has its own encoder.
                 static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!("WARN: value change on an undeclared id; skipping such lines");
+                    eprintln!("Warning: value change on an undeclared id; skipping such lines");
                 }
                 return;
             };
