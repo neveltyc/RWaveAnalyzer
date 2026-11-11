@@ -29,15 +29,44 @@ pub const TERMINAL_BUDGET: usize = 1 << 20;
 /// pseudo-terminal must be able to tell from a complete one.
 pub const EXIT_CUT: i32 = 3;
 
+/// A write error on any destination ends the run at once ([`write_failed`]):
+/// a full disk or a dead target must not end as a short result with exit 0,
+/// nor keep the command computing output nobody can receive.
 enum Dest {
-    /// A write error is kept and reported at [`finish`]: a full disk or a
-    /// file-size limit must not end as a short result with exit 0.
-    Pipe { w: BufWriter<io::Stdout>, failed: Option<io::Error> },
+    Pipe(BufWriter<io::Stdout>),
     /// A terminal: stdout, or an `--output` target that is one (`None` =
-    /// stdout). Same 1 MiB budget and cut either way, no receipt. A write
-    /// error on an `--output` terminal is kept and reported at [`finish`].
-    Tty { left: usize, to: Option<(File, String)>, failed: Option<io::Error> },
+    /// stdout). Same 1 MiB budget and cut either way, no receipt.
+    Tty { left: usize, to: Option<(File, String)> },
     File(FileSink),
+}
+
+/// How a failure is reported, set by `main` before the run: as JSON, and for
+/// which command (`None` in batch mode).
+static REPORT: Mutex<(bool, Option<String>)> = Mutex::new((false, None));
+
+/// Report failures the way `main` does for this run.
+pub fn report_failures_as(json: bool, command: Option<&str>) {
+    *REPORT.lock().unwrap_or_else(|e| e.into_inner()) = (json, command.map(str::to_string));
+}
+
+/// A result write failed: drop an unfinished `--output` file, report the
+/// failure as `main` would, and exit 1 (the environment's failure).
+fn write_failed(msg: String, temp: Option<&PathBuf>) -> ! {
+    if let Some(temp) = temp {
+        let _ = std::fs::remove_file(temp);
+    }
+    let (json, command) = REPORT.lock().map(|r| r.clone()).unwrap_or_default();
+    if json {
+        let obj = crate::json::Obj::new()
+            .push("command", crate::json::Json::opt_str(command.as_deref()))
+            .push("ok", crate::json::Json::Bool(false))
+            .push("error", crate::json::Json::str(msg))
+            .build();
+        eprintln!("{}", obj.to_compact_string());
+    } else {
+        eprintln!("Error: {msg}");
+    }
+    std::process::exit(1);
 }
 
 struct FileSink {
@@ -48,7 +77,6 @@ struct FileSink {
     target: PathBuf,
     lines: u64,
     bytes: u64,
-    failed: Option<io::Error>,
     /// Print the receipt on stdout: not when the target is stdout itself,
     /// where it would land in the result.
     receipt: bool,
@@ -72,9 +100,9 @@ fn with_dest<R>(f: impl FnOnce(&mut Dest) -> R) -> R {
     let mut guard = SINK.lock().unwrap_or_else(|e| e.into_inner());
     let dest = guard.get_or_insert_with(|| {
         if io::stdout().is_terminal() {
-            Dest::Tty { left: TERMINAL_BUDGET, to: None, failed: None }
+            Dest::Tty { left: TERMINAL_BUDGET, to: None }
         } else {
-            Dest::Pipe { w: BufWriter::with_capacity(1 << 16, io::stdout()), failed: None }
+            Dest::Pipe(BufWriter::with_capacity(1 << 16, io::stdout()))
         }
     });
     f(dest)
@@ -139,7 +167,7 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     // stdout on a terminal gets: the 1 MiB cut, not an unbounded write.
     if temp.is_none() && file.is_terminal() {
         *SINK.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some((file, shown)), failed: None });
+            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some((file, shown)) });
         return Ok(());
     }
     let receipt = !is_stdout(&file);
@@ -149,7 +177,6 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
         target: abs,
         lines: 0,
         bytes: 0,
-        failed: None,
         receipt,
     };
     *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dest::File(sink));
@@ -310,37 +337,35 @@ fn fd_target(_: &std::path::Path) -> io::Result<Option<File>> {
 /// Write formatted text to the result destination (what [`out!`] expands to).
 pub fn emit(args: fmt::Arguments) {
     with_dest(|dest| match dest {
-        Dest::Pipe { w, failed } => {
+        Dest::Pipe(w) => {
             // A closed pipe ends the process through SIGPIPE (restored in
-            // main); any other error is reported at `finish`.
-            if failed.is_none() {
-                if let Err(e) = w.write_fmt(args) {
-                    *failed = Some(e);
-                }
+            // main); any other error ends it here.
+            if let Err(e) = w.write_fmt(args) {
+                write_failed(format!("cannot write the result to stdout: {e}"), None);
             }
         }
         Dest::File(f) => {
-            if f.failed.is_none() {
-                if let Err(e) = f.write_fmt(args) {
-                    f.failed = Some(e);
-                }
+            if let Err(e) = f.write_fmt(args) {
+                write_failed(format!("cannot write --output {}: {e}", f.target.display()), f.temp.as_ref());
             }
         }
-        Dest::Tty { left, to, failed } => {
-            if failed.is_some() {
-                return;
-            }
+        Dest::Tty { left, to } => {
             let text = fmt::format(args);
-            let named = to.is_some();
+            let name = to.as_ref().map(|(_, n)| n.clone());
             let mut out: Box<dyn Write> = match to {
                 Some((f, _)) => Box::new(f),
                 None => Box::new(io::stdout().lock()),
             };
+            // An --output terminal that cannot be written is an error; a
+            // failing stdout terminal has nowhere left to report to.
+            let check = |r: io::Result<()>| {
+                if let (Err(e), Some(name)) = (r, &name) {
+                    write_failed(format!("cannot write --output {name}: {e}"), None);
+                }
+            };
             if text.len() <= *left {
                 *left -= text.len();
-                if let (Err(e), true) = (out.write_all(text.as_bytes()), named) {
-                    *failed = Some(e);
-                }
+                check(out.write_all(text.as_bytes()));
                 return;
             }
             // Over budget: end on the last whole line that fits. Only output
@@ -359,13 +384,10 @@ pub fn emit(args: fmt::Arguments) {
                 None => Ok(()),
             }
             .and_then(|()| out.flush());
-            // A target that cannot be written was never shown: report that
-            // (exit 1) rather than a cut.
-            if let (Err(e), true) = (written, named) {
-                *failed = Some(e);
-                return;
-            }
-            let hint = if named {
+            // A target that cannot be written was never shown: that is the
+            // failure to report (exit 1), not a cut.
+            check(written);
+            let hint = if name.is_some() {
                 "Send the whole result to a file or a pipe instead of a terminal."
             } else {
                 "Write the whole result to a file with --output FILE, or pipe it (| less, | grep, > file)."
@@ -379,18 +401,14 @@ pub fn emit(args: fmt::Arguments) {
 /// Push buffered results out now (batch mode, between lines).
 pub fn flush() {
     with_dest(|dest| match dest {
-        Dest::Pipe { w, failed } => {
-            if failed.is_none() {
-                if let Err(e) = w.flush() {
-                    *failed = Some(e);
-                }
+        Dest::Pipe(w) => {
+            if let Err(e) = w.flush() {
+                write_failed(format!("cannot write the result to stdout: {e}"), None);
             }
         }
         Dest::File(f) => {
-            if f.failed.is_none() {
-                if let Err(e) = f.flush() {
-                    f.failed = Some(e);
-                }
+            if let Err(e) = f.flush() {
+                write_failed(format!("cannot write --output {}: {e}", f.target.display()), f.temp.as_ref());
             }
         }
         Dest::Tty { .. } => {}
@@ -403,22 +421,12 @@ pub fn flush() {
 pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String> {
     let dest = SINK.lock().unwrap_or_else(|e| e.into_inner()).take();
     match dest {
-        None | Some(Dest::Tty { failed: None, .. }) => Ok(()),
-        Some(Dest::Tty { failed: Some(e), to, .. }) => {
-            let name = to.map(|(_, n)| n).unwrap_or_default();
-            Err(format!("cannot write --output {name}: {e}"))
-        }
-        Some(Dest::Pipe { mut w, failed }) => {
-            match failed.map_or_else(|| w.flush(), Err) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(format!("cannot write the result to stdout: {e}")),
-            }
+        None | Some(Dest::Tty { .. }) => Ok(()),
+        Some(Dest::Pipe(mut w)) => {
+            w.flush().map_err(|e| format!("cannot write the result to stdout: {e}"))
         }
         Some(Dest::File(mut f)) => {
-            let flushed = match f.failed.take() {
-                Some(e) => Err(e),
-                None => f.flush(),
-            };
+            let flushed = f.flush();
             drop(f.w);
             let published = match (flushed, &f.temp) {
                 (Ok(()), Some(temp)) if ok => std::fs::rename(temp, &f.target),
@@ -461,7 +469,7 @@ pub fn on_panic() {
         return;
     };
     match guard.as_mut() {
-        Some(Dest::Pipe { w, .. }) => {
+        Some(Dest::Pipe(w)) => {
             let _ = w.flush();
         }
         Some(Dest::File(f)) => {

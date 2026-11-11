@@ -73,6 +73,7 @@ fn main() -> ExitCode {
         ParseOutcome::Run(args) => {
             let cmd = Some(&args.command);
             let name = Some(cmd_name(&args.command));
+            out::report_failures_as(args.json, name);
             if let Some(target) = &args.output {
                 if let Err(e) = out::to_file(target, &args.file) {
                     fail(args.json, cmd, &e.msg);
@@ -102,6 +103,7 @@ fn main() -> ExitCode {
             }
         }
         ParseOutcome::Batch(inv) => {
+            out::report_failures_as(inv.json, None);
             if let Some(target) = &inv.output {
                 if let Err(e) = out::to_file(target, &inv.file) {
                     fail(inv.json, None, &e.msg);

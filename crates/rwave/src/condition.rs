@@ -74,6 +74,11 @@ pub struct Target {
     /// The number a real signal is compared with: set for a fraction/exponent
     /// spelling at parse time, and for any decimal once resolved to a real signal.
     pub real: Option<f64>,
+    /// `real` as a real value's recorded text reads (`f64`'s shortest
+    /// round-trip form, which every backend renders reals in), set once the
+    /// target is resolved to a real signal: matching then compares text, with
+    /// no float parse per tick. Empty otherwise.
+    pub real_text: String,
 }
 
 impl Target {
@@ -81,8 +86,13 @@ impl Target {
     /// is numeric vs a 4-state bit pattern. Deliberately keyed on the spelling,
     /// so different bases for one value (`5` vs `0x5`) are distinct — there is
     /// no cross-base normalization. Shared by the within-clause term de-dup and
-    /// the cross-clause de-dup so the two can never drift apart.
+    /// the cross-clause de-dup so the two can never drift apart. A target
+    /// resolved to a real signal is the exception: it is keyed on its value,
+    /// so `dac=100`, `dac=100.0` and `dac=1e2` are one question.
     pub fn dedup_key(&self) -> String {
+        if !self.real_text.is_empty() {
+            return format!("{}:real", self.real_text);
+        }
         let class = if self.real.is_some() {
             "real"
         } else if self.int.is_some() {
@@ -94,11 +104,11 @@ impl Target {
     }
 
     fn int(raw: String, n: BigUint, neg: bool) -> Target {
-        Target { raw, int: Some(n), neg, real: None }
+        Target { raw, int: Some(n), neg, real: None, real_text: String::new() }
     }
 
     fn bits(raw: String) -> Target {
-        Target { raw, int: None, neg: false, real: None }
+        Target { raw, int: None, neg: false, real: None, real_text: String::new() }
     }
 
     /// Is this a don't-care mask, i.e. a bit pattern carrying a `?` bit?
@@ -416,6 +426,12 @@ pub fn resolve_target(
                 t.int = None;
                 t.neg = false;
             }
+            // -0 and 0 are one value; key and match them as "0".
+            t.real_text = match t.real {
+                Some(r) if r == 0.0 => "0".to_string(),
+                Some(r) => format!("{r}"),
+                None => String::new(),
+            };
             Ok(t)
         }
         ValueKind::Bits if width > 0 => {
@@ -627,8 +643,12 @@ fn split_condition(item: &str) -> Option<(&str, Op, &str)> {
 /// width-aware 4-state extension.
 pub fn value_matches(value_bits: Option<&str>, raw_value: &str, target: &Target, width: u32) -> bool {
     if let Some(tr) = target.real {
-        // Resolved to a real signal: numeric equality on the recorded value.
-        return raw_value.parse::<f64>().is_ok_and(|v| v == tr);
+        // Resolved to a real signal: the recorded text is f64's shortest
+        // round-trip form, so equal text is equal value (±0 aside).
+        if target.real_text.is_empty() {
+            return raw_value.parse::<f64>().is_ok_and(|v| v == tr);
+        }
+        return raw_value == target.real_text || (target.real_text == "0" && raw_value == "-0");
     }
     if let Some(ti) = &target.int {
         // Numeric target: compare by integer equality. Only logic vectors with
@@ -1099,6 +1119,23 @@ mod tests {
         assert!(parse_target_value("--1").is_err());
         assert!(parse_target_value("-b1").is_err());
         assert!(parse_target_value("+1").is_err());
+    }
+
+    #[test]
+    fn real_targets_match_by_text_and_fold_by_value() {
+        use crate::format::ValueKind::Real;
+        // The recorded text is `format!("{f64}")`, as RawValue::raw_str makes it.
+        for (target, value) in [("100", 100.0), ("100.0", 100.0), ("1e2", 100.0), ("-1.5", -1.5),
+                                ("1e-3", 0.001), ("0", -0.0), ("-0.0", 0.0), ("3.14", 3.14)] {
+            let t = fit(target, Real, 64).unwrap();
+            assert!(value_matches(None, &format!("{value}"), &t, 64), "{target} vs {value}");
+        }
+        assert!(!value_matches(None, "NaN", &fit("0", Real, 64).unwrap(), 64));
+        let key = |t: &str| fit(t, Real, 64).unwrap().dedup_key();
+        assert_eq!(key("100"), key("100.0"));
+        assert_eq!(key("100"), key("1e2"));
+        assert_eq!(key("0"), key("-0.0"));
+        assert_ne!(key("100"), key("10"));
     }
 
     #[test]
