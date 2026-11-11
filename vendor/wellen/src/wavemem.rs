@@ -905,6 +905,8 @@ impl SignalEncoder {
                         .unwrap_or(Real::NAN),
                     _ => Real::NAN,
                 };
+                // One NaN bit pattern (`r-nan` after `rnan` is no change).
+                let float_value = if float_value.is_nan() { Real::NAN } else { float_value };
                 // write var-length time index + fixed little endian float bytes
                 leb128::write::unsigned(&mut self.data, u64::from(time_idx_delta)).unwrap();
                 self.data.extend_from_slice(&float_value.to_le_bytes());

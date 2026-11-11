@@ -113,3 +113,17 @@ fn stray_letters_on_a_scalar_read_as_x_and_sparse_ids_skip() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(values(&out.stdout), ["0", "0", "bx", "0", "bx", "0", "bx", "1", "0", "bx"]);
 }
+
+#[test]
+fn every_nan_is_one_value() {
+    // `rnan` and `r-nan` parse to different bit patterns; neither is a change
+    // from the other (glibc prints x86's default NaN as `-nan`).
+    let head = "$timescale 1ns $end\n$scope module t $end\n$var real 64 ! r $end\n\
+        $upscope $end\n$enddefinitions $end\n";
+    let body = format!("{head}#0\nr1.5 !\n#10\nrnan !\n#20\nr-nan !\n#30\nrnan !\n#40\nr2 !\n");
+    let out = run_on("rwave_robust_nan.vcd", body.as_bytes(), &["--json", "dump"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(values(&out.stdout), ["1.5", "NaN", "2"]);
+    let out = run_on("rwave_robust_nan.vcd", body.as_bytes(), &["--json", "summary"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"changes\":2"));
+}

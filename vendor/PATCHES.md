@@ -38,8 +38,8 @@ entry when updating a vendor copy.
 
 - **Files:** `vendor/wellen/src/vcd.rs` (`decode_vcd_bit_vec_change`, id
   lookups); `vendor/wellen/src/wavemem.rs` (real and string encoding,
-  undeclared ids); `vendor/wellen/src/signal/map.rs` (`get_index`);
-  `vendor/wellen/src/stream.rs`.
+  undeclared ids); `vendor/wellen/src/fst.rs` (real NaN);
+  `vendor/wellen/src/signal/map.rs` (`get_index`); `vendor/wellen/src/stream.rs`.
 - **Change:** on a logic id, an invalid character (a real `rnan`/`r1` written
   to it) or a 1/x/z beyond the declared width reads as x (all-`x` for a
   vector); extra leading zeros are dropped (`b01` on 1 bit is 1); an empty
@@ -52,6 +52,9 @@ entry when updating a vendor copy.
   `u64::MAX`). `signal/map.rs` `get_index` and `stream.rs` treat that index
   as absent (only `wellen::stream`, which rwave does not use, reaches them).
   Upstream panics on each (or, for a 1-bit id, reads the last character).
+  Every NaN a real is stored as (`wavemem.rs` for VCD, `fst.rs` for FST) is
+  the one canonical NaN, so `r-nan` after `rnan` is not a change to the
+  byte-level duplicate check.
 - **On next sync:** re-apply; upstream still panics.
 
 ### 3. UTF-8 BOM before the header
@@ -65,7 +68,8 @@ entry when updating a vendor copy.
 
 - **Files:** `vendor/wellen/src/{stream.rs,wavemem.rs,fst.rs}`.
 - **Change:** `println!` → `eprintln!` for the "time decreased" warning and
-  the FST VHDL type notes; on stdout they broke `--json` output. rwave's own
-  warnings (this one, the undeclared-id one) use rwave's `Warning:` prefix. The
+  the FST VHDL type notes; on stdout they broke `--json` output. The
+  warnings rwave moved or added ("time decreased" here, the undeclared-id one
+  in patch 2) use rwave's `Warning:` prefix. The
   statistics printers stay on stdout (rwave never calls them).
 - **On next sync:** re-apply.
