@@ -1,11 +1,10 @@
-// Regression test for the condition-kind fix (commands/search.rs): a condition
-// signal's recorded value is classified as a logic-bit string by the signal's
-// declared *kind*, never by sniffing its rendered characters.
+// A condition signal's recorded value is classified as a logic-bit string by
+// the signal's declared *kind*, never by sniffing its rendered characters.
 //
 // A real signal valued 100.0 renders as "100". The old char-sniffing heuristic
 // treated that as the binary vector 100 (= 4), so `dac=4` spuriously matched
-// and `dac=100` missed. Reals/strings must now never satisfy a numeric/bit
-// target; only genuine logic signals do.
+// and `dac=100` missed. A real signal compares a decimal or real number
+// numerically; a bit pattern on it is an error.
 
 use std::io::Write;
 use std::process::Command;
@@ -56,24 +55,32 @@ fn search(vcd: &std::path::Path, cond: &str) -> String {
 }
 
 #[test]
-fn real_signal_not_matched_as_binary() {
+fn real_signal_compares_numerically() {
     let vcd = std::env::temp_dir().join("rwave_cond_kind_real.vcd");
     write_real_vcd(&vcd);
 
     // dac is real (100.0 -> "100"). `dac=4` must NOT match — pre-fix the "100"
     // text was parsed as binary 100 == 4, a false positive.
     let out = search(&vcd, "dac=4");
-    assert!(
-        out.contains("No interval"),
-        "dac=4 must not match a real-valued signal; got:\n{out}"
-    );
+    assert!(out.contains("No interval"), "dac=4 must not match; got:\n{out}");
 
-    // `dac=100` must also not match: reals are not numerically comparable here.
-    let out = search(&vcd, "dac=100");
-    assert!(
-        out.contains("No interval"),
-        "dac=100 must not match a real-valued signal; got:\n{out}"
-    );
+    // `dac=100` and `dac=100.0` ask the same numeric question.
+    for cond in ["dac=100", "dac=100.0", "dac=1e2"] {
+        let out = search(&vcd, cond);
+        assert!(out.contains("Found: 1 interval"), "{cond} must match; got:\n{out}");
+    }
+    let out = search(&vcd, "dac!=100");
+    assert!(out.contains("No interval"), "{out}");
+
+    // A bit pattern has no meaning on a real.
+    for cond in ["dac=b100", "dac=0x64", "dac=1x"] {
+        let out = Command::new(rwave())
+            .args(["search", vcd.to_str().unwrap(), "--condition", cond])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{cond}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("against a bit pattern"), "{cond}");
+    }
 
     let _ = std::fs::remove_file(&vcd);
 }

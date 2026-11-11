@@ -558,7 +558,7 @@ fn every_empty_result_explains_itself() {
         vec!["summary", "--filter", "nosuchsignal"],
         vec!["snapshot", "--at", "0", "--filter", "late", "--exact"],
         vec!["compare", "--at", "0,0"],
-        vec!["search", "--condition", "moves=7"],
+        vec!["search", "--condition", "moves=x"],
         vec!["search", "--condition", "changed(moves)", "--begin", "1ms", "--end", "2ms"],
     ] {
         let v = json(&cmd);
@@ -586,7 +586,7 @@ fn no_message_carries_source_indentation() {
         vec!["summary", "--filter", "nosuchsignal"],
         vec!["snapshot", "--at", "0", "--filter", "late", "--exact"],
         vec!["compare", "--at", "0,0"],
-        vec!["search", "--condition", "moves=7"],
+        vec!["search", "--condition", "moves=x"],
     ];
     for cmd in probes {
         if let Value::Str(h) = json(&cmd).get("hint") {
@@ -599,7 +599,7 @@ fn no_message_carries_source_indentation() {
         vec!["dump", "--filter", "absent", "--exact"],
         vec!["summary", "--begin", "1ms"],
         vec!["snapshot", "--at", "0", "--filter", "late", "--exact"],
-        vec!["search", "--condition", "moves=7"],
+        vec!["search", "--condition", "moves=x"],
     ] {
         let vcd = fixture();
         let mut argv: Vec<String> = vec![cmd[0].to_string(), vcd.display().to_string()];

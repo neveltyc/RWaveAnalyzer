@@ -12,6 +12,12 @@
 //! (`b?????1??`), like `?` in a Verilog `casez` item. Numeric targets match by
 //! numeric equality; 4-state targets match as (width-aware) bit patterns, a
 //! mask on its cared bits only. `!=` does **not** match x/z/undefined.
+//!
+//! A negative decimal (`-1`) means its two's-complement pattern in the logic
+//! signal's width, since VCD records no signedness. A number with a fraction or
+//! exponent (`3.14`, `-1.5`, `1e-9`) targets a real signal, which compares any
+//! decimal or real number numerically. [`resolve_target`] fits a target to its
+//! signal once the signal is known, and rejects one the signal cannot hold.
 
 #[derive(Debug, Clone)]
 pub struct ConditionParseError(pub String);
@@ -60,8 +66,14 @@ pub struct Target {
     /// For numeric targets: the lower-cased original (informational).
     pub raw: String,
     /// `Some(n)` for numeric targets matched by integer equality; `None` for
-    /// 4-state bit-pattern targets.
+    /// 4-state bit-pattern targets. The magnitude when `neg`.
     pub int: Option<BigUint>,
+    /// `int` was written with a minus sign; [`resolve_target`] folds it into
+    /// the signal's two's complement.
+    pub neg: bool,
+    /// The number a real signal is compared with: set for a fraction/exponent
+    /// spelling at parse time, and for any decimal once resolved to a real signal.
+    pub real: Option<f64>,
 }
 
 impl Target {
@@ -71,7 +83,22 @@ impl Target {
     /// no cross-base normalization. Shared by the within-clause term de-dup and
     /// the cross-clause de-dup so the two can never drift apart.
     pub fn dedup_key(&self) -> String {
-        format!("{}:{:?}", self.raw, self.int.is_some())
+        let class = if self.real.is_some() {
+            "real"
+        } else if self.int.is_some() {
+            "int"
+        } else {
+            "bits"
+        };
+        format!("{}:{class}", self.raw)
+    }
+
+    fn int(raw: String, n: BigUint, neg: bool) -> Target {
+        Target { raw, int: Some(n), neg, real: None }
+    }
+
+    fn bits(raw: String) -> Target {
+        Target { raw, int: None, neg: false, real: None }
     }
 
     /// Is this a don't-care mask, i.e. a bit pattern carrying a `?` bit?
@@ -161,6 +188,45 @@ impl BigUint {
         Some(n.normalize())
     }
 
+    /// Number of significant bits (0 for zero).
+    pub fn bit_len(&self) -> u32 {
+        match self.limbs.last() {
+            Some(top) => (self.limbs.len() as u32 - 1) * 32 + (32 - top.leading_zeros()),
+            None => 0,
+        }
+    }
+
+    /// `2^bits - self`, for `self <= 2^bits`: the two's-complement pattern of
+    /// `-self` in a `bits`-wide signal.
+    fn negate_in(&self, bits: u32) -> BigUint {
+        let n = bits as usize / 32 + 1;
+        let mut out = vec![0u32; n];
+        out[bits as usize / 32] = 1 << (bits % 32);
+        let mut borrow = 0i64;
+        for (i, limb) in out.iter_mut().enumerate() {
+            let sub = *self.limbs.get(i).unwrap_or(&0) as i64 + borrow;
+            let mut v = *limb as i64 - sub;
+            borrow = 0;
+            if v < 0 {
+                v += 1 << 32;
+                borrow = 1;
+            }
+            *limb = v as u32;
+        }
+        let r = BigUint { limbs: out }.normalize();
+        // 2^bits - 0 is 2^bits itself, one bit too wide: -0 is 0.
+        if r.bit_len() > bits {
+            BigUint::zero()
+        } else {
+            r
+        }
+    }
+
+    /// Is this exactly `2^k` for some `k`?
+    fn is_power_of_two(&self) -> bool {
+        self.limbs.iter().map(|l| l.count_ones()).sum::<u32>() == 1
+    }
+
     /// Parse a pure binary string (only 0/1).
     pub fn from_binary(s: &str) -> Option<Self> {
         if s.is_empty() || !s.bytes().all(|b| b == b'0' || b == b'1') {
@@ -185,10 +251,14 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
             "target value too long; max length is {MAX_VALUE_ARG_LEN}"
         )));
     }
-    if raw.starts_with('-') {
-        return Err(ValueParseError(
-            "negative target values are not supported for waveform matching".into(),
-        ));
+    if let Some(body) = raw.strip_prefix('-') {
+        return match parse_bare_number(body)? {
+            Some(BareNumber::Int(n)) => Ok(Target::int(raw.clone(), n, true)),
+            Some(BareNumber::Real(r)) => Ok(Target { real: Some(-r), ..Target::bits(raw.clone()) }),
+            None => Err(ValueParseError(format!(
+                "invalid negative target {}; only negative decimal integers (-5) and real numbers (-1.5) are supported", crate::format::pyrepr(text)
+            ))),
+        };
     }
     if let Some(body) = raw.strip_prefix("0x") {
         if body.is_empty() {
@@ -200,7 +270,7 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
             )));
         }
         return match BigUint::from_hex(body) {
-            Some(n) => Ok(Target { raw: raw.clone(), int: Some(n) }),
+            Some(n) => Ok(Target::int(raw.clone(), n, false)),
             None => Err(ValueParseError(format!(
                 "invalid hex target {}; x/z and ? literals must use binary form like b1x0z or b1??0", crate::format::pyrepr(text)
             ))),
@@ -214,18 +284,14 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
     }
     if raw.starts_with('+') {
         return Err(ValueParseError(
-            "signed target values are not supported; write unsigned values".into(),
+            "a leading '+' is not supported; write the value without it".into(),
         ));
     }
-    // Bare: decimal if all digits, else 4-state literal.
-    if raw.bytes().all(|b| b.is_ascii_digit()) {
-        if raw.len() > MAX_DECIMAL_VALUE_DIGITS {
-            return Err(ValueParseError(format!(
-                "decimal target too long; max digits is {MAX_DECIMAL_VALUE_DIGITS}"
-            )));
-        }
-        let n = BigUint::from_decimal(&raw).unwrap();
-        return Ok(Target { raw: raw.clone(), int: Some(n) });
+    // Bare, in order: decimal integer, real number, 4-state literal.
+    match parse_bare_number(&raw)? {
+        Some(BareNumber::Int(n)) => return Ok(Target::int(raw.clone(), n, false)),
+        Some(BareNumber::Real(r)) => return Ok(Target { real: Some(r), ..Target::bits(raw.clone()) }),
+        None => {}
     }
     // Not decimal: must be a 4-state literal.
     if raw.len() > MAX_SIGNAL_WIDTH {
@@ -234,7 +300,7 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
         ));
     }
     if raw.bytes().all(|b| matches!(b, b'0' | b'1' | b'x' | b'z')) {
-        Ok(Target { raw, int: None })
+        Ok(Target::bits(raw))
     } else if is_mask_bits(&raw) {
         // A bare `1??0` is not guessed at: `?` needs the binary prefix.
         Err(ValueParseError(format!(
@@ -242,8 +308,179 @@ pub fn parse_target_value(text: &str) -> Result<Target, ValueParseError> {
         )))
     } else {
         Err(ValueParseError(format!(
-            "invalid target {}; expected decimal, 0x.., b.., or 0/1/x/z literal", crate::format::pyrepr(text)
+            "invalid target {}; expected decimal (5, -5), 0x.., b.., 0/1/x/z literal, or real number (3.14)", crate::format::pyrepr(text)
         )))
+    }
+}
+
+enum BareNumber {
+    Int(BigUint),
+    Real(f64),
+}
+
+/// Classify an unsigned bare number: all ASCII digits is an integer; digits
+/// with a fraction and/or exponent (`3.14`, `.5`, `1e-9`) is a finite real.
+/// `None` when it is neither — the caller then tries a 4-state literal. The
+/// grammar is spelled out rather than left to `f64::from_str`, which also
+/// takes `inf`, `nan` and `infinity`.
+fn parse_bare_number(s: &str) -> Result<Option<BareNumber>, ValueParseError> {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        if s.len() > MAX_DECIMAL_VALUE_DIGITS {
+            return Err(ValueParseError(format!(
+                "decimal target too long; max digits is {MAX_DECIMAL_VALUE_DIGITS}"
+            )));
+        }
+        return Ok(Some(BareNumber::Int(BigUint::from_decimal(s).unwrap())));
+    }
+    if s.len() > MAX_DECIMAL_VALUE_DIGITS + 32 || !is_real_literal(s) {
+        return Ok(None);
+    }
+    Ok(s.parse::<f64>().ok().filter(|r| r.is_finite()).map(BareNumber::Real))
+}
+
+/// `digits [. digits] [e [+-] digits]` or `. digits [...]`, with a fraction or
+/// an exponent present (a bare digit run is an integer).
+fn is_real_literal(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |mut i: usize| {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        (i, i - start)
+    };
+    let (mut i, int_digits) = digits(0);
+    let mut frac_digits = 0;
+    let mut marked = false;
+    if i < b.len() && b[i] == b'.' {
+        marked = true;
+        (i, frac_digits) = digits(i + 1);
+    }
+    if int_digits + frac_digits == 0 {
+        return false;
+    }
+    if i < b.len() && b[i] == b'e' {
+        marked = true;
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let (end, exp_digits) = digits(i);
+        if exp_digits == 0 {
+            return false;
+        }
+        i = end;
+    }
+    marked && i == b.len()
+}
+
+/// Fit a level target to the signal it compares against, once the signal is
+/// known, or say why the signal cannot hold it. `Err` carries the reason, to
+/// follow `condition 'TERM': `.
+///
+/// * event: no level at all — `changed()` is the question to ask.
+/// * real: a decimal or real number compares numerically (`dac=100` asks what
+///   `dac=100.0` does); a bit pattern or a hex/binary spelling is an error.
+/// * logic: a real number is an error. A negative decimal becomes its
+///   two's-complement pattern in `width` bits, VCD recording no signedness. A
+///   number of more than `width` bits, or a pattern with a 1/x/z above bit
+///   `width-1`, can never be equal — and `!=` would always hold — so it is an
+///   error rather than a plausible empty answer.
+/// * string: unchanged (compares as written).
+pub fn resolve_target(
+    mut t: Target,
+    kind: crate::format::ValueKind,
+    width: u32,
+    path: &str,
+    value_text: &str,
+) -> Result<Target, String> {
+    use crate::format::ValueKind;
+    let shown = crate::format::pyrepr(value_text);
+    match kind {
+        ValueKind::Event => Err(format!(
+            "targets event variable {path}, which has no level; use changed({path}) to fire on each trigger"
+        )),
+        ValueKind::Real => {
+            // A binary/hex spelling describes bits, which a real does not have;
+            // only a decimal or real number names one.
+            let spelled_bits = t.raw.starts_with('b') || t.raw.starts_with("0x");
+            if t.real.is_none() && (t.int.is_none() || spelled_bits) {
+                return Err(format!(
+                    "compares real signal {path} against a bit pattern; write a decimal or real number, e.g. {path}=3.14"
+                ));
+            }
+            if t.real.is_none() {
+                // A decimal integer, as written: the f64 nearest to it.
+                t.real = t.raw.parse::<f64>().ok();
+                t.int = None;
+                t.neg = false;
+            }
+            Ok(t)
+        }
+        ValueKind::Bits if width > 0 => {
+            if t.real.is_some() {
+                return Err(format!(
+                    "compares logic signal {path} (width {width}) against the real number {shown}; use a decimal, hex, binary, or 4-state target"
+                ));
+            }
+            let Some(n) = &t.int else {
+                let excess = t.raw.len().saturating_sub(width as usize);
+                if t.raw.as_bytes()[..excess].iter().any(|b| !matches!(b, b'0' | b'?')) {
+                    return Err(format!(
+                        "{shown} has a 1/x/z above bit {} and cannot match signal {path} (width {width})",
+                        width - 1
+                    ));
+                }
+                return Ok(t);
+            };
+            if !t.neg {
+                if n.bit_len() > width {
+                    return Err(format!(
+                        "{shown} does not fit signal {path} (width {width}); the range is {}",
+                        unsigned_range(width)
+                    ));
+                }
+                return Ok(t);
+            }
+            // -n fits when n <= 2^(width-1).
+            let fits = n.bit_len() < width || (n.bit_len() == width && n.is_power_of_two());
+            if !fits {
+                return Err(format!(
+                    "{shown} does not fit signal {path} (width {width}) as a two's-complement value; the signed range is {}",
+                    signed_range(width)
+                ));
+            }
+            t.int = Some(n.negate_in(width));
+            t.neg = false;
+            Ok(t)
+        }
+        _ => Ok(t),
+    }
+}
+
+fn unsigned_range(width: u32) -> String {
+    let signed = if width > 1 { format!(" (or {} as two's complement)", neg_range(width)) } else { String::new() };
+    if width < 128 {
+        format!("0..{}{signed}", (1u128 << width) - 1)
+    } else {
+        format!("0..2^{width}-1{signed}")
+    }
+}
+
+fn neg_range(width: u32) -> String {
+    if width <= 127 {
+        format!("-{}..-1", 1u128 << (width - 1))
+    } else {
+        format!("-2^{}..-1", width - 1)
+    }
+}
+
+fn signed_range(width: u32) -> String {
+    if width <= 127 {
+        let h = 1u128 << (width - 1);
+        format!("-{h}..{}", h - 1)
+    } else {
+        format!("-2^{0}..2^{0}-1", width - 1)
     }
 }
 
@@ -260,9 +497,9 @@ fn parse_binary_body(body: &str, text: &str) -> Result<Target, ValueParseError> 
         // Keep the base: `raw` is what the de-dup key reads, and a bare body
         // would fold `b1010` (10) into the decimal `1010`. `b` and `0b` are
         // one base, so both spell it `b`.
-        Ok(Target { raw: format!("b{body}"), int: Some(n) })
+        Ok(Target::int(format!("b{body}"), n, false))
     } else if is_mask_bits(body) {
-        Ok(Target { raw: body.to_string(), int: None })
+        Ok(Target::bits(body.to_string()))
     } else {
         Err(ValueParseError(format!(
             "invalid binary target {}; expected only 0/1/x/z, or ? for a don't-care bit", crate::format::pyrepr(text)
@@ -382,6 +619,10 @@ fn split_condition(item: &str) -> Option<(&str, Op, &str)> {
 /// value is not a logic vector (real/string). `width` is the signal width for
 /// width-aware 4-state extension.
 pub fn value_matches(value_bits: Option<&str>, raw_value: &str, target: &Target, width: u32) -> bool {
+    if let Some(tr) = target.real {
+        // Resolved to a real signal: numeric equality on the recorded value.
+        return raw_value.parse::<f64>().is_ok_and(|v| v == tr);
+    }
     if let Some(ti) = &target.int {
         // Numeric target: compare by integer equality. Only logic vectors with
         // no x/z can be numeric.
@@ -780,6 +1021,80 @@ mod tests {
         // The same base still folds, whichever binary prefix spells it.
         assert_eq!(bin.dedup_key(), parse_target_value("B1010").unwrap().dedup_key());
         assert_eq!(bin.dedup_key(), parse_target_value("0b1010").unwrap().dedup_key());
+    }
+
+    fn fit(text: &str, kind: crate::format::ValueKind, width: u32) -> Result<Target, String> {
+        resolve_target(parse_target_value(text).unwrap(), kind, width, "top.s", text)
+    }
+
+    #[test]
+    fn negative_decimal_is_twos_complement_in_the_width() {
+        use crate::format::ValueKind::Bits;
+        let int = |t: &str, w| fit(t, Bits, w).unwrap().int.unwrap();
+        assert_eq!(int("-1", 4), BigUint::from_binary("1111").unwrap());
+        assert_eq!(int("-8", 4), BigUint::from_binary("1000").unwrap());
+        assert_eq!(int("-1", 1), BigUint::from_binary("1").unwrap());
+        assert_eq!(int("-0", 4), BigUint::zero());
+        assert_eq!(int("-1", 32), BigUint::from_decimal("4294967295").unwrap());
+        assert_eq!(int("-2147483648", 32), BigUint::from_decimal("2147483648").unwrap());
+        assert_eq!(int("-1", 65), BigUint::from_binary(&"1".repeat(65)).unwrap());
+        assert!(fit("-9", Bits, 4).unwrap_err().contains("signed range is -8..7"));
+        assert!(fit("-2", Bits, 1).is_err());
+        assert!(fit("-2147483649", Bits, 32).is_err());
+    }
+
+    #[test]
+    fn a_target_wider_than_the_signal_is_an_error() {
+        use crate::format::ValueKind::Bits;
+        assert!(fit("15", Bits, 4).is_ok());
+        assert!(fit("16", Bits, 4).unwrap_err().contains("range is 0..15 (or -8..-1"));
+        assert!(fit("2", Bits, 1).unwrap_err().contains("range is 0..1"));
+        assert!(fit("0x1f", Bits, 4).is_err());
+        assert!(fit("b10000", Bits, 4).is_err());
+        assert!(fit("b00001111", Bits, 4).is_ok());
+        assert!(fit("b0?1x0", Bits, 4).is_ok());
+        assert!(fit("bx0000", Bits, 4).unwrap_err().contains("above bit 3"));
+        assert!(fit("b1?000", Bits, 4).is_err());
+        assert!(fit("1.5", Bits, 4).unwrap_err().contains("real number"));
+    }
+
+    #[test]
+    fn real_signals_compare_numbers() {
+        use crate::format::ValueKind::{Event, Real, Str};
+        let t = fit("100", Real, 64).unwrap();
+        assert!(value_matches(None, "100", &t, 64));
+        assert!(!value_matches(None, "4", &t, 64));
+        let t = fit("-1.5", Real, 64).unwrap();
+        assert!(value_matches(None, "-1.5", &t, 64));
+        assert!(condition_match(None, Some("NaN"), Op::Ne, &t, 64));
+        assert!(value_matches(None, "0.001", &fit("1e-3", Real, 64).unwrap(), 64));
+        for bits in ["b101", "0x5", "1x", "0b11"] {
+            assert!(fit(bits, Real, 64).unwrap_err().contains("bit pattern"), "{bits}");
+        }
+        assert!(fit("1", Event, 0).unwrap_err().contains("changed(top.s)"));
+        assert!(fit("1", Str, 0).is_ok());
+    }
+
+    #[test]
+    fn real_literal_grammar() {
+        for ok in ["3.14", ".5", "5.", "1e9", "1E-9", "2.5e+3"] {
+            assert!(parse_target_value(ok).unwrap().real.is_some(), "{ok}");
+        }
+        for bad in ["inf", "nan", "1e", "e5", ".", "1.2.3", "1_000.0", "٣.5", "²"] {
+            assert!(parse_target_value(bad).is_err(), "{bad}");
+        }
+        assert!(parse_target_value("-1.5").unwrap().real == Some(-1.5));
+        assert!(parse_target_value("--1").is_err());
+        assert!(parse_target_value("-b1").is_err());
+        assert!(parse_target_value("+1").is_err());
+    }
+
+    #[test]
+    fn spellings_of_different_classes_never_fold() {
+        let k = |t: &str| parse_target_value(t).unwrap().dedup_key();
+        assert_ne!(k("1"), k("1.0"));
+        assert_ne!(k("-1"), k("1"));
+        assert_ne!(k("10"), k("b10"));
     }
 
     #[test]

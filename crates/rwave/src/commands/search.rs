@@ -208,13 +208,11 @@ fn resolve_conditions(
                     info.path
                 ));
             }
-            TermBody::Level { op, target, value_text } => ResolvedTerm::Level {
-                op,
-                target,
-                width: info.width,
-                kind: info.kind,
-                value_text,
-            },
+            TermBody::Level { op, target, value_text } => {
+                let target = condition::resolve_target(target, info.kind, info.width, &info.path, &value_text)
+                    .map_err(|why| format!("condition {}: {why}", crate::format::pyrepr(&c.original)))?;
+                ResolvedTerm::Level { op, target, width: info.width, kind: info.kind, value_text }
+            }
             TermBody::Changed => ResolvedTerm::Changed,
         };
         let cond = ResolvedCond { sid, term, original: c.original, path: info.path.clone() };
