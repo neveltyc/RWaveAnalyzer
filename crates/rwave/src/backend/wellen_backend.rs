@@ -26,6 +26,28 @@ use super::{
 };
 use crate::format::ValueKind;
 
+/// Marks a [`BackendSid`] holding a derived wellen signal. wellen flags these
+/// in `SignalRef`'s top bit, which `SignalRef::index()` strips, so a derived
+/// ref (a bit-exploded bus wellen reassembled, a GHW slice) and the ground
+/// signal of the same index would otherwise share one sid.
+const DERIVED_SID: usize = 1 << (usize::BITS - 1);
+
+fn sid_of(r: SignalRef) -> BackendSid {
+    if r.is_derived_signal() {
+        BackendSid(r.index() | DERIVED_SID)
+    } else {
+        BackendSid(r.index())
+    }
+}
+
+fn ref_of(s: BackendSid) -> Option<SignalRef> {
+    if s.0 & DERIVED_SID != 0 {
+        SignalRef::derived_from_index(s.0 & !DERIVED_SID)
+    } else {
+        SignalRef::from_index(s.0)
+    }
+}
+
 /// Lazily created windowed FST reader (see [`WaveformBackend::load_traces_windowed`]).
 enum WindowState {
     Unopened,
@@ -39,7 +61,7 @@ enum WindowState {
 pub struct WellenBackend {
     wave: Waveform,
     path: String,
-    /// SignalRef indices already materialized inside `wave` (so repeated
+    /// Sids already materialized inside `wave` (so repeated
     /// `load_traces` calls don't reload). wellen owns the loaded `Signal`s; we
     /// borrow them when decoding.
     loaded: RefCell<std::collections::BTreeSet<usize>>,
@@ -157,7 +179,7 @@ impl WaveformBackend for WellenBackend {
                 width: var_width(var, h),
                 type_str,
                 kind,
-                backend_sid: BackendSid(var.signal_ref().index()),
+                backend_sid: sid_of(var.signal_ref()),
             });
         }
         out
@@ -183,26 +205,26 @@ impl WaveformBackend for WellenBackend {
             let loaded = self.loaded.borrow();
             for s in sids {
                 if !loaded.contains(&s.0) {
-                    if let Some(r) = SignalRef::from_index(s.0) {
+                    if let Some(r) = ref_of(*s) {
                         to_load.push(r);
                     }
                 }
             }
         }
         if !to_load.is_empty() {
-            to_load.sort_by_key(|r| r.index());
-            to_load.dedup_by_key(|r| r.index());
+            to_load.sort_by_key(|r| sid_of(*r));
+            to_load.dedup_by_key(|r| sid_of(*r));
             self.wave.load_signals_multi_threaded(&to_load);
             let mut loaded = self.loaded.borrow_mut();
             for r in &to_load {
-                loaded.insert(r.index());
+                loaded.insert(sid_of(*r).0);
             }
         }
 
         // Phase 2: decode each requested signal's change history once.
         sids.iter()
             .map(|s| {
-                let sref = match SignalRef::from_index(s.0) {
+                let sref = match ref_of(*s) {
                     Some(r) => r,
                     None => return empty_trace(),
                 };
@@ -237,7 +259,7 @@ impl WaveformBackend for WellenBackend {
         // request to the full decode, which is always a correct answer.
         let mut slots: Vec<(usize, WinKind)> = Vec::with_capacity(sids.len());
         for s in sids {
-            let kind = SignalRef::from_index(s.0)
+            let kind = ref_of(*s)
                 .filter(|r| !r.is_derived_signal())
                 .and_then(|r| self.hierarchy().get_signal_tpe(r))
                 .map(|enc| match enc {
