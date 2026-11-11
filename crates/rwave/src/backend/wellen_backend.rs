@@ -92,6 +92,9 @@ impl WellenBackend {
 
         let wave = wellen::simple::read(path)
             .map_err(|e| BackendError::Parse(format!("failed to read waveform: {e}")))?;
+        if wave.hierarchy().timescale().is_none() {
+            eprintln!("Warning: {path} declares no $timescale; ticks are read as 1ps");
+        }
 
         Ok(WellenBackend {
             wave,

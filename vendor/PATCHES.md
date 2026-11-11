@@ -33,3 +33,26 @@ entry when updating a vendor copy.
   not break anything (the arm is already correct) but the hunk will not apply.
 
 [w137]: https://github.com/ekiwi/wellen/issues/137
+
+### 2. Malformed vector values read as x instead of panicking
+
+- **File:** `vendor/wellen/src/vcd.rs`, `decode_vcd_bit_vec_change`.
+- **Change:** an invalid character (a real `rnan`/`r1.5` written to a logic
+  id) or a value wider than its declaration yields all-`x` of the declared
+  width; upstream panics and aborts the whole parse.
+- **On next sync:** re-apply; upstream still panics.
+
+### 3. UTF-8 BOM before the header
+
+- **File:** `vendor/wellen/src/vcd.rs`, `read_command`.
+- **Change:** a leading `EF BB BF` is skipped; upstream rejects the file as
+  not a VCD.
+- **On next sync:** re-apply.
+
+### 4. Parse-time warnings go to stderr
+
+- **Files:** `vendor/wellen/src/{stream.rs,wavemem.rs,fst.rs}`.
+- **Change:** `println!` → `eprintln!` for the "time decreased" warning and
+  the FST VHDL type notes; on stdout they broke `--json` output. The
+  statistics printers stay on stdout (rwave never calls them).
+- **On next sync:** re-apply.

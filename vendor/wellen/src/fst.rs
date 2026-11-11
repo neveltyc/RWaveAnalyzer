@@ -469,7 +469,7 @@ fn convert_var_direction(tpe: FstVarDirection) -> VarDirection {
 /// Variables are always Signal or None.
 pub fn deal_with_vhdl_var_type(tpe: FstVhdlVarType, var_name: &str) {
     if !matches!(tpe, FstVhdlVarType::None | FstVhdlVarType::Signal) {
-        println!("INFO: detected a VHDL Var Type that is not Signal!: {tpe:?} for {var_name}");
+        eprintln!("INFO: detected a VHDL Var Type that is not Signal!: {tpe:?} for {var_name}");
     }
 }
 
@@ -486,11 +486,11 @@ pub fn merge_vhdl_data_and_var_type(vcd: VarType, vhdl: FstVhdlDataType) -> VarT
         FstVhdlDataType::Logic => VarType::StdLogic,
         FstVhdlDataType::LogicVector => VarType::StdLogicVector,
         FstVhdlDataType::Unsigned => {
-            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            eprintln!("TODO: handle {vcd:?} {vhdl:?} better!");
             vcd
         }
         FstVhdlDataType::Signed => {
-            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            eprintln!("TODO: handle {vcd:?} {vhdl:?} better!");
             vcd
         }
         FstVhdlDataType::Integer => VarType::Integer,
@@ -499,7 +499,7 @@ pub fn merge_vhdl_data_and_var_type(vcd: VarType, vhdl: FstVhdlDataType) -> VarT
         FstVhdlDataType::Positive => VarType::Integer,
         FstVhdlDataType::Time => VarType::Time,
         FstVhdlDataType::Character => {
-            println!("TODO: handle {vcd:?} {vhdl:?} better!");
+            eprintln!("TODO: handle {vcd:?} {vhdl:?} better!");
             vcd
         }
         FstVhdlDataType::String => VarType::String,

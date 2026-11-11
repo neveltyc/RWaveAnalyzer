@@ -496,7 +496,7 @@ impl Encoder {
                     return; // ignore calls to time_change that do not actually change anything
                 }
                 Ordering::Greater => {
-                    println!(
+                    eprintln!(
                         "WARN: time decreased from {} to {}. Skipping!",
                         *prev_time, time
                     );

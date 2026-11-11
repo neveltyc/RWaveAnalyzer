@@ -401,7 +401,7 @@ where
                     return; // ignore calls to time_change that do not actually change anything
                 }
                 std::cmp::Ordering::Greater => {
-                    println!("WARN: time decreased from {prev_time} to {time}. Skipping!");
+                    eprintln!("WARN: time decreased from {prev_time} to {time}. Skipping!");
                     self.skipping_time_step = true;
                     return;
                 }

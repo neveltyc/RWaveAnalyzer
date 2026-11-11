@@ -127,7 +127,11 @@ pub(super) fn text_info(wave: &mut Wave, args: &Args) -> Result<(), String> {
     if !d.version.is_empty() {
         println!("Tool      : {}", d.version);
     }
-    println!("Timescale : {}", d.timescale);
+    if d.timescale.is_empty() {
+        println!("Timescale : (none declared; 1ps assumed)");
+    } else {
+        println!("Timescale : {}", d.timescale);
+    }
     if d.signal_count == d.reference_count {
         println!("Signals   : {}", d.signal_count);
     } else {

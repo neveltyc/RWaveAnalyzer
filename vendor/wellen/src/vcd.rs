@@ -937,7 +937,14 @@ fn read_command<'a>(input: &mut impl BufRead, buf: &'a mut Vec<u8>) -> Result<(V
     assert!(buf.is_empty());
 
     // skip over any preceding whitespace
-    let start_char = skip_whitespace(input)?;
+    let mut start_char = skip_whitespace(input)?;
+
+    // rwave patch: skip a UTF-8 byte-order mark, which some Windows editors and
+    // scripts write; without this the file is not recognized as a VCD at all.
+    if start_char == 0xEF && input.fill_buf()?.starts_with(&[0xBB, 0xBF]) {
+        input.consume(2);
+        start_char = skip_whitespace(input)?;
+    }
 
     if start_char != b'$' {
         return Err(VcdParseError::VcdStartChar(
@@ -1644,12 +1651,10 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
             Some(v) => *v,
         };
 
-        let (states, bit_value) = States::from_ascii_bit(value_char).unwrap_or_else(|| {
-            panic!(
-                "Failed to parse four state value: {} for signal of size 1",
-                String::from_utf8_lossy(value)
-            )
-        });
+        // rwave patch: a malformed value (e.g. a real `r1.5` written to a
+        // logic id) reads as x instead of aborting the whole parse.
+        let (states, bit_value) = States::from_ascii_bit(value_char)
+            .unwrap_or_else(|| States::from_ascii_bit(b'x').unwrap());
         (VcdBitVecChange::SingleBit(bit_value), states)
     } else {
         let value_bits: &[u8] = match value[0] {
@@ -1665,24 +1670,20 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
                 _ => value_bits,
             }
         };
-        let states = States::from_ascii(value_bits).unwrap_or_else(|| {
-            panic!(
-                "Bit-vector contains invalid character. Only 2-, 4-, and 9-state signals are supported: {}",
-                String::from_utf8_lossy(value)
-            )
-        });
-
         let bits = len.get() as usize;
+        // rwave patch: a malformed value — an invalid character (a real
+        // `rnan` written to a vector id) or more bits than the declared width —
+        // reads as all-x instead of aborting the whole parse.
+        let all_x = || (VcdBitVecChange::MultiBit(Cow::Owned(vec![b'x'; bits])), States::Four);
+        let Some(states) = States::from_ascii(value_bits) else {
+            return all_x();
+        };
         let data_to_write = if value_bits.len() == bits {
             Cow::Borrowed(value_bits)
         } else {
-            let expanded = expand_special_vector_cases(value_bits, bits).unwrap_or_else(|| {
-                panic!(
-                    "Failed to parse four state value: {} for signal of size {}",
-                    String::from_utf8_lossy(value),
-                    bits
-                )
-            });
+            let Some(expanded) = expand_special_vector_cases(value_bits, bits) else {
+                return all_x();
+            };
             assert_eq!(expanded.len(), bits);
             Cow::Owned(expanded)
         };
