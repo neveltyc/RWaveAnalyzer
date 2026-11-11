@@ -36,8 +36,10 @@ entry when updating a vendor copy.
 
 ### 2. Malformed values read as x / NaN instead of panicking
 
-- **Files:** `vendor/wellen/src/vcd.rs` `decode_vcd_bit_vec_change`;
-  `vendor/wellen/src/wavemem.rs` (real and string encoding).
+- **Files:** `vendor/wellen/src/vcd.rs` (`decode_vcd_bit_vec_change`, id
+  lookups); `vendor/wellen/src/wavemem.rs` (real and string encoding,
+  undeclared ids); `vendor/wellen/src/signal/map.rs` (`get_index`);
+  `vendor/wellen/src/stream.rs`.
 - **Change:** on a logic id, an invalid character (a real `rnan`/`r1` written
   to it) or a 1/x/z beyond the declared width reads as x (all-`x` for a
   vector); extra leading zeros are dropped (`b01` on 1 bit is 1); an empty

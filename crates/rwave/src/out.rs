@@ -33,7 +33,9 @@ enum Dest {
     /// A write error is kept and reported at [`finish`]: a full disk or a
     /// file-size limit must not end as a short result with exit 0.
     Pipe { w: BufWriter<io::Stdout>, failed: Option<io::Error> },
-    Tty { left: usize },
+    /// A terminal: stdout, or an `--output` target that is one (`None` =
+    /// stdout). Same 1 MiB budget and cut either way, no receipt.
+    Tty { left: usize, to: Option<File> },
     File(FileSink),
 }
 
@@ -66,7 +68,7 @@ fn with_dest<R>(f: impl FnOnce(&mut Dest) -> R) -> R {
     let mut guard = SINK.lock().unwrap_or_else(|e| e.into_inner());
     let dest = guard.get_or_insert_with(|| {
         if io::stdout().is_terminal() {
-            Dest::Tty { left: TERMINAL_BUDGET }
+            Dest::Tty { left: TERMINAL_BUDGET, to: None }
         } else {
             Dest::Pipe { w: BufWriter::with_capacity(1 << 16, io::stdout()), failed: None }
         }
@@ -108,11 +110,6 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
         if is_same_file(&file, input) {
             return Err("--output must not be the waveform file itself".to_string().into());
         }
-        // Our own stdout on a terminal: the ordinary terminal path, with its
-        // 1 MiB cut, rather than an unbounded write to the screen.
-        if file.is_terminal() && is_stdout(&file) {
-            return Ok(());
-        }
         (abs, None, file)
     } else {
         match std::fs::metadata(&abs) {
@@ -134,6 +131,13 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
             }
         }
     };
+    // A terminal, however it was named (`/dev/stdout`, `/dev/tty`), gets what
+    // stdout on a terminal gets: the 1 MiB cut, not an unbounded write.
+    if temp.is_none() && file.is_terminal() {
+        *SINK.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some(file) });
+        return Ok(());
+    }
     let sink = FileSink {
         w: BufWriter::with_capacity(1 << 16, file),
         temp,
@@ -224,7 +228,7 @@ fn fd_number(s: &str) -> Option<i32> {
             Some(_) if who != own => return None,
             Some(t) => {
                 let (tid, r) = t.split_once('/')?;
-                if !digits(tid) {
+                if !digits(tid) || !std::path::Path::new(&format!("/proc/{own}/task/{tid}")).exists() {
                     return None;
                 }
                 r
@@ -258,23 +262,6 @@ fn dup_fd(fd: i32) -> io::Result<File> {
     // duplicated; the original stays owned by whoever opened it.
     let dup = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
     Ok(File::from(dup))
-}
-
-/// Is the open `file` this process's stdout?
-#[cfg(unix)]
-fn is_stdout(file: &File) -> bool {
-    use std::os::fd::AsFd;
-    use std::os::unix::fs::MetadataExt;
-    let out = io::stdout().as_fd().try_clone_to_owned().map(File::from);
-    match (file.metadata(), out.and_then(|o| o.metadata())) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino() && a.rdev() == b.rdev(),
-        _ => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn is_stdout(_: &File) -> bool {
-    false
 }
 
 /// Is the open `file` the waveform at `input`?
@@ -316,9 +303,12 @@ pub fn emit(args: fmt::Arguments) {
                 }
             }
         }
-        Dest::Tty { left } => {
+        Dest::Tty { left, to } => {
             let text = fmt::format(args);
-            let mut stdout = io::stdout().lock();
+            let mut stdout: Box<dyn Write> = match to {
+                Some(f) => Box::new(f),
+                None => Box::new(io::stdout().lock()),
+            };
             if text.len() <= *left {
                 *left -= text.len();
                 let _ = stdout.write_all(text.as_bytes());
