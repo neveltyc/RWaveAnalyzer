@@ -244,10 +244,11 @@ are skipped and a trailing '#tag' names a result. A line is what you would type
 after 'rwave' minus the file: 'list --filter clk', 'dump --begin 1us --end 2us'.
 
 Results come back in input order: with --json one NDJSON line each,
-{{"id","ok","result"|"error","exit"}}; without it a '#label' header before each. A
-failed line is ok:false with the exit status it would have alone, and does not
-stop the run, which still exits 0 — check every line. [global-opts] are per-command defaults; a line overrides one, or lifts it
-with an empty value (--filter '').
+{{"id","ok","result"|"error","exit"}}; without it a '#label' header
+before each. A failed line is ok:false with the exit status it would have
+alone, and does not stop the run, which still exits 0 — check every line.
+[global-opts] are per-command defaults; a line overrides one, or lifts it with
+an empty value (--filter '').
 
 Supports both VCD and FST inputs; the format is auto-detected.
 Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
@@ -260,8 +261,9 @@ A flag a command does not read is an error, not silence, so a mistyped time is
 reported rather than ignored.
 
 Exit status: 0 answered (an empty result too; it says why), 1 the file or
-environment failed (open/parse, design library, licence, --output), 2 the request
-is wrong (flags, names, conditions, times), 3 terminal output cut.
+environment failed (open/parse, design library, licence, an --output file that
+cannot be created), 2 the request is wrong (flags, names, conditions, times, an
+--output naming a directory or the waveform), 3 terminal output cut.
 "#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,

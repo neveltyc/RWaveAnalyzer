@@ -369,6 +369,21 @@ order=$(printf 'info\ndump --begin 0.015ns\n' | $RW --batch "$TTYD/ps.vcd" 2>&1 
 [[ "$order" == "#2Warning" ]] && ok || bad "batch warning follows its header ($order)"
 zero=$($RW dump "$TTYD/ps.vcd" --begin 0.004ns 2>&1 >/dev/null)
 [[ "$zero" == *"using 0s" ]] && ok || bad "a zero tick prints 0s ($zero)"
+# A terminal --output target that cannot be written is an error (exit 1),
+# not a cut, whether the first write fits the budget (text) or not (--json).
+for mode in "" "--json"; do
+  if [[ "$(uname)" == Linux ]]; then
+    script -qec "$RW $mode --limit 0 dump $TTYD/big.vcd -o /dev/fd/3 3</dev/tty; echo rc=\$?" /dev/null < /dev/null > "$TTYD/ro.out" 2>&1
+  else
+    script -q /dev/null sh -c "$RW $mode --limit 0 dump $TTYD/big.vcd -o /dev/fd/3 3</dev/tty; echo rc=\$?" < /dev/null > "$TTYD/ro.out" 2>&1
+  fi
+  if head -c 7 "$TTYD/ro.out" | grep -q '^script:'; then
+    note "skipped" "$(head -1 "$TTYD/ro.out")"
+  else
+    grep -q "rc=1" "$TTYD/ro.out" && grep -q "cannot write --output /dev/fd/3" "$TTYD/ro.out" \
+      && ok || { bad "unwritable terminal target exits 1 ($mode)"; tail -c 300 "$TTYD/ro.out"; }
+  fi
+done
 psize=$($RW --limit 0 dump "$TTYD/big.vcd" | wc -c)
 [[ "$psize" -gt 4000000 ]] && ok || bad "pipe is uncapped ($psize bytes)"
 rm -rf "$TTYD"

@@ -36,7 +36,7 @@ enum Dest {
     /// A terminal: stdout, or an `--output` target that is one (`None` =
     /// stdout). Same 1 MiB budget and cut either way, no receipt. A write
     /// error on an `--output` terminal is kept and reported at [`finish`].
-    Tty { left: usize, to: Option<File>, failed: Option<io::Error> },
+    Tty { left: usize, to: Option<(File, String)>, failed: Option<io::Error> },
     File(FileSink),
 }
 
@@ -139,7 +139,7 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     // stdout on a terminal gets: the 1 MiB cut, not an unbounded write.
     if temp.is_none() && file.is_terminal() {
         *SINK.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some(file), failed: None });
+            Some(Dest::Tty { left: TERMINAL_BUDGET, to: Some((file, shown)), failed: None });
         return Ok(());
     }
     let receipt = !is_stdout(&file);
@@ -332,16 +332,14 @@ pub fn emit(args: fmt::Arguments) {
             }
             let text = fmt::format(args);
             let named = to.is_some();
-            let mut stdout: Box<dyn Write> = match to {
-                Some(f) => Box::new(f),
+            let mut out: Box<dyn Write> = match to {
+                Some((f, _)) => Box::new(f),
                 None => Box::new(io::stdout().lock()),
             };
             if text.len() <= *left {
                 *left -= text.len();
-                if let Err(e) = stdout.write_all(text.as_bytes()) {
-                    if named {
-                        *failed = Some(e);
-                    }
+                if let (Err(e), true) = (out.write_all(text.as_bytes()), named) {
+                    *failed = Some(e);
                 }
                 return;
             }
@@ -349,26 +347,30 @@ pub fn emit(args: fmt::Arguments) {
             // with no line break in the whole budget (one huge JSON line) is
             // shown cut mid-line.
             let head = &text.as_bytes()[..*left];
-            match head.iter().rposition(|b| *b == b'\n') {
-                Some(nl) => {
-                    let _ = stdout.write_all(&head[..=nl]);
-                }
+            let written = match head.iter().rposition(|b| *b == b'\n') {
+                Some(nl) => out.write_all(&head[..=nl]),
                 None if *left == TERMINAL_BUDGET => {
                     let mut end = *left;
                     while !text.is_char_boundary(end) {
                         end -= 1;
                     }
-                    let _ = stdout.write_all(&text.as_bytes()[..end]);
-                    let _ = stdout.write_all(b"\n");
+                    out.write_all(&text.as_bytes()[..end]).and_then(|()| out.write_all(b"\n"))
                 }
-                None => {}
+                None => Ok(()),
             }
-            let _ = stdout.flush();
-            eprintln!(
-                "\n>> OUTPUT CUT: {} MiB shown on the terminal. Write the whole result to a file \
-                 with --output FILE, or pipe it (| less, | grep, > file).",
-                TERMINAL_BUDGET >> 20
-            );
+            .and_then(|()| out.flush());
+            // A target that cannot be written was never shown: report that
+            // (exit 1) rather than a cut.
+            if let (Err(e), true) = (written, named) {
+                *failed = Some(e);
+                return;
+            }
+            let hint = if named {
+                "Send the whole result to a file or a pipe instead of a terminal."
+            } else {
+                "Write the whole result to a file with --output FILE, or pipe it (| less, | grep, > file)."
+            };
+            eprintln!("\n>> OUTPUT CUT: {} MiB shown on the terminal. {hint}", TERMINAL_BUDGET >> 20);
             std::process::exit(EXIT_CUT);
         }
     })
@@ -402,7 +404,10 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
     let dest = SINK.lock().unwrap_or_else(|e| e.into_inner()).take();
     match dest {
         None | Some(Dest::Tty { failed: None, .. }) => Ok(()),
-        Some(Dest::Tty { failed: Some(e), .. }) => Err(format!("cannot write --output: {e}")),
+        Some(Dest::Tty { failed: Some(e), to, .. }) => {
+            let name = to.map(|(_, n)| n).unwrap_or_default();
+            Err(format!("cannot write --output {name}: {e}"))
+        }
         Some(Dest::Pipe { mut w, failed }) => {
             match failed.map_or_else(|| w.flush(), Err) {
                 Ok(()) => Ok(()),

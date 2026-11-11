@@ -140,6 +140,12 @@ fn output_targets_that_cannot_be_right_are_refused() {
             .stdout(wave).output().unwrap();
         assert_eq!(o.status.code(), Some(2));
         assert_eq!(std::fs::read_to_string(d.join("w.vcd")).unwrap(), VCD);
+        // A descriptor that is stdout under another number: no receipt either.
+        let o = Command::new("sh").current_dir(&d)
+            .args(["-c", &format!("exec '{}' dump w.vcd -o /dev/fd/3 3>&1", rwave())])
+            .output().unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success() && out.starts_with("Window:") && !out.contains("Wrote "), "{out}");
         // A link to /dev/stdout writes into stdout.
         std::os::unix::fs::symlink("/dev/stdout", d.join("tostd")).unwrap();
         let o = run(&d, &["dump", "w.vcd", "-o", "tostd"]);
