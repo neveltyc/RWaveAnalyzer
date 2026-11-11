@@ -71,8 +71,8 @@ pub struct Args {
     /// Subtractive counterpart of `--filter`: same pattern language, applied
     /// last. Usable on its own to carve noise out of a whole-file query.
     pub exclude: Option<String>,
-    /// `--exact`: a wildcard-free `--filter`/`--exclude` pattern must be the
-    /// whole name, not a substring of it.
+    /// `--exact`: a wildcard-free `--filter`/`--exclude` pattern must be a
+    /// whole name; no substring fallback.
     pub exact: bool,
     pub at: Option<String>,
     /// Search conditions. Each element is one `--condition` clause (a
@@ -193,11 +193,9 @@ tree takes --scope and --depth only):
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
-  --exact           A wildcard-free --filter/--exclude pattern must be the whole
-                    name, not a substring of it: 'req' then means req and not
-                    req_strobe. Patterns with '*'/'?' are anchored either way.
-                    Also applies to search's --condition/--show names. A vector's
-                    name includes its range, so use 'state[2:0]', not 'state'.
+  --exact           A wildcard-free pattern no signal is named must match nothing
+                    instead of falling back to a substring. Rarely needed. Also
+                    applies to search's --condition/--show names.
 
 tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
 N levels below the matched scope root, tree counting scopes where list counts
@@ -207,9 +205,11 @@ the root. It ignores --filter and --exclude.
 Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
 instance named after it; one containing a '.' or '/' matches the whole path. Either
-way, no '*' or '?' means substring (--exact makes it the whole name instead), and
-'*'/'?' make it an anchored glob ('[' and ']' stay literal, for bus ranges). An
-empty value ('') means "not given".
+way, with no '*' or '?' a pattern that is a signal's whole name (its bus range
+optional: 'state' names state[2:0]) selects just that signal, so 'req' means req
+and not req_strobe; a pattern no signal is named is a substring. '*'/'?' make it
+an anchored glob ('[' and ']' stay literal, for bus ranges). An empty value ('')
+means "not given".
 
 dump, summary, snapshot and compare print what the selection caught before the
 rows —

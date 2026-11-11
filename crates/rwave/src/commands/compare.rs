@@ -31,7 +31,7 @@ struct CompareData {
 }
 
 fn compare_data(wave: &mut Wave, args: &Args) -> Result<CompareData, String> {
-    let selection = selection_of(args)?;
+    let selection = selection_of(args, wave)?;
     let ts = wave.ts_sec();
     let at_raw = args.at.as_ref().ok_or("the following arguments are required: --at")?;
     let parts: Vec<&str> = at_raw.split(',').collect();

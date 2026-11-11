@@ -37,7 +37,7 @@ struct DumpData {
 fn dump_collect(wave: &mut Wave, args: &Args) -> Result<DumpData, String> {
     let ts = wave.ts_sec();
     let (t0, t1) = parse_window(args, ts)?;
-    let selection = selection_of(args)?;
+    let selection = selection_of(args, wave)?;
     let sel = match_selection(wave, &selection);
     let limit = limit_of(args);
     let selected = selected_sids(wave, &sel);

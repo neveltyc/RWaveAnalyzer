@@ -149,7 +149,8 @@ fn rows(out: &str) -> Vec<String> {
 #[test]
 fn filter_names_a_signal_not_the_scope_named_after_it() {
     let vcd = fixture("motivating", CDC_VCD);
-    let got = rows(&ok_stdout(&vcd, &["list", "--filter", "status"]));
+    // `status*`: a bare `status` names that one signal now that it exists.
+    let got = rows(&ok_stdout(&vcd, &["list", "--filter", "status*"]));
     // The status bit, its alias inside the synchronizer, and the unrelated
     // signal that also carries the name — but none of the synchronizer's own
     // nets, which is the whole point.
@@ -584,5 +585,18 @@ fn a_batch_line_can_get_the_whole_file_back_from_a_scope_and_depth_default() {
         "a depth the line asked for itself is still its own contradiction: {}",
         lines[2]
     );
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// A name that exists selects that signal alone, judged inside `--scope`: a
+/// signal named `status` elsewhere in the design must not narrow the fragment
+/// inside a scope where it only appears as a substring.
+#[test]
+fn an_exact_name_wins_only_within_the_scope_in_reach() {
+    let vcd = fixture("exact_in_scope", CDC_VCD);
+    let out = ok_stdout(&vcd, &["list", "--filter", "status"]);
+    assert_eq!(rows(&out), ["top.status", "top.u_bcm21_sync_status.d_p"], "{out}");
+    let out = ok_stdout(&vcd, &["list", "--scope", "u_dma", "--filter", "status"]);
+    assert_eq!(rows(&out), ["top.u_dma.status_q"], "{out}");
     let _ = std::fs::remove_file(&vcd);
 }

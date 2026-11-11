@@ -26,7 +26,7 @@ fn list_entries(
     args: &Args,
 ) -> Result<(Vec<ListEntry>, usize, bool, bool), String> {
     let limit = limit_of(args);
-    let sel = selection_of(args)?;
+    let sel = selection_of(args, wave)?;
     let all = sel.is_all();
 
     // One row per alias path, then sort by path. A selected signal shows every

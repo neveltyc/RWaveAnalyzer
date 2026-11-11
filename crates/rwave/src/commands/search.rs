@@ -89,7 +89,8 @@ fn resolve_one_signal(
     }
 
     // Fall back to filter matching, inside the current selection.
-    let filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
+    let mut filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
+    sel.prime_pattern(wave.signals(), &mut filters);
     let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
     if matched.is_empty() {
         let scoped = within_selection(sel);
@@ -156,7 +157,8 @@ fn resolve_show_sids(
                 continue;
             }
         }
-        let filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
+        let mut filters = Filters::parse_mode(&[pat], mode).map_err(|e| e.0)?;
+        sel.prime_pattern(wave.signals(), &mut filters);
         let matched = sids_where(wave, |info| sel.keeps_signal_matching(info, &filters));
         if matched.is_empty() {
             missing.push(pat.to_string());
@@ -485,7 +487,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     // turns "matches N signals" into a unique hit. A name written as a full
     // path is exempt.
     let mode = match_mode(args);
-    let sel = selection_of(args)?;
+    let sel = selection_of(args, wave)?;
     // Each `--condition` is one OR clause (a comma-separated AND list). Resolve
     // every clause, then drop duplicate clauses (PRD §7): identical, term-order-
     // permuted, or alias-equivalent clauses fold to one; different value

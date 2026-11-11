@@ -256,6 +256,51 @@ impl Selection {
         }
     }
 
+    /// Resolve which wildcard-free `--filter`/`--exclude` patterns name a
+    /// signal exactly ([`Filters::prefer_exact`]), judged over the alias paths
+    /// `--scope`/`--depth` leave in reach: a name taken elsewhere in the design
+    /// must not narrow a fragment that, inside the scope, only appears as a
+    /// substring. Call once, before matching.
+    pub fn prime(&mut self, signals: &[SignalInfo]) {
+        let wants = |f: &Option<Filters>| f.as_ref().is_some_and(Filters::needs_names);
+        if !wants(&self.include) && !wants(&self.exclude) {
+            return;
+        }
+        let names = self.names_where(signals, |_, sc| self.structural_ok(sc));
+        if let Some(f) = &mut self.include {
+            f.prefer_exact(&names);
+        }
+        if let Some(f) = &mut self.exclude {
+            f.prefer_exact(&names);
+        }
+    }
+
+    /// Prime a name pattern (a `search` `--condition`/`--show` name) over the
+    /// alias paths this selection keeps — the paths the pattern is then tried
+    /// against by [`keeps_signal_matching`](Self::keeps_signal_matching).
+    pub fn prime_pattern(&self, signals: &[SignalInfo], pat: &mut Filters) {
+        if pat.needs_names() {
+            pat.prefer_exact(&self.names_where(signals, |p, sc| self.keeps_alias(p, sc)));
+        }
+    }
+
+    /// Lower-cased `(path, leaf)` of every alias path passing `keep`.
+    fn names_where(
+        &self,
+        signals: &[SignalInfo],
+        keep: impl Fn(&str, &str) -> bool,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for info in signals {
+            for (p, sc) in info.alias_pairs() {
+                if keep(p, sc) {
+                    out.push((p.to_lowercase(), leaf_of(p, sc).to_lowercase()));
+                }
+            }
+        }
+        out
+    }
+
     /// The gates that decide whether a path is *shown*: everything except
     /// `--filter`. `list` prints one row per alias, and a row the user asked to
     /// exclude (or scoped away) must not come back on a signal that some other

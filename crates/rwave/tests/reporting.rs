@@ -111,23 +111,27 @@ fn err_message(vcd: &std::path::Path, args: &[&str]) -> String {
 
 // ---------------------------------------------------------------- selection
 
-/// A substring `--filter` also catches the same-prefixed strobe, and now says
-/// so instead of letting it pass for the wanted signal.
+/// A name that exists selects that signal alone; the same-prefixed strobe is
+/// not pulled in. A fragment no signal is named after keeps substring reach,
+/// and the header names everything it caught.
 #[test]
 fn a_prefix_collision_is_named_in_the_header() {
     let vcd = fixture("prefix", VCD);
     let out = ok_stdout(&vcd, &["dump", "--filter", "DtsmTrainVal0Min"]);
+    assert!(out.contains("Matched 1 signal: tb.DtsmTrainVal0Min"), "{out}");
+
+    let out = ok_stdout(&vcd, &["dump", "--filter", "DtsmTrainVal0"]);
     assert!(
         out.contains("Matched 2 signals: tb.DtsmTrainVal0Min, tb.DtsmTrainVal0Min_strobe"),
         "{out}"
     );
 
-    let json = ok_stdout(&vcd, &["dump", "--filter", "DtsmTrainVal0Min", "--json"]);
+    let json = ok_stdout(&vcd, &["dump", "--filter", "DtsmTrainVal0", "--json"]);
     assert!(json.contains(r#""matched":{"count":2,"paths":["#), "{json}");
     let _ = std::fs::remove_file(&vcd);
 }
 
-/// `--exact` is the way out of that collision.
+/// `--exact` gives the same answer for a name that exists.
 #[test]
 fn exact_narrows_to_the_named_signal() {
     let vcd = fixture("exact", VCD);

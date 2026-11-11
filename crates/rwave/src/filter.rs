@@ -13,16 +13,18 @@
 //! * A pattern containing a `.` matches the **whole path**, so `top.u_dma.*`
 //!   and `dma.req` still select by hierarchy position.
 //!
-//! Within the chosen haystack, a pattern with no `*`/`?` is a **substring**
-//! match, and a pattern containing `*` or `?` is an anchored **glob-lite** match
-//! where only `*` (any span) and `?` (one char) are special; every other
-//! character — notably `[` and `]` in bus ranges such as `data[7:0]` — is
-//! literal. This intentionally differs from shell `fnmatch`.
+//! Within the chosen haystack, a pattern with no `*`/`?` names a signal
+//! **exactly** when some haystack in reach equals it ([`Filters::prefer_exact`];
+//! a trailing bus range is optional, so `state` names `state[2:0]`), and is a
+//! **substring** match otherwise: `top.sig3` selects that signal and not
+//! `top.sig30`, while `fifo` with no signal of that name finds every `*fifo*`.
+//! A pattern containing `*` or `?` is an anchored **glob-lite** match where only
+//! `*` (any span) and `?` (one char) are special; every other character —
+//! notably `[` and `]` in bus ranges such as `data[7:0]` — is literal. This
+//! intentionally differs from shell `fnmatch`.
 //!
-//! [`MatchMode::Exact`] anchors the substring case too, so a pattern is
-//! required to be the whole haystack: `DtsmTrainVal0Min` then names that signal
-//! and not `DtsmTrainVal0Min_strobe`. A pattern that already carries a wildcard
-//! is anchored either way, so the mode does not change it.
+//! [`MatchMode::Exact`] drops the substring fallback: a wildcard-free pattern
+//! must be the whole haystack or it matches nothing.
 
 /// Hierarchy separators. Wellen normalizes VCD/FST/GHW paths to `.`; the
 /// built-in FSDB backend emits either `.` or `/`. Both a pattern's
@@ -46,12 +48,12 @@ impl std::fmt::Display for FilterParseError {
 
 /// How a wildcard-free pattern matches its haystack.
 ///
-/// `Substring` is the default and the historical behaviour; `Exact` is what
-/// `--exact` selects. Only the wildcard-free case differs — a glob is anchored
-/// under both.
+/// `Substring` is the default; `Exact` is what `--exact` selects. Only the
+/// wildcard-free case differs — a glob is anchored under both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MatchMode {
-    /// The pattern must appear somewhere in the haystack.
+    /// The whole haystack when one in reach equals the pattern, else any
+    /// haystack containing it.
     #[default]
     Substring,
     /// The pattern must be the whole haystack.
@@ -77,8 +79,9 @@ enum Domain {
 
 #[derive(Debug, Clone)]
 enum PatKind {
-    /// Lower-cased substring.
-    Substr(String),
+    /// Lower-cased wildcard-free pattern: whole-name equality when `exact`,
+    /// else substring.
+    Plain { lit: String, exact: bool },
     /// Glob-lite: a sequence of tokens to match against a lower-cased haystack.
     Glob(Vec<GlobTok>),
 }
@@ -140,13 +143,10 @@ impl Filters {
             // paths, and a pattern like `top/u_dma/*` addresses a hierarchy just
             // as plainly as its dotted equivalent.
             let domain = if lower.contains(SEPARATORS) { Domain::Path } else { Domain::Leaf };
-            // Exact mode compiles even a wildcard-free pattern as a glob: a
-            // lone `Lit` token is anchored at both ends by `glob_match`, which
-            // is exactly string equality — no second matcher to keep in step.
-            let kind = if mode == MatchMode::Exact || lower.contains('*') || lower.contains('?') {
+            let kind = if lower.contains('*') || lower.contains('?') {
                 PatKind::Glob(compile_glob(&lower))
             } else {
-                PatKind::Substr(lower)
+                PatKind::Plain { lit: lower, exact: mode == MatchMode::Exact }
             };
             pats.push(Pat { domain, kind });
         }
@@ -179,7 +179,8 @@ impl Filters {
                 Domain::Leaf => leaf_lower,
             };
             let hit = match &p.kind {
-                PatKind::Substr(s) => hay.contains(s.as_str()),
+                PatKind::Plain { lit, exact: true } => names_exactly(hay, lit),
+                PatKind::Plain { lit, exact: false } => hay.contains(lit.as_str()),
                 PatKind::Glob(toks) => glob_match(toks, hay),
             };
             if hit {
@@ -189,10 +190,47 @@ impl Filters {
         false
     }
 
+    /// Switch each wildcard-free pattern to whole-name matching when one of
+    /// `names` — the lower-cased `(path, leaf)` pairs the pattern can reach —
+    /// equals it. Asking for `top.sig3` then means that signal, not
+    /// `top.sig30`..`top.sig39` too; a pattern no name equals keeps its
+    /// substring reach, so exploring with a fragment still works.
+    pub fn prefer_exact(&mut self, names: &[(String, String)]) {
+        for p in &mut self.pats {
+            if let PatKind::Plain { lit, exact: exact @ false } = &mut p.kind {
+                *exact = names.iter().any(|(path, leaf)| {
+                    let hay = match p.domain {
+                        Domain::Path => path,
+                        Domain::Leaf => leaf,
+                    };
+                    names_exactly(hay, lit)
+                });
+            }
+        }
+    }
+
+    /// Does any wildcard-free pattern still wait for [`prefer_exact`](Self::prefer_exact)?
+    pub fn needs_names(&self) -> bool {
+        self.pats.iter().any(|p| matches!(p.kind, PatKind::Plain { exact: false, .. }))
+    }
+
     /// [`matches_lower`](Self::matches_lower) for callers that hold the
     /// original-case strings and are not matching in a hot loop.
     pub fn matches_path_leaf(&self, path: &str, leaf: &str) -> bool {
         self.matches_lower(&path.to_lowercase(), &leaf.to_lowercase())
+    }
+}
+
+/// Is `hay` the name `lit` spells, with or without a trailing bus range? A
+/// vector's name carries its range (`state[2:0]`), which the user should not
+/// have to type to name it.
+fn names_exactly(hay: &str, lit: &str) -> bool {
+    if hay == lit {
+        return true;
+    }
+    match hay.strip_suffix(']').and_then(|h| h.rfind('[').map(|i| &hay[..i])) {
+        Some(base) => base == lit,
+        None => false,
     }
 }
 
@@ -401,6 +439,46 @@ mod tests {
         assert!(f.matches_path_leaf(path, leaf));
         let f = Filters::parse_csv("u_dma").unwrap();
         assert!(!f.matches_path_leaf(path, leaf), "a scope name is not a leaf name");
+    }
+
+    fn primed(pat: &str, names: &[(&str, &str)]) -> Filters {
+        let mut f = Filters::parse_csv(pat).unwrap();
+        let names: Vec<(String, String)> =
+            names.iter().map(|(p, l)| (p.to_string(), l.to_string())).collect();
+        f.prefer_exact(&names);
+        f
+    }
+
+    #[test]
+    fn a_name_that_exists_is_matched_whole() {
+        let names = [("top.sig3", "sig3"), ("top.sig30", "sig30")];
+        for pat in ["top.sig3", "sig3", "SIG3"] {
+            let f = primed(pat, &names);
+            assert!(m(&f, "top.sig3"), "{pat}");
+            assert!(!m(&f, "top.sig30"), "{pat}");
+        }
+        // No signal is named `sig`: the fragment keeps its substring reach.
+        let f = primed("sig", &names);
+        assert!(m(&f, "top.sig3") && m(&f, "top.sig30"));
+    }
+
+    #[test]
+    fn a_bus_range_is_optional_in_a_whole_name() {
+        let names = [("top.state[2:0]", "state[2:0]"), ("top.state_next[2:0]", "state_next[2:0]")];
+        let f = primed("state", &names);
+        assert!(m(&f, "top.state[2:0]"));
+        assert!(!m(&f, "top.state_next[2:0]"));
+        let f = primed("top.state", &names);
+        assert!(m(&f, "top.state[2:0]") && !m(&f, "top.state_next[2:0]"));
+        assert!(names_exactly("mem[3]", "mem"));
+        assert!(!names_exactly("mem[3]x", "mem"));
+    }
+
+    #[test]
+    fn each_pattern_is_primed_on_its_own() {
+        let names = [("top.sig3", "sig3"), ("top.sig30", "sig30"), ("top.ctrl_a", "ctrl_a")];
+        let f = primed("sig3,ctrl", &names);
+        assert!(m(&f, "top.sig3") && !m(&f, "top.sig30") && m(&f, "top.ctrl_a"));
     }
 
     /// The motivating case for `--exact`: a substring pattern also names every

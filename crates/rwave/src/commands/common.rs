@@ -118,15 +118,18 @@ pub(crate) fn sids_where(wave: &Wave, pred: impl Fn(&SignalInfo) -> bool) -> Vec
         .collect()
 }
 
-/// Compile this invocation's selection options, honouring `--exact`.
-pub(super) fn selection_of(args: &Args) -> Result<Selection, String> {
-    Selection::parse_mode(
+/// Compile this invocation's selection options, honouring `--exact`, and
+/// resolve which plain patterns name a signal of `wave` exactly.
+pub(super) fn selection_of(args: &Args, wave: &Wave) -> Result<Selection, String> {
+    let mut sel = Selection::parse_mode(
         &args.scope,
         args.depth,
         &args.filter,
         &args.exclude,
         match_mode(args),
-    )
+    )?;
+    sel.prime(wave.signals());
+    Ok(sel)
 }
 
 /// The `--filter`/`--exclude` matching mode this invocation asked for.
@@ -570,7 +573,17 @@ pub(super) fn resolve_signal_path(
     if exact.len() == 1 {
         return Ok(exact.into_iter().next().unwrap());
     }
-    let filters = crate::filter::Filters::parse(&[pat]).map_err(|e| format!("{role}: {e}"))?;
+    let mut filters = crate::filter::Filters::parse(&[pat]).map_err(|e| format!("{role}: {e}"))?;
+    if filters.needs_names() {
+        let mut names = Vec::new();
+        for info in wave.signals() {
+            for (path, scope) in info.alias_pairs() {
+                let leaf = crate::model::leaf_of(path, scope);
+                names.push((path.to_lowercase(), leaf.to_lowercase()));
+            }
+        }
+        filters.prefer_exact(&names);
+    }
     let mut hits: Vec<(String, String)> = Vec::new();
     for i in 0..wave.signal_count() {
         for (path, scope) in wave.signal(i).alias_pairs() {
