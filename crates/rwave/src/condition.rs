@@ -574,9 +574,8 @@ pub fn parse_conditions(text: &str) -> Result<Vec<ParsedCondition>, ConditionPar
 }
 
 /// Recognize the `changed(SIG)` edge-predicate form. Any term starting with
-/// `changed(` (case-insensitive) is claimed by this syntax. A bare term (no
-/// operator) was never valid before, so no working bare condition changes
-/// meaning; the one shadowed spelling is a `changed(...)=VAL` level term on an
+/// `changed(` (case-insensitive) is claimed by this syntax. The one shadowed
+/// spelling is a `changed(...)=VAL` level term on an
 /// escaped identifier that itself begins with `changed(`, which stays
 /// reachable through a scope-qualified pattern (`tb.changed(a)=1` does not
 /// start with the prefix). Returns `Ok(None)` when the term does not start
@@ -896,7 +895,7 @@ mod tests {
         // Trailing comparison after the closing paren.
         let e = parse_conditions("changed(req)=1").unwrap_err();
         assert!(e.0.contains("takes no comparison"), "{}", e.0);
-        // The generic error now advertises the form.
+        // The generic error advertises the form.
         let e = parse_conditions("req").unwrap_err();
         assert!(e.0.contains("changed(SIG)"), "{}", e.0);
     }
@@ -928,11 +927,9 @@ mod tests {
     }
 
     #[test]
-    fn ne_on_non_logic_signals_no_longer_silently_false() {
-        // Pre-fix, has_unknown(None) returned true, so Op::Ne against any
-        // non-logic signal (real/string/event) silently returned false even
-        // when they obviously differ from the target. Post-fix, Eq runs and
-        // Ne mirrors its negation. A real signal with value "3.14" against
+    fn ne_on_non_logic_signals_mirrors_eq() {
+        // A non-logic value (real/string/event) has no unknown bits, so `!=`
+        // is the negation of `=`. A real signal with value "3.14" against
         // numeric target 0 has no bits → Eq returns false → Ne returns true.
         let nt = parse_target_value("0").unwrap();
         assert!(condition_match(None, Some("3.14"), Op::Ne, &nt, 64),

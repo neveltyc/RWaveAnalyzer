@@ -361,8 +361,7 @@ fn undumped_count(wave: &mut Wave, sids: &[Sid]) -> Option<usize> {
 
 /// Why a windowed command came back with nothing, when the answer is knowable.
 ///
-/// An empty `dump` used to print the same line for every cause. There are four,
-/// and they call for different fixes: the selection caught nothing (fix the
+/// There are four causes, and they call for different fixes: the selection caught nothing (fix the
 /// pattern), the signals were never dumped (fix the *simulation*, no query will
 /// help), the window sits past the end of the trace (fix the time), or the
 /// signals genuinely held still (the answer is "nothing happened").
@@ -492,11 +491,8 @@ pub(super) fn window_json(t0: i64, t1: Option<i64>, ts: f64) -> Json {
 
 /// A `(ticks, human)` pair under `<name>_ticks` / `<name>_h`.
 ///
-/// The one spelling for a time in the JSON output. Each used to be written
-/// three times — `time`/`time_ticks`/`time_h`, `at`/`at_ticks`/`at_h` — where
-/// the bare key duplicated one of the other two, and did not even agree with
-/// itself across commands: `time` was the tick count, `at` and `begin` were the
-/// rendered string.
+/// The one spelling for a time in the JSON output: the tick count and the
+/// rendered string, never a bare `<name>` that could mean either.
 pub(super) fn push_time(obj: Obj, name: &str, ticks: i64, ts: f64) -> Obj {
     obj.push(format!("{name}_ticks"), Json::Int(ticks))
         .push(format!("{name}_h"), Json::str(crate::format::fmt_time(ticks, ts)))

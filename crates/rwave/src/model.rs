@@ -193,8 +193,7 @@ mod open_dispatch_tests {
 
     #[test]
     fn extract_handles_directory_dots() {
-        // Without Path-aware extraction, this used to (mis)parse as a
-        // "with/data" extension. Now: file is "data", no extension.
+        // A dot in a directory name is not an extension: the file is "data".
         assert_eq!(extract_extension("dir.with.dot/data"), "");
         assert_eq!(extract_extension("dir.with.dot/data.foo"), "foo");
         assert_eq!(extract_extension("/abs.path/here/file.fst"), "fst");

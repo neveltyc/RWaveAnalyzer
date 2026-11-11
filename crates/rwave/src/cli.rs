@@ -526,7 +526,7 @@ fn dir_override(acc: &Acc) -> Option<bool> {
 ///
 /// The parser keeps one global flag table, so without this a flag no command
 /// reads is accepted and ignored — and a *malformed value* on it goes with it,
-/// unparsed: `list f.vcd --begin nonsense` used to exit 0.
+/// unparsed: `list f.vcd --begin nonsense` would exit 0.
 ///
 /// Applied only to what this invocation spelled out. Values inherited from a
 /// `--batch` line are exempt: a session-wide default is there for the lines
@@ -1123,7 +1123,7 @@ mod tests {
 
     /// A flag a command does not read must not be silently-ignored noise on it.
     /// Silence there hides a *malformed* value too: the command that ignores
-    /// `--begin` never parses it, so `list --begin banana` used to exit 0.
+    /// `--begin` never parses it, so `list --begin banana` would exit 0.
     #[test]
     fn inapplicable_flags_are_rejected() {
         for (cmd, flag, val) in [

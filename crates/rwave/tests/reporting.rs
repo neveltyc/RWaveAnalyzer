@@ -1,12 +1,7 @@
 // What a query says about itself: which signals it caught, which window it
-// resolved, and why it came back empty.
-//
-// The motivating session: `--filter DtsmTrainVal0Min` on a real FSDB answered
-// with a same-prefixed 1-bit strobe, and `summary` then reported the wanted
-// signal as static — because the row shown was the strobe's. Separately,
-// `--begin 3321.60us` returned zero events with no way to tell a mis-parsed
-// time from a genuinely quiet window. Neither failure said anything; both are
-// covered here.
+// resolved, and why it came back empty: a same-prefixed strobe must not pass
+// for the wanted signal, and an empty window must say whether the time or the
+// trace is the reason.
 
 use std::io::Write;
 use std::process::{Command, Output};
@@ -272,8 +267,8 @@ fn summary_flags_a_window_past_the_end() {
     let _ = std::fs::remove_file(&vcd);
 }
 
-/// `search` used to blame `--end` for a `--begin` past the trace, naming a flag
-/// the user had not written.
+/// A `--begin` past the trace is blamed on `--begin`, not on an `--end` the
+/// user did not write.
 #[test]
 fn search_blames_the_flag_that_was_given() {
     let vcd = fixture("searchwin", VCD);

@@ -149,7 +149,7 @@ fn rows(out: &str) -> Vec<String> {
 #[test]
 fn filter_names_a_signal_not_the_scope_named_after_it() {
     let vcd = fixture("motivating", CDC_VCD);
-    // `status*`: a bare `status` names that one signal now that it exists.
+    // `status*`: a bare `status` names only the signal called `status`.
     let got = rows(&ok_stdout(&vcd, &["list", "--filter", "status*"]));
     // The status bit, its alias inside the synchronizer, and the unrelated
     // signal that also carries the name — but none of the synchronizer's own
@@ -433,8 +433,8 @@ fn a_batch_line_lifts_an_inherited_filter_with_an_empty_value() {
 }
 
 #[test]
-fn a_batch_default_filter_now_narrows_search_lines() {
-    // The documented behavior change: search used to ignore --filter.
+fn a_batch_default_filter_narrows_search_lines() {
+    // search resolves its names inside the selection, --filter included.
     let vcd = fixture("batchsearch", DEEP_VCD);
     let out = run_batch(
         &vcd,

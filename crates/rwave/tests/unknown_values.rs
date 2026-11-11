@@ -1,10 +1,7 @@
 // The value-format contract for unknown bits, end to end: every value with an
 // x/z bit — 1-bit included — carries the `b` prefix, no clean value does, and
-// `summary` flags the signals that carried one.
-//
-// The motivating failure: 1-bit unknowns used to print bare `x`/`z` while
-// buses printed `b01x0`, so the only common marker was the letter itself, and
-// `'x' in value` matches every `0x..` hex value.
+// `summary` flags the signals that carried one. (`'x' in value` is not the
+// test: it matches every `0x..` hex value.)
 
 use std::io::Write;
 use std::process::{Command, Output};

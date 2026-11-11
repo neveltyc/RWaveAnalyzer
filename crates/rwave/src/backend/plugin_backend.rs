@@ -835,11 +835,11 @@ mod tests {
             .collect()
     }
 
-    /// `load_traces_windowed` was appended after v1, so the version had to move
-    /// with it: a v1 backend is a shorter object, and reading the slot from one
-    /// yields whatever follows it in memory. Pins the rule as a number.
+    /// The vtable ends with `load_traces_windowed`, which ABI v1 backends do
+    /// not have: reading the slot from one yields whatever follows it in
+    /// memory, so the version number guards it.
     #[test]
-    fn appending_the_windowed_slot_moved_the_abi_version() {
+    fn the_windowed_slot_is_abi_v2() {
         assert!(RWAVE_BACKEND_ABI_VERSION >= 2);
     }
 

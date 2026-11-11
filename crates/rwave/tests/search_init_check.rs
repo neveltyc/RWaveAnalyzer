@@ -4,12 +4,11 @@
 // Two cases:
 //   1. Condition holds throughout `[--begin, --end]` and there are no events
 //      strictly past `--begin`. Must emit exactly one interval `[--begin,
-//      --end)`. Pre-fix this silently emitted nothing (bug commit 6efd002).
+//      --end)`.
 //
 //   2. Degenerate zero-width window `--begin T --end T`. Must emit nothing
-//      even when the condition holds; the post-fix end-of-stream init-check
-//      must NOT materialize a `[T, T)` row. Pre-fix-of-the-fix this was a
-//      regression introduced by case 1's fix.
+//      even when the condition holds: the end-of-stream init-check must not
+//      materialize a `[T, T)` row.
 
 use std::io::Write;
 use std::process::Command;

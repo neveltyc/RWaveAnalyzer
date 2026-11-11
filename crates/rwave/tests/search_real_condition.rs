@@ -59,8 +59,8 @@ fn real_signal_compares_numerically() {
     let vcd = std::env::temp_dir().join("rwave_cond_kind_real.vcd");
     write_real_vcd(&vcd);
 
-    // dac is real (100.0 -> "100"). `dac=4` must NOT match — pre-fix the "100"
-    // text was parsed as binary 100 == 4, a false positive.
+    // dac is real (100.0 -> "100"). `dac=4` must NOT match: read as bits,
+    // "100" would be binary 100 == 4.
     let out = search(&vcd, "dac=4");
     assert!(out.contains("No interval"), "dac=4 must not match; got:\n{out}");
 
@@ -87,8 +87,7 @@ fn real_signal_compares_numerically() {
 
 #[test]
 fn logic_signal_still_matches() {
-    // Positive control: a genuine logic signal still matches normally, proving
-    // the fix only suppresses matching on non-logic kinds.
+    // Positive control: a genuine logic signal matches as bits.
     let vcd = std::env::temp_dir().join("rwave_cond_kind_logic.vcd");
     write_real_vcd(&vcd);
 

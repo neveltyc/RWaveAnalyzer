@@ -284,7 +284,7 @@ fn any_clause_holds(
     clauses.iter().any(|c| conditions_hold(state, changed, c))
 }
 
-/// Order-independent canonical key for clause de-duplication (PRD §7). Reuses
+/// Order-independent canonical key for clause de-duplication. Reuses
 /// the per-term key shape from `resolve_conditions` (see [`term_key`]).
 fn clause_key(clause: &[ResolvedCond]) -> Vec<(Sid, &'static str, String)> {
     let mut key: Vec<(Sid, &'static str, String)> = clause.iter().map(term_key).collect();
@@ -312,9 +312,8 @@ fn condition_result_text(conds: &[ResolvedCond]) -> String {
         .join(",")
 }
 
-/// Join per-clause labels for echo (PRD §4): a lone clause renders as-is (no
-/// parens, preserving single-`--condition` output byte-for-byte); multiple
-/// clauses are each parenthesized and joined with ` OR `.
+/// Join per-clause labels for echo: a lone clause renders as-is (no parens);
+/// several are each parenthesized and joined with ` OR `.
 fn join_clauses(
     clauses: &[Vec<ResolvedCond>],
     render: impl Fn(&[ResolvedCond]) -> String,
@@ -388,9 +387,7 @@ fn show_meta(wave: &Wave, state: &BTreeMap<Sid, String>, show_sids: &[Sid]) -> J
     Json::Object(members)
 }
 
-/// Resolve the search end time: explicit `--end`, else the file's max tick.
-/// Why a search came back with nothing. The text renderers already said this;
-/// a JSON caller was left with an empty array and no reason at all.
+/// Why a search came back with nothing, for the JSON `hint` as well as text.
 fn no_match_reason(s: &SearchSetup) -> String {
     format!(
         "the condition {} never held in {}..{}",
@@ -400,6 +397,7 @@ fn no_match_reason(s: &SearchSetup) -> String {
     )
 }
 
+/// Resolve the search end time: explicit `--end`, else the file's max tick.
 fn search_end_time(wave: &Wave, t1: Option<i64>) -> Result<i64, String> {
     if let Some(t1) = t1 {
         return Ok(t1);
@@ -487,7 +485,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
     let mode = match_mode(args);
     let sel = selection_of(args, wave)?;
     // Each `--condition` is one OR clause (a comma-separated AND list). Resolve
-    // every clause, then drop duplicate clauses (PRD §7): identical, term-order-
+    // every clause, then drop duplicate clauses: identical, term-order-
     // permuted, or alias-equivalent clauses fold to one; different value
     // spellings (`5` vs `0x5`) stay distinct. First occurrence wins, order kept;
     // de-dup is silent. Per-clause parse/resolution errors surface verbatim.
@@ -533,7 +531,7 @@ fn search_setup(wave: &mut Wave, args: &Args) -> Result<SearchSetup, String> {
 
     // The set of signals we must load: the union of every clause's signals
     // (changed() terms included) + show. Cost scales with the distinct signals
-    // referenced, not the clause count (PRD §9).
+    // referenced, not the clause count.
     let mut selected: BTreeSet<Sid> = clauses.iter().flatten().map(|c| c.sid).collect();
     selected.extend(show_sids.iter().copied());
     let sel_vec: Vec<Sid> = selected.iter().copied().collect();

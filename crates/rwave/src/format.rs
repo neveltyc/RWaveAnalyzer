@@ -573,13 +573,10 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
     }
     for (u, f) in UNITS {
         let scaled = sec / f;
-        // Range-test the value that will be *printed*, not the raw quotient.
-        // At a 1ps timescale 1us is exactly 1e-6 s, and 1e-6 / 1e-9 is
-        // 999.9999999999999: it passes a bare `< 1000` test, and `fmt_g` then
-        // rounds it to "1000" — giving "1000ns" under a rule that had already
-        // decided ns was too small. Which side of the boundary the quotient
-        // lands on depends on how the seconds were arrived at, so the same
-        // instant printed from two timescales disagreed.
+        // Range-test the value that will be *printed*, not the raw quotient:
+        // at a 1ps timescale 1us is 1e-6 s, and 1e-6 / 1e-9 is
+        // 999.9999999999999, which a bare `< 1000` test keeps in ns and
+        // `fmt_g` then prints as "1000ns".
         if (-1000.0 < round_sig(scaled) && round_sig(scaled) < 1000.0) || *u == "s" {
             return format!("{}{}", fmt_g(scaled), u);
         }
@@ -824,7 +821,7 @@ mod tests {
     fn multibit_short_is_left_extended() {
         // "1" in a 3-bit signal -> 001 -> 0x1
         assert_eq!(fmt_val("1", ValueKind::Bits, 3), "0x1");
-        // "10" in 8-bit -> value 2. Width no longer pads the hex: `0x2`, not `0x02`.
+        // "10" in 8-bit -> value 2. Width does not pad the hex: `0x2`, not `0x02`.
         assert_eq!(fmt_val("10", ValueKind::Bits, 8), "0x2");
     }
 
@@ -888,9 +885,8 @@ mod tests {
         assert_eq!(parse_time("-0", ts).unwrap(), 0); // -0 ok
     }
 
-    /// The unit and the digits have to agree. A quotient that rounds up to
-    /// 1000 belongs in the next unit up, and whether it does was a matter of
-    /// which timescale the seconds came from.
+    /// The unit and the digits have to agree: a quotient that rounds up to
+    /// 1000 belongs in the next unit up, whichever timescale it came from.
     #[test]
     fn fmt_time_unit_matches_the_printed_digits() {
         // 1us, reached three ways: 1e6 ticks of 1ps, 1e3 ticks of 1ns, and

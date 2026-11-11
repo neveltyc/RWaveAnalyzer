@@ -33,7 +33,7 @@ use crate::plugin::ffi::{
 const ERR_PREFIX: &str = "rwave-wlf";
 
 // `name` equals the file extension this backend claims; `version` tracks
-// rwave's own version, since the backend now ships inside the binary.
+// rwave's own version, since the backend ships inside the binary.
 static PLUGIN_NAME: &[u8] = b"wlf\0";
 static PLUGIN_VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 

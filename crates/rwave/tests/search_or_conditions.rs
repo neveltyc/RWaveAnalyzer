@@ -1,6 +1,6 @@
 // Behavior tests for multi-clause OR on `search --condition` (OR-of-ANDs).
 //
-// A single `--condition` is a comma-separated AND list (unchanged). Repeating
+// A single `--condition` is a comma-separated AND list. Repeating
 // `--condition` ORs the clauses: a time satisfies the search when *any* clause
 // holds. OR only changes which moments count as satisfied — it does not change
 // the interval / segment / event row shapes. Clauses that are identical, only
@@ -248,7 +248,7 @@ fn or_limit_caps_merged_results() {
     let _ = std::fs::remove_file(&vcd);
 }
 
-// --- condition echo (PRD §4) ------------------------------------------------
+// --- condition echo ----------------------------------------------------------
 
 #[test]
 fn single_clause_echo_has_no_parens() {
@@ -283,7 +283,7 @@ fn multi_clause_echo_is_parenthesized_or() {
     let _ = std::fs::remove_file(&vcd);
 }
 
-// --- de-duplication (PRD §7) ------------------------------------------------
+// --- de-duplication ----------------------------------------------------------
 
 #[test]
 fn duplicate_clauses_fold_to_one() {
@@ -333,7 +333,7 @@ fn different_base_clauses_are_not_folded() {
     let _ = std::fs::remove_file(&vcd);
 }
 
-// --- error paths (unchanged from single-clause; PRD §5/§8) ------------------
+// --- error paths (as for a single clause) ------------------------------------
 
 #[test]
 fn empty_clause_errors() {

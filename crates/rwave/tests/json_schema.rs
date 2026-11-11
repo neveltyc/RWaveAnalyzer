@@ -3,8 +3,8 @@
 // For a given command and a given set of flags the key set is fixed. That is
 // the whole promise — a caller reads a key's value and never tests whether it
 // is there — so it is checked directly here: each command is run against two
-// data situations that used to produce different key sets, and the sets must
-// come back identical. See docs/JSON.md.
+// data situations, and the key sets must come back identical. See
+// docs/JSON.md.
 
 use std::io::Write;
 use std::process::Command;
@@ -15,8 +15,8 @@ fn rwave() -> &'static str {
 }
 
 /// `moves` toggles, `still` is dumped once and then holds, `absent` is declared
-/// and never written. Between them they cover the row states that used to add
-/// and drop keys: active vs static, known vs undefined, unknown-free vs not.
+/// and never written. Between them they cover the row states a key set must not
+/// depend on: active vs static, known vs undefined, unknown-free vs not.
 const VCD: &str = "\
 $timescale 1ns $end
 $scope module tb $end
@@ -249,9 +249,8 @@ fn same_shape(label: &str, a: &Value, b: &Value, rows_key: &str) {
     assert_eq!(ra[0].keys(), rb[0].keys(), "{label}: row keys differ");
 }
 
-/// Every row of one result must have the same keys as every other. This is the
-/// case the old output failed hardest: an active summary row carried timestamps
-/// and a static one did not.
+/// Every row of one result must have the same keys as every other: an active
+/// summary row and a static one included.
 fn rows_uniform(label: &str, v: &Value, rows_key: &str) {
     let rows = v.get(rows_key).arr();
     // One row is trivially uniform with itself, so the case has to be fed at
@@ -545,9 +544,8 @@ fn total_is_exact_tracks_who_counted() {
     }
 }
 
-/// Every command's empty result explains itself. docs/JSON.md promises the
-/// reason is in `hint`, and four commands used to return null while their text
-/// renderer printed a sentence.
+/// Every command's empty result explains itself: docs/JSON.md promises the
+/// reason is in `hint`, as the text renderer prints it.
 #[test]
 fn every_empty_result_explains_itself() {
     for cmd in [

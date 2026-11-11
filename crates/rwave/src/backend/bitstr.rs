@@ -219,8 +219,8 @@ mod tests {
     #[test]
     fn raw_value_does_not_grow() {
         // The enclosing RawValue (Bits(BitStr) | Real(f64) | Str(String) |
-        // Event) must not be larger than it was with Bits(String). Both are
-        // 32 bytes on 64-bit targets.
+        // Event) stays at 32 bytes on 64-bit targets, the size of a String
+        // variant.
         use crate::backend::RawValue;
         assert!(
             std::mem::size_of::<RawValue>() <= 32,

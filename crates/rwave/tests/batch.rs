@@ -298,7 +298,7 @@ fn batch_global_defaults_apply_and_override() {
 
 #[test]
 fn batch_condition_default_inherited_and_overridden() {
-    // PRD §10: --condition is a repeatable default. A line with *any* of its own
+    // --condition is a repeatable default. A line with *any* of its own
     // --condition replaces the whole default clause group; a line with none
     // inherits the default group wholesale. Each result must stay byte-for-byte
     // identical to the equivalent single `--json` command.

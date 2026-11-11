@@ -1,5 +1,6 @@
-// Malformed-but-seen-in-the-wild VCD input: each used to abort, refuse the
-// file, or corrupt `--json` stdout (vendored wellen patches, vendor/PATCHES.md).
+// Malformed-but-seen-in-the-wild VCD input: each reads without aborting,
+// refusing the file, or corrupting `--json` stdout (vendored wellen patches,
+// vendor/PATCHES.md).
 
 use std::process::{Command, Output};
 

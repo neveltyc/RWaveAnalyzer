@@ -552,9 +552,8 @@ mod tests {
 
     #[test]
     fn filter_and_exclude_reach_slash_hierarchies_too() {
-        // The gate that used to be blind to '/': only `--scope` segmented on
-        // both separators, so on an FSDB hierarchy a path-shaped --filter or
-        // --exclude was matched against the leaf name and could never hit.
+        // An FSDB hierarchy uses '/': a path-shaped --filter or --exclude must
+        // address it as a path, not be matched against the leaf name.
         const REQ: (&str, &str) = ("top/u_dma/req", "top/u_dma");
         const OTHER: (&str, &str) = ("top/u_cpu/req", "top/u_cpu");
 
