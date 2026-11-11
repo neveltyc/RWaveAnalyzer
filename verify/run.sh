@@ -345,14 +345,30 @@ w('$timescale 1ns $end\n$scope module top $end\n$var wire 1 ! clk $end\n$upscope
 for t in range(60000):
     w('#%d\n%d!\n' % (t, t & 1))
 PY
-if script -q /dev/null true >/dev/null 2>&1; then   # BSD script (macOS)
-  script -q /dev/null "$RW" --limit 0 dump "$TTYD/big.vcd" > "$TTYD/tty.out" 2>&1; tcode=$?
-else                                                 # util-linux script
-  script -qec "$RW --limit 0 dump $TTYD/big.vcd" /dev/null > "$TTYD/tty.out" 2>&1; tcode=$?
+if [[ "$(uname)" == Linux ]]; then                   # util-linux script
+  script -qec "$RW --limit 0 dump $TTYD/big.vcd" /dev/null < /dev/null > "$TTYD/tty.out" 2>&1; tcode=$?
+else                                                 # BSD script (macOS)
+  script -q /dev/null "$RW" --limit 0 dump "$TTYD/big.vcd" < /dev/null > "$TTYD/tty.out" 2>&1; tcode=$?
 fi
 tsize=$(wc -c < "$TTYD/tty.out")
-[[ "$tcode" -eq 3 && "$tsize" -lt 1200000 ]] && grep -q "OUTPUT CUT" "$TTYD/tty.out" \
-  && ok || { bad "terminal cap (exit=$tcode, bytes=$tsize)"; head -c 300 "$TTYD/tty.out"; }
+if head -c 7 "$TTYD/tty.out" | grep -q '^script:'; then
+  # script(1) itself could not set up a pty (e.g. stdin is a socket).
+  note "skipped" "$(head -1 "$TTYD/tty.out")"
+else
+  [[ "$tcode" -eq 3 && "$tsize" -lt 1200000 ]] && grep -q "OUTPUT CUT" "$TTYD/tty.out" \
+    && ok || { bad "terminal cap (exit=$tcode, bytes=$tsize)"; head -c 300 "$TTYD/tty.out"; }
+fi
+# A failed write is an error (exit 1), not a short result with exit 0.
+if [[ -w /dev/full ]]; then
+  $RW --limit 0 dump "$TTYD/big.vcd" > /dev/full 2>/dev/null
+  [[ $? -eq 1 ]] && ok || bad "write to /dev/full exits 1"
+fi
+# A batch line's stderr warning comes after its own header.
+printf '$timescale 10ps $end\n$scope module t $end\n$var wire 1 ! a $end\n$upscope $end\n$enddefinitions $end\n#0\n0!\n#5\n1!\n' > "$TTYD/ps.vcd"
+order=$(printf 'info\ndump --begin 0.015ns\n' | $RW --batch "$TTYD/ps.vcd" 2>&1 | grep -n '^#2\|Warning' | cut -d: -f2 | tr -d '\n')
+[[ "$order" == "#2Warning" ]] && ok || bad "batch warning follows its header ($order)"
+zero=$($RW dump "$TTYD/ps.vcd" --begin 0.004ns 2>&1 >/dev/null)
+[[ "$zero" == *"using 0s" ]] && ok || bad "a zero tick prints 0s ($zero)"
 psize=$($RW --limit 0 dump "$TTYD/big.vcd" | wc -c)
 [[ "$psize" -gt 4000000 ]] && ok || bad "pipe is uncapped ($psize bytes)"
 rm -rf "$TTYD"

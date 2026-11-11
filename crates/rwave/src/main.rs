@@ -46,6 +46,11 @@ fn main() -> ExitCode {
     // abort the process with a broken-pipe error mid-write.
     #[cfg(unix)]
     restore_sigpipe();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        out::on_panic();
+    }));
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // A usage error can be reported before the parse succeeds, so the framing

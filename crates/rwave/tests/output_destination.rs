@@ -82,6 +82,17 @@ fn output_targets_that_cannot_be_right_are_refused() {
     assert_eq!(o.status.code(), Some(1));
     let o = run(&d, &["dump", "w.vcd", "-o", ""]);
     assert_eq!(o.status.code(), Some(2));
+    // A device is written in place, not replaced through a temp file.
+    #[cfg(unix)]
+    {
+        let o = run(&d, &["dump", "w.vcd", "-o", "/dev/null"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        // A symlink target is written through, not replaced.
+        std::os::unix::fs::symlink("real.txt", d.join("link.txt")).unwrap();
+        assert!(run(&d, &["dump", "w.vcd", "-o", "link.txt"]).status.success());
+        assert!(std::fs::symlink_metadata(d.join("link.txt")).unwrap().file_type().is_symlink());
+        assert!(std::fs::read_to_string(d.join("real.txt")).unwrap().starts_with("Window:"));
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -65,3 +65,23 @@ fn missing_timescale_is_announced() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("declares no $timescale"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Timescale : (none declared; 1ps assumed)"));
 }
+
+#[test]
+fn malformed_scalar_real_and_string_values() {
+    let head = "$timescale 1ns $end\n$scope module top $end\n\
+        $var wire 1 ! a $end\n$var wire 4 \" v [3:0] $end\n$var real 64 # r $end\n\
+        $var string 1 $ s $end\n$upscope $end\n$enddefinitions $end\n";
+    // a: r1 / b1x0 are not one bit; b01 is 1. v: an empty body is 0, extra
+    // leading zeros carry no value, a 1 above the width is x. r: an
+    // unparsable real is NaN. s: a value without the `s` prefix is kept.
+    let body = format!(
+        "{head}#0\n0!\nb \"\nr1.5 #\nshi $\n#1\nr1 !\nb00011 \"\nrfoo #\nb1 $\n\
+         #2\n0!\nb10011 \"\n#3\nb1x0 !\n#4\nb01 !\n"
+    );
+    let out = run_on("rwave_robust_more.vcd", body.as_bytes(), &["--json", "dump"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        values(&out.stdout),
+        ["0", "0x0", "1.5", "hi", "bx", "0x3", "NaN", "b1", "0", "bxxxx", "bx", "1"]
+    );
+}

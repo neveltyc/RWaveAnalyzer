@@ -590,6 +590,9 @@ pub fn fmt_time(ticks: i64, ts_sec: f64) -> String {
 /// Exact decimal rendering of a femtosecond count in the smallest unit below
 /// 1000 (seconds past that).
 fn fmt_time_fs(total: i128) -> String {
+    if total == 0 {
+        return "0s".to_string();
+    }
     let mag = total.unsigned_abs();
     let sign = if total < 0 { "-" } else { "" };
     for (u, div) in UNITS_FS {

@@ -877,27 +877,27 @@ impl SignalEncoder {
                 }
             }
             SignalEncoding::String => {
-                assert!(
-                    matches!(value[0], b's' | b'S'),
-                    "expected a string, not {}",
-                    String::from_utf8_lossy(value)
-                );
+                // rwave patch: a value without the `s` prefix is kept as
+                // written instead of aborting the parse.
+                let content = match value.first() {
+                    Some(b's' | b'S') => &value[1..],
+                    _ => value,
+                };
                 // string: var-length time index + var-len length + content
                 leb128::write::unsigned(&mut self.data, u64::from(time_idx_delta)).unwrap();
-                leb128::write::unsigned(&mut self.data, (value.len() - 1) as u64).unwrap();
-                self.data.extend_from_slice(&value[1..]);
+                leb128::write::unsigned(&mut self.data, content.len() as u64).unwrap();
+                self.data.extend_from_slice(content);
             }
             SignalEncoding::Real => {
-                assert!(
-                    matches!(value[0], b'r' | b'R'),
-                    "expected a real, not {}",
-                    String::from_utf8_lossy(value)
-                );
-                // parse float
-                let float_value: Real = std::str::from_utf8(&value[1..])
-                    .unwrap()
-                    .parse::<Real>()
-                    .unwrap();
+                // rwave patch: a real that does not parse (`rfoo`, a bare `r`,
+                // a bit value on a real id) reads as NaN instead of aborting.
+                let float_value: Real = match value.first() {
+                    Some(b'r' | b'R') => std::str::from_utf8(&value[1..])
+                        .ok()
+                        .and_then(|t| t.parse::<Real>().ok())
+                        .unwrap_or(Real::NAN),
+                    _ => Real::NAN,
+                };
                 // write var-length time index + fixed little endian float bytes
                 leb128::write::unsigned(&mut self.data, u64::from(time_idx_delta)).unwrap();
                 self.data.extend_from_slice(&float_value.to_le_bytes());

@@ -179,7 +179,7 @@ impl Filters {
                 Domain::Leaf => leaf_lower,
             };
             let hit = match &p.kind {
-                PatKind::Plain { lit, exact: true } => names_exactly(hay, lit),
+                PatKind::Plain { lit, exact: true } => p.domain.names(hay, lit),
                 PatKind::Plain { lit, exact: false } => hay.contains(lit.as_str()),
                 PatKind::Glob(toks) => glob_match(toks, hay),
             };
@@ -198,12 +198,9 @@ impl Filters {
     pub fn prefer_exact(&mut self, names: &[(String, String)]) {
         for p in &mut self.pats {
             if let PatKind::Plain { lit, exact: exact @ false } = &mut p.kind {
-                *exact = names.iter().any(|(path, leaf)| {
-                    let hay = match p.domain {
-                        Domain::Path => path,
-                        Domain::Leaf => leaf,
-                    };
-                    names_exactly(hay, lit)
+                *exact = names.iter().any(|(path, leaf)| match p.domain {
+                    Domain::Path => p.domain.names(path, lit),
+                    Domain::Leaf => p.domain.names(leaf, lit),
                 });
             }
         }
@@ -218,6 +215,22 @@ impl Filters {
     /// original-case strings and are not matching in a hot loop.
     pub fn matches_path_leaf(&self, path: &str, leaf: &str) -> bool {
         self.matches_lower(&path.to_lowercase(), &leaf.to_lowercase())
+    }
+}
+
+impl Domain {
+    /// Does `lit` name `hay` whole? A leaf must be the name; a path may also
+    /// be given from any segment down (`u_dma.req` names `top.u_dma.req`), as
+    /// `--scope` matches paths.
+    fn names(self, hay: &str, lit: &str) -> bool {
+        match self {
+            Domain::Leaf => names_exactly(hay, lit),
+            Domain::Path => SEPARATORS.iter().fold(names_exactly(hay, lit), |hit, sep| {
+                hit || hay
+                    .match_indices(*sep)
+                    .any(|(i, _)| names_exactly(&hay[i + 1..], lit))
+            }),
+        }
     }
 }
 
@@ -475,6 +488,16 @@ mod tests {
     }
 
     #[test]
+    fn a_path_may_start_at_any_segment() {
+        let names = [("top.u_dma.req", "req"), ("top.u_dma.req_strobe", "req_strobe")];
+        let f = primed("u_dma.req", &names);
+        assert!(m(&f, "top.u_dma.req") && !m(&f, "top.u_dma.req_strobe"));
+        // A partial segment is not a segment: substring reach is kept.
+        let f = primed("dma.req", &names);
+        assert!(m(&f, "top.u_dma.req") && m(&f, "top.u_dma.req_strobe"));
+    }
+
+    #[test]
     fn each_pattern_is_primed_on_its_own() {
         let names = [("top.sig3", "sig3"), ("top.sig30", "sig30"), ("top.ctrl_a", "ctrl_a")];
         let f = primed("sig3,ctrl", &names);
@@ -502,7 +525,8 @@ mod tests {
     fn exact_mode_keeps_the_leaf_versus_path_split() {
         let f = Filters::parse_csv_mode("tb.clk", MatchMode::Exact).unwrap();
         assert!(f.matches_path_leaf("tb.clk", "clk"));
-        assert!(!f.matches_path_leaf("top.tb.clk", "clk"), "anchored, not a suffix");
+        assert!(f.matches_path_leaf("top.tb.clk", "clk"), "a segment-aligned suffix");
+        assert!(!f.matches_path_leaf("top.xtb.clk", "clk"), "not a partial segment");
         let f = Filters::parse_csv_mode("clk", MatchMode::Exact).unwrap();
         assert!(f.matches_path_leaf("top.tb.clk", "clk"), "bare name still means the leaf");
     }

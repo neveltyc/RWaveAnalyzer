@@ -1651,9 +1651,18 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
             Some(v) => *v,
         };
 
-        // rwave patch: a malformed value (e.g. a real `r1.5` written to a
-        // logic id) reads as x instead of aborting the whole parse.
+        // rwave patch: a malformed value reads as x instead of aborting the
+        // whole parse, or of reading its last character: a real written to a
+        // logic id (`r1 !` would read as 1) or a multi-bit body (`b1x0 !`).
+        let body = match value.first() {
+            Some(b'b' | b'B') => &value[1..],
+            _ => value,
+        };
+        // Leading zeros carry no value (`b01` is 1).
+        let excess = &body[..body.len().saturating_sub(1)];
+        let malformed = matches!(value.first(), Some(b'r' | b'R')) || excess.iter().any(|b| *b != b'0');
         let (states, bit_value) = States::from_ascii_bit(value_char)
+            .filter(|_| !malformed)
             .unwrap_or_else(|| States::from_ascii_bit(b'x').unwrap());
         (VcdBitVecChange::SingleBit(bit_value), states)
     } else {
@@ -1677,6 +1686,20 @@ pub fn decode_vcd_bit_vec_change(len: u32, value: &[u8]) -> (VcdBitVecChange<'_>
         let all_x = || (VcdBitVecChange::MultiBit(Cow::Owned(vec![b'x'; bits])), States::Four);
         let Some(states) = States::from_ascii(value_bits) else {
             return all_x();
+        };
+        // An empty body (`b !`) is zero, as upstream reads it for 1-bit ids.
+        if value_bits.is_empty() {
+            return (VcdBitVecChange::MultiBit(Cow::Owned(vec![b'0'; bits])), States::Two);
+        }
+        // Leading zeros beyond the width carry no value (`b00011` on 4 bits).
+        let value_bits = if value_bits.len() > bits {
+            let (high, low) = value_bits.split_at(value_bits.len() - bits);
+            if high.iter().any(|b| *b != b'0') {
+                return all_x();
+            }
+            low
+        } else {
+            value_bits
         };
         let data_to_write = if value_bits.len() == bits {
             Cow::Borrowed(value_bits)

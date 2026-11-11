@@ -89,6 +89,9 @@ pub fn run_batch(wave: &mut Wave, inv: &BatchInvocation) -> ExitCode {
                     // (identical to the single-command text path), or one
                     // Error line on failure.
                     crate::outln!("#{id}");
+                    // Out before the command runs, so a warning it writes to
+                    // stderr lands under its own header in a merged stream.
+                    crate::out::flush();
                     if let Err(msg) = commands::render_text(wave, &args) {
                         crate::outln!("Error: {}", msg.msg);
                     }

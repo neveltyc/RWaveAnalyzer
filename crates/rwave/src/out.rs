@@ -30,14 +30,18 @@ pub const TERMINAL_BUDGET: usize = 1 << 20;
 pub const EXIT_CUT: i32 = 3;
 
 enum Dest {
-    Pipe(BufWriter<io::Stdout>),
+    /// A write error is kept and reported at [`finish`]: a full disk or a
+    /// file-size limit must not end as a short result with exit 0.
+    Pipe { w: BufWriter<io::Stdout>, failed: Option<io::Error> },
     Tty { left: usize },
     File(FileSink),
 }
 
 struct FileSink {
     w: BufWriter<File>,
-    temp: PathBuf,
+    /// `None` when writing straight to a target that is not a regular file
+    /// (`/dev/null`, a FIFO), which cannot be replaced by a rename.
+    temp: Option<PathBuf>,
     target: PathBuf,
     lines: u64,
     bytes: u64,
@@ -64,7 +68,7 @@ fn with_dest<R>(f: impl FnOnce(&mut Dest) -> R) -> R {
         if io::stdout().is_terminal() {
             Dest::Tty { left: TERMINAL_BUDGET }
         } else {
-            Dest::Pipe(BufWriter::with_capacity(1 << 16, io::stdout()))
+            Dest::Pipe { w: BufWriter::with_capacity(1 << 16, io::stdout()), failed: None }
         }
     });
     f(dest)
@@ -88,14 +92,29 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     if same {
         return Err("--output must not be the waveform file itself".to_string().into());
     }
-    let mut temp = abs.clone().into_os_string();
-    temp.push(format!(".{}.part", std::process::id()));
-    let temp = PathBuf::from(temp);
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|e| CmdError::env(format!("cannot write --output {}: {e}", abs.display())))?;
+    let shown = abs.display().to_string();
+    let cannot = |e: io::Error| CmdError::env(format!("cannot write --output {shown}: {e}"));
+    // An existing target is written where it lives: through a symlink rather
+    // than over it, and straight into a device or FIFO, which no rename can
+    // replace.
+    let (abs, temp, file) = match std::fs::metadata(&abs) {
+        Ok(m) if !m.is_file() => {
+            let file = std::fs::OpenOptions::new().write(true).open(&abs).map_err(cannot)?;
+            (abs, None, file)
+        }
+        _ => {
+            let real = follow_links(abs);
+            let mut temp = real.clone().into_os_string();
+            temp.push(format!(".{}.part", std::process::id()));
+            let temp = PathBuf::from(temp);
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .map_err(cannot)?;
+            (real, Some(temp), file)
+        }
+    };
     let sink = FileSink {
         w: BufWriter::with_capacity(1 << 16, file),
         temp,
@@ -108,13 +127,29 @@ pub fn to_file(target: &str, input: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
+/// `p` with symlinks followed, a dangling one included (`canonicalize` fails
+/// on that, and the rename would then replace the link itself).
+fn follow_links(mut p: PathBuf) -> PathBuf {
+    for _ in 0..40 {
+        match std::fs::read_link(&p) {
+            Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
+            Err(_) => break,
+        }
+    }
+    p
+}
+
 /// Write formatted text to the result destination (what [`out!`] expands to).
 pub fn emit(args: fmt::Arguments) {
     with_dest(|dest| match dest {
-        Dest::Pipe(w) => {
+        Dest::Pipe { w, failed } => {
             // A closed pipe ends the process through SIGPIPE (restored in
-            // main); any other write error has nowhere left to be reported.
-            let _ = w.write_fmt(args);
+            // main); any other error is reported at `finish`.
+            if failed.is_none() {
+                if let Err(e) = w.write_fmt(args) {
+                    *failed = Some(e);
+                }
+            }
         }
         Dest::File(f) => {
             if f.failed.is_none() {
@@ -163,8 +198,12 @@ pub fn emit(args: fmt::Arguments) {
 /// Push buffered results out now (batch mode, between lines).
 pub fn flush() {
     with_dest(|dest| match dest {
-        Dest::Pipe(w) => {
-            let _ = w.flush();
+        Dest::Pipe { w, failed } => {
+            if failed.is_none() {
+                if let Err(e) = w.flush() {
+                    *failed = Some(e);
+                }
+            }
         }
         Dest::File(f) => {
             if f.failed.is_none() {
@@ -184,9 +223,11 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
     let dest = SINK.lock().unwrap_or_else(|e| e.into_inner()).take();
     match dest {
         None | Some(Dest::Tty { .. }) => Ok(()),
-        Some(Dest::Pipe(mut w)) => {
-            let _ = w.flush();
-            Ok(())
+        Some(Dest::Pipe { mut w, failed }) => {
+            match failed.map_or_else(|| w.flush(), Err) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(format!("cannot write the result to stdout: {e}")),
+            }
         }
         Some(Dest::File(mut f)) => {
             let flushed = match f.failed.take() {
@@ -194,13 +235,13 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
                 None => f.flush(),
             };
             drop(f.w);
-            let published = match flushed {
-                Ok(()) if ok => std::fs::rename(&f.temp, &f.target),
-                Ok(()) => Ok(()),
-                Err(e) => Err(e),
+            let published = match (flushed, &f.temp) {
+                (Ok(()), Some(temp)) if ok => std::fs::rename(temp, &f.target),
+                (Ok(()), _) => Ok(()),
+                (Err(e), _) => Err(e),
             };
-            if !ok || published.is_err() {
-                let _ = std::fs::remove_file(&f.temp);
+            if let (true, Some(temp)) = (!ok || published.is_err(), &f.temp) {
+                let _ = std::fs::remove_file(temp);
             }
             if let Err(e) = published {
                 return Err(format!("cannot write --output {}: {e}", f.target.display()));
@@ -222,6 +263,27 @@ pub fn finish(ok: bool, json: bool, command: Option<&str>) -> Result<(), String>
             }
             Ok(())
         }
+    }
+}
+
+/// Run from the panic hook: push out what was already printed and drop an
+/// unfinished `--output` file. Release builds abort on panic, so neither
+/// [`finish`] nor any destructor runs. `try_lock`: the panic may have been
+/// raised while the sink was held.
+pub fn on_panic() {
+    let Ok(mut guard) = SINK.try_lock() else {
+        return;
+    };
+    match guard.as_mut() {
+        Some(Dest::Pipe { w, .. }) => {
+            let _ = w.flush();
+        }
+        Some(Dest::File(f)) => {
+            if let Some(temp) = &f.temp {
+                let _ = std::fs::remove_file(temp);
+            }
+        }
+        _ => {}
     }
 }
 
