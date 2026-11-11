@@ -50,11 +50,12 @@ fn utf8_bom_before_the_header_is_skipped() {
 
 #[test]
 fn backward_timestamp_warning_stays_off_stdout() {
-    let body = format!("{HEAD}#0\n0\"\n#20\n1\"\n#10\n0\"\n#30\n0\"\n");
+    let body = format!("{HEAD}#0\n0\"\n#20\n1\"\n#10\n0\"\n#30\n0\"\n#25\n1\"\n#40\n1\"\n");
     let out = run_on("rwave_robust_backward.vcd", body.as_bytes(), &["--json", "dump"]);
     assert!(out.status.success());
     assert!(out.stdout.starts_with(b"{\"command\":\"dump\""), "{}", String::from_utf8_lossy(&out.stdout));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("time decreased"));
+    // Reported once, however many times it goes back.
+    assert_eq!(String::from_utf8_lossy(&out.stderr).matches("time decreased").count(), 1);
 }
 
 #[test]
@@ -126,4 +127,8 @@ fn every_nan_is_one_value() {
     assert_eq!(values(&out.stdout), ["1.5", "NaN", "2"]);
     let out = run_on("rwave_robust_nan.vcd", body.as_bytes(), &["--json", "summary"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"changes\":2"));
+    // -0 and 0 are one value too.
+    let body = format!("{head}#0\nr0 !\n#10\nr-0 !\n#20\nr0 !\n#30\nr1 !\n");
+    let out = run_on("rwave_robust_zero.vcd", body.as_bytes(), &["--json", "dump"]);
+    assert_eq!(values(&out.stdout), ["0", "1"]);
 }

@@ -312,8 +312,16 @@ impl WellenBackend {
 
         // iter_changes yields (TimeTableIdx, SignalValueRef) in order.
         for (tidx, val) in sig.iter_changes() {
+            let v = decode_value(val);
+            // wellen drops repeats by raw bytes; reals that differ only in a
+            // NaN's bits or a zero's sign are repeats once canonical.
+            if let (RawValue::Real(a), Some(RawValue::Real(b))) = (&v, values.last()) {
+                if a.to_bits() == b.to_bits() {
+                    continue;
+                }
+            }
             times.push(time_table[tidx as usize] as i64);
-            values.push(decode_value(val));
+            values.push(v);
         }
 
         // Defensive: if iter_changes and time_indices disagree in length (they
@@ -352,7 +360,7 @@ fn decode_value(val: wellen::SignalValueRef<'_>) -> RawValue {
                 bv.iter_msb_to_lsb().map(|b| b.as_ascii()),
             ))
         }
-        R::Real(x) => RawValue::Real(x),
+        R::Real(x) => RawValue::Real(super::canon_real(x)),
         R::String(s) => RawValue::Str(s.to_string()),
     }
 }

@@ -496,10 +496,14 @@ impl Encoder {
                     return; // ignore calls to time_change that do not actually change anything
                 }
                 Ordering::Greater => {
-                    eprintln!(
-                        "Warning: time decreased from {} to {}; skipping that time step",
-                        *prev_time, time
-                    );
+                    // Once per process (each parse thread has its own encoder).
+                    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!(
+                            "Warning: time decreased from {} to {}; skipping such time steps",
+                            *prev_time, time
+                        );
+                    }
                     self.skipping_time_step = true;
                     return;
                 }
@@ -905,8 +909,6 @@ impl SignalEncoder {
                         .unwrap_or(Real::NAN),
                     _ => Real::NAN,
                 };
-                // One NaN bit pattern (`r-nan` after `rnan` is no change).
-                let float_value = if float_value.is_nan() { Real::NAN } else { float_value };
                 // write var-length time index + fixed little endian float bytes
                 leb128::write::unsigned(&mut self.data, u64::from(time_idx_delta)).unwrap();
                 self.data.extend_from_slice(&float_value.to_le_bytes());

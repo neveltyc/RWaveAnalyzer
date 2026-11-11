@@ -262,9 +262,6 @@ impl SignalWriter {
             },
             FstSignalValue::Real(value) => {
                 debug_assert_eq!(self.tpe, SignalEncoding::Real);
-                // rwave patch: one NaN bit pattern, so `-nan` after `nan` is no
-                // change to the byte-level duplicate check below.
-                let value = if value.is_nan() { f64::NAN } else { *value };
                 self.data_bytes.extend_from_slice(&value.to_le_bytes());
                 if check_if_changed_and_truncate(8, &mut self.data_bytes) {
                     self.time_indices.push(time_idx);

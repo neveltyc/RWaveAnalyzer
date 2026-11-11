@@ -378,10 +378,7 @@ const CANON: [u8; 256] = canon_table();
 fn decode(kind: WinKind, value: &FstSignalValue<'_>) -> Option<RawValue> {
     match (kind, value) {
         (WinKind::Event, _) => Some(RawValue::Event),
-        // One NaN bit pattern, as the full decode (patched wellen) stores it.
-        (WinKind::Real, FstSignalValue::Real(f)) => {
-            Some(RawValue::Real(if f.is_nan() { f64::NAN } else { *f }))
-        }
+        (WinKind::Real, FstSignalValue::Real(f)) => Some(RawValue::Real(super::canon_real(*f))),
         (WinKind::Str, FstSignalValue::String(bytes)) => {
             // ISO-8859-1 byte-to-char, exactly as the full decode maps it.
             Some(RawValue::Str(bytes.iter().map(|b| *b as char).collect()))

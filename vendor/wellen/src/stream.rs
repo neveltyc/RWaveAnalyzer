@@ -405,7 +405,10 @@ where
                     return; // ignore calls to time_change that do not actually change anything
                 }
                 std::cmp::Ordering::Greater => {
-                    eprintln!("Warning: time decreased from {prev_time} to {time}; skipping that time step");
+                    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("Warning: time decreased from {prev_time} to {time}; skipping such time steps");
+                    }
                     self.skipping_time_step = true;
                     return;
                 }

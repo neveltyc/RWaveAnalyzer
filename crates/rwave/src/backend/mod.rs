@@ -137,6 +137,21 @@ impl SignalTrace {
     }
 }
 
+/// The one form a real value is kept in, whatever the backend: every NaN is
+/// the canonical NaN and -0 is 0. Change folding compares reals by bits, so
+/// `-nan` after `nan` (glibc prints x86's default NaN as `-nan`) or `-0` after
+/// `0` would otherwise be changes that a real target, `compare` and
+/// `changed()` do not see.
+pub(crate) fn canon_real(v: f64) -> f64 {
+    if v.is_nan() {
+        f64::NAN
+    } else if v == 0.0 {
+        0.0
+    } else {
+        v
+    }
+}
+
 /// A decoded value, owned and backend-neutral. Logic vectors are materialized
 /// as an MSB-first bit string (the canonical comparison/formatting form);
 /// reals and strings carry their literal payload; events carry no payload.

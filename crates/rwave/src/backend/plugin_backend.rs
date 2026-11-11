@@ -796,29 +796,25 @@ fn map_type_str(s: &str) -> &'static str {
     }
 }
 
-/// A real as a plugin renders it: trimmed, and NaN when Rust does not parse
-/// it (as on the VCD path), never a 0.0 that `dac=0` would match. Every NaN is
-/// the one canonical NaN: change folding compares bits, and `-nan` vs `nan`
-/// from a C printf would otherwise record changes nobody can see.
+/// A real as a plugin renders it: trimmed, NaN when Rust does not parse it (as
+/// on the VCD path, never a 0.0 that `dac=0` would match), and in the one
+/// canonical form ([`super::canon_real`]).
 fn parse_plugin_real(s: &str) -> f64 {
-    match s.trim().parse::<f64>() {
-        Ok(v) if !v.is_nan() => v,
-        _ => f64::NAN,
-    }
+    super::canon_real(s.trim().parse::<f64>().unwrap_or(f64::NAN))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn plugin_reals_parse_trimmed_and_nan_is_canonical() {
-        assert_eq!(super::parse_plugin_real(" 1.5 "), 1.5);
-        assert_eq!(super::parse_plugin_real("-0"), 0.0);
+    fn plugin_reals_parse_trimmed_and_canonical() {
+        assert_eq!(parse_plugin_real(" 1.5 "), 1.5);
+        assert_eq!(parse_plugin_real("-0").to_bits(), 0.0f64.to_bits(), "-0 is 0");
         for s in ["nan", "-nan", "NaN", "1.#INF", "1.0D3", ""] {
-            assert_eq!(super::parse_plugin_real(s).to_bits(), f64::NAN.to_bits(), "{s}");
+            assert_eq!(parse_plugin_real(s).to_bits(), f64::NAN.to_bits(), "{s}");
         }
     }
-
-    use super::*;
 
     fn bits(s: &str) -> RawValue {
         RawValue::Bits(BitStr::new(s))
