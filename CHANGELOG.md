@@ -6,6 +6,100 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-11-11
+
+Correctness fixes ported from VcdAnalyzer 1.5.3–1.6.2 (its index work aside),
+plus fixes for problems found while comparing the two.
+
+### Highlights
+- **Bit-exploded buses had no data.** A bus dumped one bit per `$var`
+  (Questa/ModelSim, in VCD and FST) is reassembled as `bus[N:0]`, and every
+  query on it reported "never written to the dump". The sid dropped wellen's
+  derived-signal flag; the bus could also be grouped as an alias of an
+  unrelated signal. GHW slices took the same path.
+- **A name selects that signal.** A wildcard-free pattern that is a signal's
+  whole name selects only the signals with that name: `--filter top.sig3` no longer lists
+  `top.sig30`, `--filter req` no longer brings `req_strobe`. The bus range is
+  optional (`state` names `state[2:0]`) and a path may start at any segment
+  (`u_dma.req` names `top.u_dma.req`). A pattern that is no signal's name
+  still matches as a substring. Judged within `--scope`/`--depth`.
+- **Exit status says who can fix it.** 0 answered (an empty result too), 1 the
+  file or environment, 2 the request, 3 terminal output cut.
+
+### Changed
+These can change what an existing script gets back:
+- Request errors exit 2, not 1: a bad condition, unknown name or bad time,
+  `trace` on a file that is not an NPI-opened FSDB, a `--kdb` that holds no
+  design library. 1 is left for the file or environment. A failed
+  `--batch --json` line carries the same number as `exit`.
+- The whole-name rule applies to `--filter`, `--exclude`, `search`'s
+  `--condition`/`--show`, `tree --of` and `trace`: `--exclude clk` keeps `pclk` and
+  `clk_div`; write `'*clk*'` for every clock. `--exact` only drops the
+  substring fallback.
+- Output to an interactive terminal stops after 1 MiB with an `>> OUTPUT CUT`
+  notice and exit 3; pipes, redirects and files get everything.
+- `summary` no longer counts a signal's first in-window value as a change; see
+  Fixed.
+- Times print every tick digit; see Fixed.
+
+### Added
+- `-o/--output FILE` on every command and on the `--batch` line (not inside a
+  batch line): the whole result goes to FILE (only on success), stdout gets a
+  receipt (JSON under `--json`). A symlink is written through; a device, FIFO
+  or descriptor path (`/dev/null`, `/dev/stdout`, `/dev/fd/3`) is written in
+  place, keeping a redirect's append mode. A terminal target is cut at 1 MiB
+  like stdout; a target that is stdout itself gets no receipt.
+- Negative `search` targets: two's complement in the signal's width on logic
+  signals (`cnt=-1`), outside the signed range an error.
+- Real signals compare numerically: `temp=-1.5`, `dac=100` (same as
+  `dac=100.0`, and folded with it as one term), `1e-3`. Before, no target
+  could match a real. On a string signal a number or bit literal compares as
+  text (`s=5`, `s=0b101`); it never matched.
+- `summary` rows carry `defined_at_ticks`/`defined_at_h` (text `defined@T`).
+- `info --json` carries `timescale_assumed`.
+
+### Fixed
+- A `search` target the signal cannot hold is an error instead of a confident
+  "No interval": more bits than the width (`state=99` on 4 bits, `bit=2` on 1
+  bit), a 1/x/z above the width, a bit pattern or hex/binary spelling on a
+  real, a real number on a logic signal, a level term on an event.
+- `summary` counted a signal's first value inside the window as a change, so
+  `chg` disagreed with `search changed()`. It is `defined_at` now; events
+  still count every trigger.
+- Distinct ticks printed alike: six significant digits made 17534712ns and
+  17534713ns both `17.5347ms`. Times now print every digit (`17.534712ms`),
+  and unit times convert by integer arithmetic, warning on stderr when one
+  falls between ticks.
+- Malformed VCD values panicked (exit 134): a real written to a logic id
+  (`rnan !`), an invalid character, a 1/x/z beyond the declared width, an
+  empty body on a vector id (`b "`), a real that does not parse (`rfoo`), a change on
+  an undeclared id (`1!!`), a non-string value on a string id (`b101 +`).
+  They read as x, 0 for an empty body, NaN for a real, the text for a
+  string; extra leading zeros are dropped; an undeclared id is skipped with a
+  warning. A multi-bit value on a 1-bit id (`b10 !`) read its last
+  character; it is x.
+- A failed write to stdout (a full disk) is an error, exit 1; it panicked.
+  Any failed result write ends the run at once, a file-size limit included
+  (SIGXFSZ killed the process, exit 153).
+- A real that a WLF/FSDB plugin pads with spaces reads correctly; one that
+  does not parse is NaN, not 0.
+- `nan` and `-nan` (glibc's spelling of x86's default NaN) were two values,
+  and so were `0` and `-0`: `summary` and `dump` reported changes between
+  them that `compare` and `changed()` did not. On every format each is one
+  value (a `-0` prints as `0`).
+- The "time decreased" stderr notice prints once per run, as `Warning: time
+  decreased from A to B; skipping such time steps` (was `WARN: … Skipping!`
+  for every backward timestamp).
+- A VCD starting with a UTF-8 BOM was "unknown file format".
+- wellen's "time decreased" warning and FST VHDL notes printed on stdout,
+  breaking `--json`; they go to stderr.
+- A VCD with no `$timescale` warns on stderr and `info` says 1ps is assumed.
+
+### Internal
+- Every result line goes through one sink (`out.rs`); pipe output is buffered,
+  and a panic flushes it and removes an unfinished `--output` file.
+- Vendored wellen patches 2–4 in `vendor/PATCHES.md`.
+
 ## [0.3.1] — 2026-10-02
 
 ### Added

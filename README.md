@@ -46,7 +46,7 @@ rwave 本身就是一个二进制文件，不依赖别的东西。它能读取 V
 rwave info sim.fst
 
 # 看看时钟和复位
-rwave list sim.fst --filter clk,rst
+rwave list sim.fst --filter '*clk*,*rst*'
 
 # 100 ns 到 200 ns 之间发生了什么？
 rwave dump sim.fst --begin 100ns --end 200ns --filter state
@@ -171,12 +171,18 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
   `us`、`ms`、`s`（比如 `17.5us`）；只写数字则按原始 tick 计算。
 - **全局选项。** `--json` 输出结构化数据，`--limit N` 限制行数（默认 500，写 `0`
   表示不限），`--verbose` 输出更多字段。结果被截断时，最后一行会说明，`--json`
-  下还会带一个 `hint` 字段。
+  下还会带一个 `hint` 字段。`-o/--output FILE` 把完整结果写进 FILE（只在成功时
+  生成），stdout 上只输出一行回执。输出目标是终端时（stdout 或 `-o` 指向终端都算），
+  超过 1 MiB 就会停下，退出码为 3；写到管道、重定向或普通文件则不受此限。
 - **条件**（`search` 用）是一串用逗号连起来的 AND 条件，每项是 `SIG=VAL`、
   `SIG!=VAL` 或 `changed(SIG)`；值可以写十进制、十六进制（`0xff`）、二进制
   （`b1010`）或 4 态；二进制字面量里的 `?` 是无关位，类似 Verilog `casez` 分支里的 `?`
-  （`status=b?????1??` 检查 8 位总线的第 2 位；位数不足时高位补 0，所以要写全每一位）。写 `changed(SIG)` 会切换到事件模式，报告 SIG 翻转、同时子句
-  其余部分也成立的那些时刻。重复写 `--condition`，就是把这些子句用 OR 连接（它们
+  （`status=b?????1??` 检查 8 位总线的第 2 位；位数不足时高位补 0，所以要写全每一位）。
+  负的十进制数按信号位宽取补码（`cnt=-1`）；real 信号按数值比较（`temp=-1.5`、
+  `dac=100`）；string 信号上的数字或位字面量按文本比较（`s=5`）。信号不可能取到
+  的值会直接报错，而不是返回空结果，比如对 4 位的 `state` 写 `state=99`、对 1 位的
+  `bit` 写 `bit=2`、real 信号写 `temp=b101`。写 `changed(SIG)` 会切换到事件模式，报告 SIG 翻转、同时子句其余部分
+  也成立的那些时刻。重复写 `--condition`，就是把这些子句用 OR 连接（它们
   要么都包含 `changed()`，要么都不包含）；字符串内部不支持 OR。
 
 完整用法见 `rwave <command> --help`。
@@ -192,7 +198,7 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 | `--depth N`      | 从这棵子树的根往下走多深（要配合 `--scope`） |
 | `--filter K1,K2` | 保留哪些名字 |
 | `--exclude K1,K2`| 去掉哪些，最后生效 |
-| `--exact`        | 让上面两个按整名匹配，而不是按子串 |
+| `--exact`        | 没有信号叫这个名字时什么都不匹配，不再回退到子串匹配（很少用到） |
 
 ```sh
 # 只要这个模块，不包含子模块。
@@ -202,38 +208,32 @@ rwave list sim.fst --scope u_tx.u_fifo --depth 1
 rwave summary sim.fst --filter tx_fifo_push_err
 
 # 除时钟树以外的一切。
-rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
+rwave dump sim.fst --begin 1us --end 2us --exclude '*clk*,*_clkgen.*'
 ```
 
 **按名字还是按路径。** 一个 pattern 如果不包含分隔符，就只匹配信号名本身（路径
 的最后一段）；如果包含 `.` 或 `/`，就匹配它的完整路径。这个区别很关键：RTL 习惯
 用信号名给 CDC 同步器起名（`u_sync_<sig>`），所以用 `tx_fifo_push_err` 匹配路径，
 会把这个同步器内部的每条线也一起带出来。想要信号本身，就匹配名字；想定位到某一
-段层级，就加上一个点（`--filter 'u_dma.'`）。pattern 里没有 `*` 或 `?` 时按子串
-匹配，有的话就是锚定的 glob；`[` 和 `]` 当作普通字符，匹配不区分大小写，用逗号
-隔开的多个 pattern 之间是 OR 关系。
+段层级，就加上一个点（`--filter 'u_dma.'`）。带 `*` 或 `?` 的 pattern 是锚定的
+glob；`[` 和 `]` 当作普通字符，匹配不区分大小写，用逗号隔开的多个 pattern 之间
+是 OR 关系。
 
-**`--exact` 关掉子串匹配。** 子串匹配同时会命中所有以这个名字开头的信号，
-`DtsmTrainVal0Min` 会把 `DtsmTrainVal0Min_strobe` 一起带出来，而那条 strobe 通常
-不动，于是 `summary` 就把它报成 static，看上去像是要找的信号不动。加上 `--exact`，
-不带通配符的 pattern 就要求匹配整个名字。带 `*`/`?` 的 pattern 本来就是锚定的，
-`--exact` 对它没有影响。这个开关对 `--filter`、`--exclude`，以及 `search` 里
-`--condition`/`--show` 的名字解析同时生效。
-
-**总线要连范围一起写。** 「整个名字」指的是声明时的那个名字，而 vector 的名字是
-带范围后缀的，所以 `--filter state --exact` 在 `state[2:0]` 上匹配不到东西，得写
-`--filter 'state[2:0]' --exact`；或者干脆不加 `--exact`，让子串匹配去做。pattern
-里的 `[` 和 `]` 是普通字符，除了 shell 的引号之外不需要额外转义。
+**名字对得上就只选中它，对不上才按子串匹配。** 不带通配符的 pattern 如果正好是
+某条信号的完整名字，就只选中叫这个名字的信号：`--filter DtsmTrainVal0Min` 不会带上
+`DtsmTrainVal0Min_strobe`，`--filter top.sig3` 也不会带上 `top.sig30`。完整名字
+可以是信号名，也可以是从任意一段写起的路径，`u_dma.req` 指的就是
+`top.u_dma.req`。总线的范围后缀可以省略，`state` 选中的是 `state[2:0]`，不会
+选中 `state_next[2:0]`。没有信号叫这个名字时才按子串匹配（`--filter fifo` 找出所有
+含 `fifo` 的信号），想要前缀匹配就写 `name*`。判断全名时只看 `--scope`/`--depth`
+范围以内的信号。`--exclude` 以及 `search` 里 `--condition`/`--show` 的名字解析
+也是同一套规则，所以 `--exclude clk` 只去掉叫 `clk` 的信号，要去掉所有时钟就写
+`--exclude '*clk*'`。
 
 **输出会说清楚匹配到了什么。** `dump`、`summary`、`snapshot`、`compare` 在数据行之前会打一行
 `Matched N signals: <路径列表>`（超过 10 条就只报数量），JSON 里对应 `matched`
 字段。一条信号在波形里有多个声明名字时，匹配到的名字和数据行上的规范名字会一并
 列出（`A -> B`），因为数据行只会写规范名字。
-
-```sh
-# 要这一条，不要同前缀的 strobe。
-rwave summary sim.fst --filter DtsmTrainVal0Min --exact
-```
 
 **`--scope`** 是逐段匹配的（`u_fifo` 绝不会命中 `u_fifo_ctrl`），选中一棵子树，
 连同它下面的所有内容；路径则按段对齐、从后往前匹配。**`--depth`** 从选中的
@@ -254,7 +254,8 @@ scope 开始往下计层（直接在里面的信号算作第 1 层），要配�
 tick 数（`*_ticks` 字段）和人能直接读的形式（`*_h` 字段），这样脚本、CI、AI
 agent 和终端前的人都能用。信号值也是同样的考虑，尽量紧凑：1 位逻辑信号确定时
 是 `0`/`1`，多位总线确定时是去掉前导零的 `0x<hex>`（比如 `0x4`），只要有未知位就
-一律是全宽的 `b<bits>`（`bx`、`bz`、`b01x0`），实数和字符串原样给出。判断"有没有
+一律是全宽的 `b<bits>`（`bx`、`bz`、`b01x0`）。实数用能精确还原的最短十进制写法
+（`1.50` 写成 `1.5`，`-0` 写成 `0`，NaN 写成 `NaN`），字符串原样给出。判断"有没有
 未知位"只看 `b` 前缀，不要找字母 `x`，每个 `0x` 值里都有它。位宽记在每条信号的
 元数据里，所以不用再拿十六进制补零来表示。
 
@@ -268,9 +269,16 @@ rwave --json search sim.fst --condition "state=5" --show data
 不会消失。所以判断一个键该用它的值，而不是判断它在不在。`--verbose` 会多加一组
 字段，但这是调用方自己传的，自己知道。
 
-出错时也是 JSON：写到 stderr，退出码非零，形如
+出错时也是 JSON：写到 stderr，形如
 `{"command":"dump","ok":false,"error":"..."}`。stdout 只放结果，所以一个脚本
 两条路径共用同一套解析。
+
+| 退出码 | 含义 |
+|:--|:--|
+| 0 | 正常给出结果（空结果也算，`hint` 会说明原因） |
+| 1 | 文件或环境的问题：文件打不开或解析失败、波形里记录的设计库出问题、license 不可用、结果写不出去 |
+| 2 | 请求本身的问题：参数、信号名、条件或时间写错，`-o` 指向目录或波形文件本身，或者 `--kdb` 指向的地方没有设计库；改命令即可 |
+| 3 | 输出到终端的内容超过 1 MiB 被截断，结果不完整；改为写到文件或管道 |
 
 完整的逐命令字段表见 [docs/JSON.md](docs/JSON.md)。
 
@@ -309,8 +317,9 @@ printf '%s\n' \
 
 批处理里一条命令的 `result`，和你单独运行这条命令的结果一模一样；批处理只是省去
 了重复加载，不会改变任何命令的输出。某条命令失败了（信号名不认识、时间不合
-法），会以 `"ok":false` 报告，但不会中断批处理，整轮照样以 `0` 退出。只有文件加
-载不了、或者命令流无法读取，才算致命错误。
+法），会以 `"ok":false` 报告，并在 `exit` 字段里给出它单独运行时的退出码，但不
+会中断批处理，整轮照样以 `0` 退出。会结束整轮的只有这几种：文件加载不了、命令流
+无法读取、结果写不出去（退出码 1），以及输出到终端被截断（退出码 3）。
 
 ## WLF 和 FSDB 实验性支持
 
@@ -378,7 +387,7 @@ rwave info sim.fsdb
 
 `trace` 回答两个问题：谁驱动了这条信号、谁又在读取它，并给出驱动语句的源码和
 `file:line`。只要 `.fsdb` 是用内置的 Verdi NPI 后端打开的，它就直接可用；换成别
-的文件会明确报错并退出 1。
+的文件会明确报错，退出码为 2。
 
 它是唯一一条不只读波形的命令，要读展开后的设计库，而这会占用一个 license，所以
 原来那个开关保留下来当总闸：设 `RWAVE_TRACE_EN=0` 就彻底禁用。

@@ -49,7 +49,7 @@ Point any command at a `.vcd`, `.fst`, `.ghw` (or `.wlf` / `.fsdb`) file:
 rwave info sim.fst
 
 # Show me the clock and reset
-rwave list sim.fst --filter clk,rst
+rwave list sim.fst --filter '*clk*,*rst*'
 
 # What happened between 100 ns and 200 ns?
 rwave dump sim.fst --begin 100ns --end 200ns --filter state
@@ -180,11 +180,18 @@ rwave --batch [--json] <file> [global-opts] < commands.txt
 - **Global flags.** `--json` for structured output, `--limit N` to cap rows
   (default 500, `0` = unlimited), `--verbose` for extra fields. A clipped result
   says so on its last line and carries a `hint` field under `--json`.
+  `-o/--output FILE` writes the whole result to FILE (only on success) and
+  prints a one-line receipt. Output to a terminal (stdout or the `-o` target)
+  stops after 1 MiB (exit 3); pipes, redirects and files get everything.
 - **Conditions** (`search`) are a comma-separated AND-list of `SIG=VAL`,
   `SIG!=VAL`, or `changed(SIG)`; values are decimal, hex (`0xff`), binary
   (`b1010`), or 4-state; a `?` in a binary literal is a don't-care bit, like `?`
   in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus; a
-  short literal pads with 0, so write every bit).
+  short literal pads with 0, so write every bit). A negative decimal is two's
+  complement in the signal's width (`cnt=-1`); a real signal compares numbers
+  (`temp=-1.5`, `dac=100`); on a string signal a number or bit literal
+  compares as text (`s=5`). A value the signal cannot hold (`state=99` on 4
+  bits, `bit=2`, `temp=b101`) is an error, not an empty result.
   `changed(SIG)` switches to event mode — the instants SIG
   transitions while the rest of the clause holds. Repeat `--condition` to OR the
   clauses (all must contain a `changed()` term, or none may); there is no
@@ -203,7 +210,7 @@ and they compose as a pipeline over each signal path in turn:
 | `--depth N`      | how far below that subtree's root to go (requires `--scope`) |
 | `--filter K1,K2` | which names to keep |
 | `--exclude K1,K2`| what to drop, applied last |
-| `--exact`        | make both match the whole name instead of a substring |
+| `--exact`        | a name no signal has matches nothing, instead of a substring (rarely needed) |
 
 ```sh
 # One block, not its submodules.
@@ -213,7 +220,7 @@ rwave list sim.fst --scope u_tx.u_fifo --depth 1
 rwave summary sim.fst --filter tx_fifo_push_err
 
 # Everything except the clock trees.
-rwave dump sim.fst --begin 1us --end 2us --exclude 'clk,*_clkgen.*'
+rwave dump sim.fst --begin 1us --end 2us --exclude '*clk*,*_clkgen.*'
 ```
 
 **Name vs. path.** A pattern with no separator matches a signal's **leaf name**;
@@ -221,34 +228,26 @@ one with a `.` or `/` matches its **whole path**. This matters: RTL names a CDC
 synchronizer after the signal it carries (`u_sync_<sig>`), so a path match for
 `tx_fifo_push_err` also pulls in every net inside that synchronizer. Match the
 leaf for the signal itself; add a dot (`--filter 'u_dma.'`) to address the
-hierarchy. A pattern without `*`/`?` matches by substring, one with them is an
-anchored glob; `[`/`]` are literal, matching is case-insensitive, and
-comma-separated patterns are ORed.
+hierarchy. A pattern with `*`/`?` is an anchored glob; `[`/`]` are literal,
+matching is case-insensitive, and comma-separated patterns are ORed.
 
-**`--exact` turns substring matching off.** A substring also catches every
-signal that merely starts with the name: `DtsmTrainVal0Min` brings
-`DtsmTrainVal0Min_strobe` with it, and a strobe that never moves then makes
-`summary` report a static row that reads as the wanted signal's. With `--exact`
-a wildcard-free pattern has to be the whole name. Patterns carrying `*`/`?` are
-anchored already, so the flag leaves them alone. It applies to `--filter`,
-`--exclude`, and `search`'s `--condition`/`--show` name resolution alike.
-
-**Buses need their range.** "The whole name" means the name as declared, and a
-vector's name carries its range suffix — so `--filter state --exact` matches
-nothing on a bus called `state[2:0]`. Write `--filter 'state[2:0]' --exact`, or
-drop `--exact` and let the substring match do it. `[` and `]` are literal in a
-pattern, so nothing beyond the shell's quoting is needed.
+**A name selects that signal; a fragment searches.** A wildcard-free pattern
+that is some signal's whole name, leaf or path, selects only the signals with
+that name: `--filter
+DtsmTrainVal0Min` leaves `DtsmTrainVal0Min_strobe` out, `--filter top.sig3`
+leaves `top.sig30` out. A bus range is optional (`state` names `state[2:0]`, not
+`state_next[2:0]`), and a path may start at any segment (`u_dma.req` names
+`top.u_dma.req`). A pattern that is no signal's name is a substring
+(`--filter fifo` finds every `*fifo*`), and `name*` asks for the prefix. The
+whole-name check looks only within `--scope`/`--depth`. The same rule applies
+to `--exclude` and to `search`'s `--condition`/`--show` names, so `--exclude clk`
+drops the signal named `clk`; `--exclude '*clk*'` drops every clock.
 
 **The output says what it caught.** `dump`, `summary`, `snapshot` and `compare` print
 `Matched N signals: <paths>` above the rows (a count alone past 10), and carry
 the same under a `matched` key in JSON. Where a waveform declares one signal
 under several names, both the matched name and the canonical name the rows
 carry are shown (`A -> B`), since the rows only ever use the canonical one.
-
-```sh
-# This signal, not the same-prefixed strobe.
-rwave summary sim.fst --filter DtsmTrainVal0Min --exact
-```
 
 **`--scope`** matches segment by segment (`u_fifo` never hits `u_fifo_ctrl`),
 takes a subtree with its descendants, and matches a path as a segment-aligned
@@ -274,7 +273,8 @@ agent rather than only by a person reading the terminal. Signal values render
 compactly for the same reason: a clean 1-bit logic signal as `0`/`1`, a clean
 multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), any value
 with an unknown bit as `b<bits>` at full width (`bx`, `bz`, `b01x0`), and
-real/string values verbatim. The `b` prefix is the one test for "has unknown
+reals as the shortest decimal that round-trips (`1.50` is `1.5`, `-0` is `0`,
+NaN is `NaN`), strings verbatim. The `b` prefix is the one test for "has unknown
 bits" — do not test for the letter `x`, every `0x` value contains it. The
 width is in each signal's metadata, so it is not re-encoded as hex padding.
 
@@ -289,9 +289,16 @@ present, in the documented order, carrying `null` / `0` / `[]` / `{}` when it
 has nothing to say. Test a key's value, never its presence. `--verbose` adds a
 further fixed set — you know whether you passed it.
 
-Failures are JSON too: on stderr, with a non-zero exit code, as
+Failures are JSON too: on stderr, as
 `{"command":"dump","ok":false,"error":"..."}`. stdout carries results only, so
 one parser covers both paths.
+
+| exit | meaning |
+|:--|:--|
+| 0 | answered; an empty result too, which says why (`hint`) |
+| 1 | the file or environment: cannot open/parse, the recorded design library, licence, a result that cannot be written |
+| 2 | the request: flags, names, conditions, times, `-o` naming a directory or the waveform, a `--kdb` holding no design library; change the command |
+| 3 | terminal output cut at 1 MiB; the result is incomplete, send it to a file or a pipe |
 
 The full per-command field reference is in [docs/JSON.md](docs/JSON.md).
 
@@ -335,8 +342,10 @@ command's usual text output:
 A batch `result` is identical to what the equivalent single command would
 produce — batch only saves the repeated load, it never changes a command's
 output. A command that fails (an unknown signal, an illegal time) is reported
-with `"ok":false` and does **not** stop the batch; the run still exits `0`. Only
-a file that cannot be loaded, or a command stream that cannot be read, is fatal.
+with `"ok":false`, and an `exit` field with the status it would have exited
+with alone, and does **not** stop the batch; the run still exits `0`. Only a
+file that cannot be loaded, a command stream that cannot be read, a result that
+cannot be written (exit 1) or a terminal cut (exit 3) ends the run.
 
 ## Experimental support for WLF and FSDB
 
@@ -410,7 +419,7 @@ rebuild the plugin when it does.
 
 `trace` answers "who drives this signal" and "what reads it", with the driving
 statement's source text and `file:line`. It is on wherever the built-in Verdi
-NPI backend is: on any other file it says so and exits 1.
+NPI backend is: on any other file it says so and exits 2.
 
 It is the one command that reads something other than the waveform — the
 elaborated design library, which costs a licence checkout — so the switch that

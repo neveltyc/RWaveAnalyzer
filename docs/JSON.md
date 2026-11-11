@@ -89,17 +89,35 @@ The second and fourth can combine when only part of the selection was dumped.
 
 ## Errors
 
-With `--json`, a failure is JSON too — on **stderr**, with a non-zero exit code
-(2 for a usage error, 1 for a runtime one). stdout carries results only.
+With `--json`, a failure is JSON too, on **stderr**. stdout carries results only.
+
+| exit | meaning |
+|---|---|
+| 0 | answered, an empty result included (its `hint` says why) |
+| 1 | the file or environment: cannot open/parse, the recorded design library, licence, a result that cannot be written |
+| 2 | the request: flags, names, conditions, times, `-o` naming a directory or the waveform, a `--kdb` holding no design library |
+| 3 | terminal output cut at 1 MiB; the result is incomplete |
 
 ```json
 {"command":"dump","ok":false,"error":"invalid time value 'banana'; ..."}
 ```
 
-`command` is `null` for every usage error (exit 2), including one whose message
-names the command: argument checking finishes before the command is handed on,
-and the error is reported from there. It is set for runtime errors (exit 1).
-A successful result has no `ok` key: the exit code already said so.
+`command` is `null` for an argv usage error, including one whose message names
+the command: argument checking finishes before the command is handed on, and
+the error is reported from there. It is set once the command runs, and `null`
+for a failure that ends a whole `--batch` run. A
+successful result has no `ok` key: the exit code already said so.
+
+## `--output`
+
+With `-o/--output FILE` the result object goes to FILE and stdout carries a
+receipt: `command` (`null` for `--batch`), `output` (absolute path), `bytes`,
+`lines`. FILE appears only when the run succeeds; a device, FIFO or
+descriptor path (`/dev/null`, `/dev/stdout`) is written in place, as the
+result is produced. A target that is a terminal (`/dev/tty`, `/dev/stdout` on
+a terminal) is cut at 1 MiB like stdout, with no receipt. A target that is
+stdout itself (`-o /dev/stdout > f`) gets no receipt either, since it would land
+in the result.
 
 ## Per-command keys
 
@@ -108,11 +126,13 @@ appears only under `--verbose`.
 
 ### info
 
-`file`, `size_bytes`, `timescale`, `date`, `version`, `comments[]`,
+`file`, `size_bytes`, `timescale`, `timescale_assumed`, `date`, `version`, `comments[]`,
 `signal_count`, `reference_count`, `synthesized_buses`, `var_types{}`,
 `time_min_ticks`, `time_min_h`, `time_max_ticks`, `time_max_h`,
 `duration_ticks`, `duration_h`, `scopes[]`
 
+`timescale_assumed` is `true` when the file declares no timescale (`timescale`
+is then `""`) and ticks are read as 1ps.
 `var_types` is a map from type name to count, so its keys come from the file.
 `comments` is always `[]` and `synthesized_buses` always `0`.
 
@@ -144,13 +164,16 @@ when `--end` was not given, meaning "to the end of the trace")
 `unknown`, `shown`, `truncated`, `total`, `total_is_exact`, `hint`, `rows[]`
 
 `rows[]`: `kind` (`active`/`static`/`undefined`), `path`, `value`, `changes`,
-`rise_count`, `fall_count`, `init`, `last`, `first_at_ticks`, `first_at_h`,
-`last_at_ticks`, `last_at_h`, `unique`, `unknown`, `width`&nbsp;*V*,
-`type`&nbsp;*V*
+`rise_count`, `fall_count`, `init`, `last`, `defined_at_ticks`,
+`defined_at_h`, `first_at_ticks`, `first_at_h`, `last_at_ticks`, `last_at_h`,
+`unique`, `unknown`, `width`&nbsp;*V*, `type`&nbsp;*V*
 
 `value` is the held value on a `static` row and `null` on an `active` one.
 `rise_count`/`fall_count` are `null` for anything but a 1-bit signal. A static
-row's `first_at_*`/`last_at_*` are `null`. `unique` counts distinct values in
+row's `first_at_*`/`last_at_*` are `null`. `defined_at_*` is when a signal
+undefined at the window start took its first value inside the window; that
+value is not a change, so `changes` agrees with `search` `changed()`.
+`unique` counts distinct values in
 the window: 1 for a static signal, 0 for an undefined one. `undefined` rows
 appear only under `--verbose`.
 
@@ -221,22 +244,17 @@ signal and `depth`/`root_signals` are `null`; in `subtree` mode `signal` is
 endpoint signals carry no `value` in that case — the one place where a flag
 adds a key to a nested row rather than a top-level one.
 
-## `--exact` and vectors
-
-`--exact` requires the whole leaf name, and a vector's leaf name includes its
-range suffix as declared. `--filter state --exact` therefore matches nothing on
-a bus called `state[2:0]`; write `--filter 'state[2:0]' --exact`, or drop
-`--exact` and let the substring match do it. `[` and `]` are literal characters
-in a pattern, so no quoting beyond the shell's is needed.
-
 ## Batch mode
 
 `--batch --json` frames each result as one NDJSON line:
 
 ```json
 {"id":"1","ok":true,"result":{ …the single-command object… }}
-{"id":"2","ok":false,"error":"invalid command: 'bogus' (choose from …)"}
+{"id":"2","ok":false,"error":"invalid command: 'bogus' (choose from …)","exit":2}
 ```
+
+A failed line's `exit` is the status the line would have exited with on its
+own (2 the request, 1 the file or environment); the run itself still exits 0.
 
 `result` is byte-identical to the equivalent single-command `--json` output,
 `command` field included. Results come back in input order.

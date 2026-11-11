@@ -194,7 +194,9 @@ affect leaf names, which are never obtained by splitting.
   plugin and freed by rwave calling `vtable.free_err()`. rwave never
   calls `free()` directly on plugin memory.
 - `value_buf` passed to `RwaveEmit` is borrowed for the callback only.
-  rwave copies what it keeps.
+  rwave copies what it keeps. A `RWAVE_VK_REAL` value is parsed after
+  trimming whitespace; text that does not parse reads as NaN, and every NaN
+  (and `-0`) is kept in one canonical form.
 - The `RwaveVarDecl* buf` passed to `var_decls` is rwave's; the plugin
   fills it but does not retain the pointer.
 

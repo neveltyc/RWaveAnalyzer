@@ -84,7 +84,13 @@ or `changed(SIG)`.
   the error lists candidates — add `--scope`/`--exclude` to narrow the
   lookup, or give the full path (a full path bypasses selection).
 - Values: decimal (`5`), hex (`0xff`), binary (`b1010` / `0b1010`),
-  4-state (`b1x0z`), or bare `x`/`z`.
+  4-state (`b1x0z`), or bare `x`/`z`. Negative decimal = two's complement in
+  the signal's width (`cnt=-1`). Real signals: any decimal or real number,
+  compared numerically (`temp=-1.5`, `dac=100`, `1e-3`). String signals: a
+  number or bit literal compares as text (`s=5`); other text is not a target.
+- A value the signal cannot hold is an error (exit 2), not "No interval":
+  more bits than the width (`state=99` on 4 bits, `bit=2`), a bit pattern on a
+  real (`temp=b101`), a level term on an event (use `changed(ev)`).
 - **Don't-care bits:** `?` in a binary literal matches any bit value, like
   `?` in a Verilog `casez` item — `status=b?????1??` holds wherever bit 2 of an 8-bit
   `status` is 1, and `state=b10??` on a 4-bit `state` tests its top two bits.
@@ -117,10 +123,10 @@ fields you'll usually parse out.
 
 | Command | Common invocation | Useful JSON fields |
 |---|---|---|
-| `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `scopes[]`, `var_types` |
+| `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `timescale_assumed`, `scopes[]`, `var_types` |
 | `list` | `rwave --json list <F> [selection]` | `signals[].path`, `.width`, `.type` |
 | `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `window{}`, `matched`, `events[].time_ticks`, `.time_h`, `.path`, `.value` |
-| `summary` | `rwave --json summary <F> [selection]` | `window{}`, `matched`, `active`, `static`, `unknown`, `rows[].path`, `.kind`, `.changes`, `.rise_count`/`.fall_count`, `.init`, `.last`, `.unknown` |
+| `summary` | `rwave --json summary <F> [selection]` | `window{}`, `matched`, `active`, `static`, `unknown`, `rows[].path`, `.kind`, `.changes`, `.rise_count`/`.fall_count`, `.init`, `.defined_at_ticks`, `.last`, `.unknown` |
 | `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `at_ticks`, `at_h`, `known`, `undefined`, `signals[].path`, `.value`, `.undefined` |
 | `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `t1_ticks`, `t1_h`, `t2_ticks`, `t2_h`, `unchanged`, `diffs[].path`, `.at_t1`, `.at_t2` |
 | `search` | see decision tree above | `mode`, `window{}`, `rows[].begin_ticks`, `.end_ticks`, `.values{}` |
@@ -131,8 +137,7 @@ Every result also carries `command`, `shown`, `truncated`, `total`,
 `total_is_exact` and `hint`. Full field reference: `docs/JSON.md`.
 
 `tree` works on every format. `trace` works only on `.fsdb` via the built-in NPI
-backend and exits 1 elsewhere — a capability limit, not a transient failure, so
-do not retry it on another file format.
+backend and exits 2 elsewhere. Do not retry it on another file format.
 
 `trace` rules:
 
@@ -163,7 +168,7 @@ as `--batch` defaults. `info` describes the file and ignores them.
 | `--depth N` | at most N levels below the `--scope` root; a signal directly in it is depth 1. Requires `--scope` |
 | `--filter K1,K2` | keep matching signals |
 | `--exclude K1,K2` | drop matching signals; applied last |
-| `--exact` | make a wildcard-free `--filter`/`--exclude` pattern match the whole name, not a substring |
+| `--exact` | a wildcard-free name no signal has matches nothing (no substring fallback); rarely needed |
 
 **A pattern with no separator matches the leaf name; one containing a `.` or
 `/` matches the whole path.** This is the rule to internalize. RTL names scopes after signals —
@@ -180,13 +185,16 @@ you knowing the path from the root.
 
 If `list --filter X` returns far more rows than expected, **do not just raise
 `--limit`** — narrow structurally with `--scope`/`--depth`, subtract with
-`--exclude`, or pin the name with `--exact`.
+`--exclude`, or give the full name.
 
-`--filter NAME` without `--exact` also matches `NAME_strobe`, `NAME_q`, and any
-other signal containing it. Use `--exact` whenever you mean one named signal —
-but a vector's name includes its range, so it is `--filter 'state[2:0]' --exact`,
-never `--filter state --exact`, which matches nothing. `--exact` narrows
-`search`'s `--condition`/`--show` names the same way.
+A wildcard-free pattern that is a signal's whole name (leaf or path, bus range
+optional) selects only the signals with that name: `--filter state` is `state[2:0]`, not
+`state_next[2:0]`; `--filter top.sig3` is not `top.sig30`; a path may start at
+any segment (`u_dma.req`). A pattern that is no signal's name matches as a
+substring (`--filter fifo`). For a prefix write `name*`.
+The whole-name check looks only inside `--scope`/`--depth`. Same rule for
+`--exclude` (`--exclude clk` drops only `clk`; use `'*clk*'` for all) and for
+`search`'s `--condition`/`--show` names.
 
 Selection is per path: a signal is kept when any one of its paths clears every
 option, so excluding a synchronizer never costs you the status bit wired into
@@ -220,7 +228,7 @@ printf '%s\n' \
 
 - One command per line — exactly what you'd type after `rwave`, minus the file
   (the file is given once on the `--batch` line). **Pass `--json`**: output is
-  one NDJSON object per line, `{"id","ok","result"}` or `{"id","ok","error"}`,
+  one NDJSON object per line, `{"id","ok","result"}` or `{"id","ok","error","exit"}`,
   in input order.
 - `id` is the trailing `#label` if present, else a 1-based line number. Correlate
   by **input order** (authoritative) or `id`. Blank and `#`-comment lines are
@@ -228,8 +236,9 @@ printf '%s\n' \
 - Each `result` is byte-identical to the equivalent single-command `--json`
   output — parse it exactly the same way.
 - A failing command is `"ok":false` and does **not** stop the batch; the process
-  still exits `0`. Check each line's `ok`. Only a bad file or an unreadable
-  stream is fatal (non-zero exit).
+  still exits `0`. Check each line's `ok`. Only a bad file, an unreadable
+  stream or an unwritable result (exit 1), or a terminal cut (exit 3), ends
+  the run.
 - Plan the full list up front — batch does not let you see one result before
   choosing the next. For adaptive, read-then-decide flows, use separate calls.
 
@@ -311,7 +320,7 @@ primary input.
 ### Clock/reset sanity
 
 ```
-summary --filter clk,rst,reset
+summary --filter '*clk*,*rst*,*reset*'
 # clk should toggle with balanced rise/fall
 # rst should be static after the initial assertion
 # noisy? --exclude '*_clkgen.*' drops generated clock trees
@@ -347,8 +356,8 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
 - **Check `matched` before reading rows.** `dump`, `summary`, `snapshot` and
   `compare` carry `matched: {count, paths}` whenever a selection option was given
   (`paths` stops at 10; `count` is exact). `count` larger than intended
-  means the pattern over-matched — re-run with `--exact`, not with a
-  bigger `--limit`. Absent when no selection option was passed.
+  means the pattern over-matched — re-run with a full name or a narrower
+  glob, not with a bigger `--limit`. Absent when no selection option was passed.
 - **Rows carry the canonical path.** A signal declared under several names
   is always labelled with one of them. When the matched name differs, the
   `hint` says so; do not assume the row path is the string you searched for.
@@ -361,9 +370,18 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
 - **A flag the command does not read is an error.** `list --begin 1ns`,
   `dump --at 1ns`, `info --filter clk` all exit 2. `--begin`/`--end` are
   `dump`/`summary`/`search`; `--at` is `snapshot`/`compare`/`trace`.
-- **Exit code is non-zero on errors.** 2 for a usage error, 1 for a runtime
-  one. Without `--json` the message is one line on stderr starting with
-  `Error:`.
+- **Exit code.** 0 answered (empty results too; read `hint`). 1 the file or
+  environment (cannot open/parse, the recorded design library, licence, a
+  result that cannot be written). 2 the request is wrong (flags, names,
+  conditions, times, `-o` naming a directory or the waveform, a `--kdb`
+  holding no design library): fix the command. 3 terminal output cut at
+  1 MiB. In `--batch`, a failed line carries the same number as `exit`.
+  Without `--json` the message is one line on stderr starting with `Error:`
+  (`rwave: error:` for an argv usage error).
+- **Big results: `-o FILE`.** `--limit 0` plus `-o out.json` writes the whole
+  result to the file (only on success) and prints a receipt
+  `{"command","output","bytes","lines"}`; read the file in pieces. In
+  `--batch`, `-o` goes on the `--batch` line and covers the whole run.
 - **`--json` everywhere.** Mixing text-mode parsing in is the most common
   source of fragility. Pass `--json` on every invocation.
 - **Shell quoting.** Double-quote conditions (`--condition "changed(req),ready=0"`
@@ -380,7 +398,8 @@ see e.g. a push flag and data bus transition side-by-side in one timeline.
 - **Value format.** Clean 1-bit: `0`/`1`. Clean multi-bit: `0x<hex>`
   (lower-case, leading zeros stripped — `0x4`, not `0x00000004`). Any value with
   an unknown bit, 1-bit included: `b<bits>` at full width (`bx`, `bz`, `b01x0`).
-  Real/string verbatim. Width is in the signal metadata, not the value.
+  Real: shortest round-trip decimal (`1.5`, `0` for `-0`, `NaN`). String
+  verbatim. Width is in the signal metadata, not the value.
 
   ```python
   is_unknown = value.startswith('b')    # 'bx', 'bz', 'b01x0'

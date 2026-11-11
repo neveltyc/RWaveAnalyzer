@@ -197,9 +197,9 @@ tree takes --scope and --depth only):
   --filter K1,K2    Keep signals matching any pattern; omit to keep all.
   --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
                     its own.
-  --exact           A wildcard-free pattern no signal is named must match nothing
-                    instead of falling back to a substring. Rarely needed. Also
-                    applies to search's --condition/--show names.
+  --exact           A wildcard-free pattern that is no signal's name matches
+                    nothing instead of falling back to a substring. Rarely
+                    needed. Also applies to search's --condition/--show names.
 
 tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
 N levels below the matched scope root, tree counting scopes where list counts
@@ -210,10 +210,10 @@ Patterns are comma-separated and case-insensitive. One with no separator matches
 the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
 instance named after it; one containing a '.' or '/' matches the whole path. Either
 way, with no '*' or '?' a pattern that is a signal's whole name (its bus range
-optional: 'state' names state[2:0]) selects just that signal, so 'req' means req
-and not req_strobe; a pattern no signal is named is a substring. '*'/'?' make it
-an anchored glob ('[' and ']' stay literal, for bus ranges). An empty value ('')
-means "not given".
+optional: 'state' names state[2:0]) selects only signals of that name: 'req' is req
+and not req_strobe; a pattern that is no signal's name is a substring. '*'/'?'
+make it an anchored glob ('[' and ']' stay literal, for bus ranges). An empty
+value ('') means "not given".
 
 dump, summary, snapshot and compare print what the selection caught before the
 rows —
@@ -233,8 +233,8 @@ Global options:
   --batch       Load <file> once, then read commands (one per line) from stdin
   -o, --output FILE
                 Write the whole result to FILE (only on success); stdout gets a
-                one-line receipt. A terminal, stdout or FILE, stops after 1 MiB
-                (exit 3); pipes, redirects and files get everything.
+                one-line receipt. A terminal (stdout or the -o target) stops
+                after 1 MiB (exit 3); pipes, redirects and files get everything.
   --version     Print version and exit
   -h, --help    Print this help and exit
 
@@ -244,9 +244,10 @@ are skipped and a trailing '#tag' names a result. A line is what you would type
 after 'rwave' minus the file: 'list --filter clk', 'dump --begin 1us --end 2us'.
 
 Results come back in input order: with --json one NDJSON line each,
-{{"id","ok","result"|"error","exit"}}; without it a '#label' header
-before each. A failed line is ok:false with the exit status it would have
-alone, and does not stop the run, which still exits 0 — check every line.
+{{"id","ok","result"|"error","exit"}}; without it a '#label' header before
+each. A failed line is ok:false with the exit status it would have alone, and
+does not stop the run, which still exits 0 — check every line. A result that
+cannot be written (1) or a terminal cut (3) ends the run.
 [global-opts] are per-command defaults; a line overrides one, or lifts it with
 an empty value (--filter '').
 
@@ -261,9 +262,10 @@ A flag a command does not read is an error, not silence, so a mistyped time is
 reported rather than ignored.
 
 Exit status: 0 answered (an empty result too; it says why), 1 the file or
-environment failed (open/parse, design library, licence, an --output file that
-cannot be created), 2 the request is wrong (flags, names, conditions, times, an
---output naming a directory or the waveform), 3 terminal output cut.
+environment failed (open/parse, the recorded design library, licence, a result
+that cannot be written), 2 the request is wrong (flags, names, conditions,
+times, an --output naming a directory or the waveform, a --kdb holding no
+design library), 3 terminal output cut.
 "#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
