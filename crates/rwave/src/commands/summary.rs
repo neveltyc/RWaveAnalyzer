@@ -4,6 +4,7 @@
 //! `summary` command: per-signal activity stats (changes, edges, first/last,
 //! unique values) over a window, grouped active/static/undefined.
 
+use crate::backend::RawValue;
 use crate::cli::Args;
 use crate::format::{bits_have_unknown, fmt_time, fmt_val};
 use crate::json::{Json, Obj};
@@ -19,6 +20,10 @@ struct SummaryRow {
     fall_count: Option<usize>,
     init: String,
     last: String,
+    /// When a signal undefined at the window start took its first value inside
+    /// the window. That first observation defines the signal; it is not a
+    /// change, so `changes` agrees with `search changed()`.
+    defined_at: Option<i64>,
     first_at: Option<i64>,
     last_at: Option<i64>,
     unique: usize,
@@ -54,6 +59,7 @@ fn summary_rows(
     struct Stats {
         sid: Sid,
         changes: usize,
+        defined_at: Option<i64>,
         first_at: Option<i64>,
         last_at: Option<i64>,
         initial: Option<String>,
@@ -96,6 +102,7 @@ fn summary_rows(
         };
 
         let mut changes = 0usize;
+        let mut defined_at = None;
         let mut first_at = None;
         let mut last_at = None;
         // Track unique value representations. Bits/Str/Event borrow their stored
@@ -120,15 +127,24 @@ fn summary_rows(
         for i in start..upper {
             let v = &tr.values[i];
             let cur = bits_view(v);
+            if !unknown {
+                unknown = cur.is_some_and(bits_have_unknown);
+            }
+            // Undefined at the window start: the first value defines the
+            // signal rather than changing it, as `search changed()` reads it.
+            // An event has no level to define; every trigger counts.
+            if i == start && base_pos.is_none() && !matches!(v, RawValue::Event) {
+                defined_at = Some(tr.times[i]);
+                prev = cur;
+                uniq.insert(uniq_key(v));
+                continue;
+            }
             match (prev, cur) {
                 (Some("0"), Some("1")) => rise += 1,
                 (Some("1"), Some("0")) => fall += 1,
                 _ => {}
             }
             changes += 1;
-            if !unknown {
-                unknown = cur.is_some_and(bits_have_unknown);
-            }
             if first_at.is_none() {
                 first_at = Some(tr.times[i]);
             }
@@ -144,7 +160,7 @@ fn summary_rows(
             initial.clone()
         };
         let unique_count = uniq.len();
-        let defined = base_pos.is_some() || changes > 0;
+        let defined = base_pos.is_some() || defined_at.is_some() || changes > 0;
         if !defined {
             undefined.push(sid);
             return;
@@ -152,6 +168,7 @@ fn summary_rows(
         stats_list.push(Stats {
             sid,
             changes,
+            defined_at,
             first_at,
             last_at,
             initial,
@@ -191,6 +208,7 @@ fn summary_rows(
             fall_count: if scalar { s.fall_count } else { None },
             init,
             last,
+            defined_at: s.defined_at,
             first_at: s.first_at,
             last_at: s.last_at,
             unique: s.unique_count,
@@ -292,6 +310,7 @@ fn build_undef_rows(wave: &Wave, undef_sids: &[Sid]) -> Vec<SummaryRow> {
                 fall_count: if info.width == 1 { Some(0) } else { None },
                 init: "(undef)".to_string(),
                 last: "(undef)".to_string(),
+                defined_at: None,
                 first_at: None,
                 last_at: None,
                 unique: 0,
@@ -441,6 +460,10 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
         }
         // Text rows carry the same sparse marker as the JSON `unknown` field.
         let mark = if r.unknown { " unknown" } else { "" };
+        let defined = match r.defined_at {
+            Some(t) => format!(" defined@{}", fmt_time(t, ts)),
+            None => String::new(),
+        };
         match r.kind {
             "active" => {
                 let edge = match r.rise_count {
@@ -449,13 +472,14 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                 };
                 if args.verbose {
                     println!(
-                        "  {} w={} {} chg={}{} init={} last={} first@{} last@{} uniq={}{}",
+                        "  {} w={} {} chg={}{} init={}{} last={} first@{} last@{} uniq={}{}",
                         ljust(&r.path, 45),
                         r.width,
                         r.type_str,
                         r.changes,
                         edge,
                         r.init,
+                        defined,
                         r.last,
                         r.first_at.map(|t| fmt_time(t, ts)).unwrap_or_else(|| "-".to_string()),
                         r.last_at.map(|t| fmt_time(t, ts)).unwrap_or_else(|| "-".to_string()),
@@ -464,11 +488,12 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
                     );
                 } else {
                     println!(
-                        "  {} chg={}{} init={} last={}{}",
+                        "  {} chg={}{} init={}{} last={}{}",
                         ljust(&r.path, 45),
                         r.changes,
                         edge,
                         r.init,
+                        defined,
                         r.last,
                         mark
                     );
@@ -477,18 +502,20 @@ pub(super) fn text_summary(wave: &mut Wave, args: &Args) -> Result<(), String> {
             "static" => {
                 if args.verbose {
                     println!(
-                        "  {} w={} {} value={}{}",
+                        "  {} w={} {} value={}{}{}",
                         ljust(&r.path, 45),
                         r.width,
                         r.type_str,
                         r.value.as_deref().unwrap_or(""),
+                        defined,
                         mark
                     );
                 } else {
                     println!(
-                        "  {} value={}{}",
+                        "  {} value={}{}{}",
                         ljust(&r.path, 45),
                         r.value.as_deref().unwrap_or(""),
+                        defined,
                         mark
                     );
                 }
@@ -542,6 +569,7 @@ fn summary_row_json(r: &SummaryRow, verbose: bool, ts: f64) -> Json {
         .push("last", Json::str(r.last.clone()));
     // A static row has no first/last change and no unique-value count; it
     // still carries the keys, as nulls and a zero.
+    o = push_opt_time(o, "defined_at", r.defined_at, ts);
     o = push_opt_time(o, "first_at", r.first_at, ts);
     o = push_opt_time(o, "last_at", r.last_at, ts);
     o = o
