@@ -78,12 +78,6 @@ impl SignalInfo {
             .zip(self.alias_scopes.iter())
             .map(|(p, s)| (p.as_str(), s.as_str()))
     }
-
-    /// Does any alias equal `pattern_lower` (which must already be lower-cased)?
-    /// Used for the exact-full-path lookups that bypass pattern matching.
-    pub fn has_exact_path_ci(&self, pattern_lower: &str) -> bool {
-        self.aliases.iter().any(|p| p.to_lowercase() == pattern_lower)
-    }
 }
 
 /// Build a bare [`SignalInfo`] from `(path, scope)` pairs, for tests that

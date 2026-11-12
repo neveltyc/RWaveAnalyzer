@@ -32,6 +32,42 @@
 /// set, so the two cannot disagree about what counts as a hierarchy.
 pub(crate) const SEPARATORS: [char; 2] = ['.', '/'];
 
+/// A lower-cased path with every `/` read as `.`, so a pattern written with
+/// either separator reaches a hierarchy written with the other.
+pub(crate) fn fold_seps(path_lower: &str) -> std::borrow::Cow<'_, str> {
+    if path_lower.contains('/') {
+        std::borrow::Cow::Owned(path_lower.replace('/', "."))
+    } else {
+        std::borrow::Cow::Borrowed(path_lower)
+    }
+}
+
+/// How closely a name written as a full path must spell a signal's path.
+/// Callers try [`SPELLINGS`] in order and stop at the first that finds
+/// anything, so a literal spelling always wins over a looser reading of it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Spelling {
+    /// Case-insensitive equality.
+    Literal,
+    /// `/` and `.` alike.
+    Separators,
+    /// `/` and `.` alike, bus range optional.
+    NoRange,
+}
+
+pub(crate) const SPELLINGS: [Spelling; 3] = [Spelling::Literal, Spelling::Separators, Spelling::NoRange];
+
+impl Spelling {
+    /// Does `pat_lower` spell `path_lower`? Both must be lower-cased.
+    pub(crate) fn spells(self, path_lower: &str, pat_lower: &str) -> bool {
+        match self {
+            Spelling::Literal => path_lower == pat_lower,
+            Spelling::Separators => fold_seps(path_lower) == fold_seps(pat_lower),
+            Spelling::NoRange => names_exactly(&fold_seps(path_lower), &fold_seps(pat_lower)),
+        }
+    }
+}
+
 /// Maximum length of a single filter pattern (DoS guard).
 pub(crate) const MAX_FILTER_PATTERN_LEN: usize = 256;
 /// Maximum number of wildcard chars in one pattern (regex-blowup guard).
@@ -138,11 +174,10 @@ impl Filters {
             }
             let lower = collapsed.to_lowercase();
             // A separator in the pattern is the user reaching for the hierarchy;
-            // with none, they are naming a signal and mean the leaf. Both
-            // separators count: the built-in FSDB backend emits '/'-separated
-            // paths, and a pattern like `top/u_dma/*` addresses a hierarchy just
-            // as plainly as its dotted equivalent.
+            // with none, they are naming a signal and mean the leaf. Either
+            // separator counts, and the two are interchangeable on paths.
             let domain = if lower.contains(SEPARATORS) { Domain::Path } else { Domain::Leaf };
+            let lower = fold_seps(&lower).into_owned();
             let kind = if lower.contains('*') || lower.contains('?') {
                 PatKind::Glob(compile_glob(&lower))
             } else {
@@ -171,17 +206,21 @@ impl Filters {
     /// Does any pattern match? Both haystacks must already be lower-cased —
     /// and lower-cased *separately*: `to_lowercase` can change a string's byte
     /// length, so a leaf can never be sliced out of an already-lowered path
-    /// using offsets measured on the original.
-    pub fn matches_lower(&self, path_lower: &str, leaf_lower: &str) -> bool {
+    /// using offsets measured on the original. The path must also be passed
+    /// through [`fold_seps`].
+    pub fn matches_lower(&self, path_key: &str, leaf_lower: &str) -> bool {
         for p in &self.pats {
             let hay = match p.domain {
-                Domain::Path => path_lower,
+                Domain::Path => path_key,
                 Domain::Leaf => leaf_lower,
             };
+            // A glob, like a whole name, may leave the bus range off.
             let hit = match &p.kind {
                 PatKind::Plain { lit, exact: true } => p.domain.names(hay, lit),
                 PatKind::Plain { lit, exact: false } => hay.contains(lit.as_str()),
-                PatKind::Glob(toks) => glob_match(toks, hay),
+                PatKind::Glob(toks) => {
+                    glob_match(toks, hay) || strip_range(hay).is_some_and(|b| glob_match(toks, b))
+                }
             };
             if hit {
                 return true;
@@ -204,7 +243,7 @@ impl Filters {
             return;
         }
         for (path, leaf) in names {
-            let (path, leaf) = (path.to_lowercase(), leaf.to_lowercase());
+            let (path, leaf) = (fold_seps(&path.to_lowercase()).into_owned(), leaf.to_lowercase());
             pending.retain(|i| {
                 let p = &mut self.pats[*i];
                 let hay = match p.domain {
@@ -228,7 +267,7 @@ impl Filters {
     /// [`matches_lower`](Self::matches_lower) for callers that hold the
     /// original-case strings and are not matching in a hot loop.
     pub fn matches_path_leaf(&self, path: &str, leaf: &str) -> bool {
-        self.matches_lower(&path.to_lowercase(), &leaf.to_lowercase())
+        self.matches_lower(&fold_seps(&path.to_lowercase()), &leaf.to_lowercase())
     }
 }
 
@@ -253,13 +292,12 @@ impl Domain {
 /// vector's name carries its range (`state[2:0]`), which the user should not
 /// have to type to name it.
 fn names_exactly(hay: &str, lit: &str) -> bool {
-    if hay == lit {
-        return true;
-    }
-    match hay.strip_suffix(']').and_then(|h| h.rfind('[').map(|i| &hay[..i])) {
-        Some(base) => base == lit,
-        None => false,
-    }
+    hay == lit || strip_range(hay) == Some(lit)
+}
+
+/// `hay` without its trailing bus range (`state[2:0]` → `state`), if it has one.
+fn strip_range(hay: &str) -> Option<&str> {
+    hay.strip_suffix(']').and_then(|h| h.rfind('[').map(|i| &hay[..i]))
 }
 
 fn collapse_stars(s: &str) -> String {
@@ -446,6 +484,44 @@ mod tests {
         let f = Filters::parse_csv("clk").unwrap();
         assert!(m(&f, "top.clk_div"));
         assert!(!m(&f, "top.clk_gen.enable"));
+    }
+
+    #[test]
+    fn a_glob_may_leave_the_bus_range_off() {
+        for pat in ["*data", "dat?", "*.data", "top.*"] {
+            let f = Filters::parse_csv(pat).unwrap();
+            assert!(f.matches_path_leaf("top.data[7:0]", "data[7:0]"), "{pat}");
+        }
+        let f = Filters::parse_csv("*data[7:0]").unwrap();
+        assert!(f.matches_path_leaf("top.data[7:0]", "data[7:0]"), "the range may still be written");
+        let f = Filters::parse_csv("*dat").unwrap();
+        assert!(!f.matches_path_leaf("top.data[7:0]", "data[7:0]"), "still anchored");
+    }
+
+    #[test]
+    fn a_full_path_spelling_prefers_the_literal_reading() {
+        assert!(Spelling::Literal.spells("top.\\a/b ", "top.\\a/b "));
+        assert!(!Spelling::Literal.spells("top.\\a.b ", "top.\\a/b "));
+        assert!(Spelling::Separators.spells("top.u.cnt[3:0]", "top/u/cnt[3:0]"));
+        assert!(!Spelling::Separators.spells("top.u.cnt[3:0]", "top.u.cnt"));
+        assert!(Spelling::NoRange.spells("top.u.cnt[3:0]", "top/u/cnt"));
+        assert!(!Spelling::NoRange.spells("top.u.cnt_q[3:0]", "top.u.cnt"));
+    }
+
+    #[test]
+    fn the_two_separators_are_interchangeable_on_paths() {
+        for (pat, path) in [
+            ("top/u_dma/req", "top.u_dma.req"),
+            ("*u_dma/*", "top.u_dma.req"),
+            ("u_dma.req", "top/u_dma/req"),
+            ("top.u_dma.*", "top/u_dma/req"),
+        ] {
+            let f = Filters::parse_csv(pat).unwrap();
+            assert!(f.matches_path_leaf(path, "req"), "{pat} should match {path}");
+        }
+        let f = primed("top/u_dma/req", &[("top.u_dma.req", "req"), ("top.u_dma.req_q", "req_q")]);
+        assert!(f.matches_path_leaf("top.u_dma.req", "req"));
+        assert!(!f.matches_path_leaf("top.u_dma.req_q", "req_q"), "whole-name check folds too");
     }
 
     #[test]

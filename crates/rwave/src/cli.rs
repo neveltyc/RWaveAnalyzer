@@ -11,7 +11,7 @@
 //! third-party arg parser to keep the static binary small and the error text
 //! under our control.
 
-/// Default result limit when neither `--limit` nor `--verbose` is given.
+/// Default result limit when none of `--limit`, `--verbose`, `-o` is given.
 pub const DEFAULT_LIMIT: usize = 500;
 
 /// Which subcommand to run.
@@ -161,115 +161,128 @@ pub enum ParseOutcome {
 /// column alignment below cannot drift from what a user sees.
 pub fn help_text() -> String {
     format!(
-        r#"rwave {ver} — AI-agent-friendly VCD/FST waveform analyzer
+        r#"rwave {ver} — waveform query CLI for RTL debug, CI and AI agents
+Reads VCD, FST, GHW; WLF and FSDB on linux-amd64. Full manual: rwave --help --verbose
 
-Usage: rwave [--json] [--limit N] [--verbose] <command> <file> [options]
-       rwave --batch [--json] <file> [global-opts] < commands.txt
+Usage: rwave [global options] <command> <file> [options]
+       rwave --batch [global options] <file> [default options] < commands.txt
 
 Commands:
-  info      <file>                              File overview (timescale, signals, time span, scopes)
-  list      <file> [selection]                  List signals (one row per alias path)
+  info      <file>
+            Timescale, signal counts, time span, scopes.
+  list      <file> [selection]
+            Signal paths, widths, types; one row per alias path.
   dump      <file> [--begin T] [--end T] [selection]
-                                                Print value-change events in time order
+            Every value change in the window, in time order.
   summary   <file> [--begin T] [--end T] [selection]
-                                                Per-signal stats: change count, edges, static detection
-  snapshot  <file> --at T [selection]           Known signal values at a given time point
-  compare   <file> --at T1,T2 [selection]       Diff signal values between two time points
-  search    <file> --condition C [--condition C2 ...] [--show K1,K2] [--begin T] [--end T]
-                                                Conditional search; comma = AND within a --condition, repeat --condition to OR the clauses;
-                                                a changed(SIG) term fires at SIG's transitions (event mode)
+            Per signal: change count, rising/falling edges, first and last value,
+            whether an x/z bit appeared.
+  snapshot  <file> --at T [selection]
+            Every selected signal's value at T.
+  compare   <file> --at T1,T2 [selection]
+            Signals whose value differs between T1 and T2.
+  search    <file> --condition C [--condition C ...] [--show K1,K2] [--begin T] [--end T]
+            Spans where C holds; with --show, split wherever a shown value
+            changes; with changed(SIG) in C, the instants SIG transitions.
   tree      <file> [SCOPE] [--depth N] [--of SIGNAL]
-                                                Browse the hierarchy: child scopes of SCOPE, or --of's full ancestor chain
+            Child scopes of SCOPE (default depth 1, counting scopes), or the
+            ancestor chain of --of SIGNAL.
   trace     <file> SIGNAL [--load] [--at T] [--control] [--top NAME] [--kdb DIR]
-                                                What drives SIGNAL (--load: what reads it), with file:line. Needs an FSDB
-                                                opened through the built-in Verdi NPI backend. The design library is read
-                                                from the FSDB itself; --kdb is only for when it has moved. On by default;
-                                                RWAVE_TRACE_EN=0 turns it off.
-
-Selection options (all five on every command except info, tree, and trace;
-tree takes --scope and --depth only):
-  --scope P1,P2     Restrict to hierarchy subtrees. A bare name matches an instance
-                    name ('*' and '?' allowed); a path matches as a segment-aligned
-                    suffix of a scope path, so 'u_tx.u_fifo' finds that subtree
-                    wherever it sits.
-  --depth N         Keep signals at most N levels below the matched --scope root; a
-                    signal sitting directly in the scope is depth 1. Requires --scope.
-  --filter K1,K2    Keep signals matching any pattern; omit to keep all.
-  --exclude K1,K2   Drop signals matching any pattern; applied last, and usable on
-                    its own.
-  --exact           A wildcard-free pattern that is no signal's name matches
-                    nothing instead of falling back to a substring. Rarely
-                    needed. Also applies to search's --condition/--show names.
-
-tree reads --scope (or its SCOPE positional) and --depth with the same meaning:
-N levels below the matched scope root, tree counting scopes where list counts
-signals. Unlike elsewhere, tree accepts --depth without a scope, measuring from
-the root. It ignores --filter and --exclude.
-
-Patterns are comma-separated and case-insensitive. One with no separator matches
-the signal's leaf name, so 'tx_err' finds the signal and not the synchronizer
-instance named after it; one containing a '.' or '/' matches the whole path. Either
-way, with no '*' or '?' a pattern that is a signal's whole name (its bus range
-optional: 'state' names state[2:0]) selects only signals of that name: 'req' is req
-and not req_strobe; a pattern that is no signal's name is a substring. '*'/'?'
-make it an anchored glob ('[' and ']' stay literal, for bus ranges). An empty
-value ('') means "not given".
-
-dump, summary, snapshot and compare print what the selection caught before the
-rows —
-"Matched N signals: ..." — so a pattern that reached further than intended is
-visible without a second query. Where a waveform declares one signal under
-several names, the matched name and the name the rows carry are both shown.
-
-Selection is decided per alias path: a signal is kept when any one of its paths
-clears every option, and list prints only the paths that did. search resolves its
---condition and --show names within the same selection, which is often what makes
-an ambiguous name unique; a name spelled as a full path bypasses selection.
+            What drives SIGNAL (--load: what reads it), with file:line. FSDB
+            through the built-in Verdi NPI backend only.
 
 Global options:
-  --json        Output compact structured JSON instead of text
-  --limit N     Max rows/records to emit; default {lim}; 0 = unlimited
-  --verbose     Show extra fields; if --limit is omitted, disables truncation
-  --batch       Load <file> once, then read commands (one per line) from stdin
-  -o, --output FILE
-                Write the whole result to FILE (only on success); stdout gets a
-                one-line receipt. A terminal (stdout or the -o target) stops
-                after 1 MiB (exit 3); pipes, redirects and files get everything.
-  --version     Print version and exit
-  -h, --help    Print this help and exit
+  --json             Compact JSON per command; errors are JSON on stderr
+  --limit N          Max rows, default {lim} (unlimited with -o or --verbose); 0 = unlimited
+  --verbose          Extra fields
+  -o, --output FILE  Whole result to FILE (only on success); stdout gets a receipt
+  --batch            Load <file> once; run one command per stdin line
+  --version          Print version
+  -h, --help         This help; with --verbose, the full manual
 
-Batch mode (--batch): open the file once, then run one command per stdin line;
-a large waveform is slow to open, so pay that cost once. Blank and '#' lines
-are skipped and a trailing '#tag' names a result. A line is what you would type
-after 'rwave' minus the file: 'list --filter clk', 'dump --begin 1us --end 2us'.
+Selection (list dump summary snapshot compare search; tree takes --scope --depth):
+  --scope P1,P2      Subtrees to look in; segment-aligned, so u_fifo is not u_fifo_ctrl
+  --depth N          At most N levels below the scope; a direct signal is 1. Needs --scope
+  --filter K1,K2     Keep signals matching any pattern
+  --exclude K1,K2    Drop signals matching any pattern; applied last
+  --exact            A wildcard-free pattern never falls back to a substring
 
-Results come back in input order: with --json one NDJSON line each,
-{{"id","ok","result"|"error","exit"}}; without it a '#label' header before
-each. A failed line is ok:false with the exit status it would have alone, and
-does not stop the run, which still exits 0 — check every line. A result that
-cannot be written (1) or a terminal cut (3) ends the run.
-[global-opts] are per-command defaults; a line overrides one, or lifts it with
-an empty value (--filter '').
+Patterns (--filter, --exclude, and search's --condition/--show names):
+  Comma-separated, OR'd, case-insensitive; an empty value ('') means not given.
+  No '.' or '/': matches the leaf name. With one: the path ('.' and '/' alike).
+  A signal's whole name selects only that signal: 'state' is state[2:0], not
+    state_next; 'u_dma.req' is top.u_dma.req, not top.u_dma.req_q.
+  A name no signal has matches as a substring ('fifo'); write 'name*' for a prefix.
+  '*' and '?' make a glob anchored at both ends; the bus range is optional
+    ('*data' finds data[7:0]); '[' ']' are literal.
+  search resolves names within the selection; a full path bypasses it.
 
-Supports both VCD and FST inputs; the format is auto-detected.
-Time values accept fs/ps/ns/us/ms/s suffixes (e.g. 17.5us); a bare integer is raw ticks.
-Condition values: decimal 5, hex 0xff, binary b1010, 4-state b1x0z. A '?' in a binary
-literal is a don't-care bit: status=b?????1?? tests bit 2 of an 8-bit bus (a short
-literal pads with 0, so write every bit; quote the condition in the shell). A
-negative decimal is two's complement in the signal's width (cnt=-1); a real signal
-compares numbers (temp=-1.5, dac=100). A value the signal cannot hold is an error.
-A flag a command does not read is an error, not silence, so a mistyped time is
-reported rather than ignored.
+Time:
+  Suffix fs ps ns us ms s (17.5us); a bare integer is raw ticks.
+  --begin and --end are inclusive.
 
-Exit status: 0 answered (an empty result too; it says why), 1 the file or
-environment failed (open/parse, the recorded design library, licence, a result
-that cannot be written), 2 the request is wrong (flags, names, conditions,
-times, an --output naming a directory or the waveform, a --kdb holding no
-design library), 3 terminal output cut.
+Search conditions:
+  C is SIG=VAL, SIG!=VAL and changed(SIG) terms joined by ',' (AND).
+  Repeat --condition to OR clauses; every clause has a changed() term or none does.
+  A condition SIG must resolve to one signal; a --show pattern may match several.
+  VAL  5   -1 (two's complement)   0xff   b1010   b1x0z   x   z
+       '?' in a binary literal is a don't-care: status=b?????1?? (write every bit)
+       real signals compare numbers (temp=-1.5); string signals compare a
+       number or bit literal as text (s=5).
+  x or z alone means every bit; != never matches an x/z bit.
+  A value the signal cannot hold is an error. Quote conditions in the shell.
+  Rising edge: changed(x),x!=0    falling edge: changed(x),x=0
+
+Output values:
+  1 bit 0/1; wider 0x<hex> without zero padding; any x/z bit: full-width b<bits>
+  (bx, b01x0); real: shortest exact decimal; string as is; event: triggered.
+
+Batch (--batch):
+  One command per line, without 'rwave' and the file: 'list --filter clk',
+  'dump --begin 1us --end 2us'. Blank and '#' lines are skipped; a trailing
+  '#label' names the result. Options on the --batch line are per-line defaults;
+  a line overrides one, or drops it with ''. With --json each result is one
+  NDJSON line in input order: {{"id","ok","result"}} or
+  {{"id","ok":false,"error","exit"}}. A failed line does not stop the run,
+  which exits 0: check every "ok".
+
+Environment (linux-amd64):
+  VERDI_HOME           Verdi install, for .fsdb (needs a Verdi-Ultra license)
+  RWAVE_WLF_LIB        Path to libwlf.so, for .wlf
+  RWAVE_FSDB_LIB       Path to libNPI.so, for a non-standard Verdi layout
+  RWAVE_NPI_L1_LIB     Path to libnpiL1.so (trace), if not beside libNPI.so
+  RWAVE_PLUGIN_<EXT>   External backend for .<ext>; overrides the built-in one
+  RWAVE_TRACE_EN=0     Disable trace
+
+Exit status:
+  0  answered, an empty result too (the hint says why)
+  1  file or environment: open/parse, design library, license, unwritable result
+  2  the request: flags, names, conditions, times, the -o target; fix the command
+  3  terminal output cut at 1 MiB; use -o or a pipe
+
+Examples:
+  rwave info sim.fst
+  rwave list sim.fst --filter '*clk*,*rst*'
+  rwave dump sim.fst --begin 100ns --end 200ns --filter state
+  rwave search sim.fst --condition "valid=1,ready=1" --show data
+  rwave search sim.fst --condition "changed(req),ready=0"
+  rwave snapshot sim.fst --at 17.55us --scope u_tx.u_fifo --depth 1
+  printf 'info\nlist --filter clk\n' | rwave --batch --json sim.fst
 "#,
         ver = crate::VERSION,
         lim = DEFAULT_LIMIT,
     )
+}
+
+/// The full manual for `--help --verbose`: the agent skill, compiled in so the
+/// two never drift, without its YAML front matter.
+pub fn manual_text() -> String {
+    let skill = include_str!("../../../skill/SKILL.md").replace("\r\n", "\n");
+    let body = skill
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map_or(skill.as_str(), |(_, body)| body);
+    body.trim_start().to_string()
 }
 
 /// Flags that consume the following argv token as their value. Used by the
@@ -289,16 +302,22 @@ pub fn parse(argv: &[String]) -> ParseOutcome {
     // positional is the file (not a subcommand) regardless of token order.
     let mut skip_next = false;
     let mut batch_mode = false;
+    let mut help = false;
+    let mut version = false;
+    let mut verbose = false;
     for a in argv {
         if skip_next {
             skip_next = false;
             continue;
         }
         if a == "--version" {
-            return ParseOutcome::Print(format!("rwave {}", crate::VERSION));
+            version = true;
         }
         if a == "-h" || a == "--help" {
-            return ParseOutcome::Print(help_text());
+            help = true;
+        }
+        if a == "--verbose" {
+            verbose = true;
         }
         if a == "--batch" {
             batch_mode = true;
@@ -306,6 +325,12 @@ pub fn parse(argv: &[String]) -> ParseOutcome {
         if VALUE_FLAGS.iter().any(|f| f == a) {
             skip_next = true;
         }
+    }
+    if help {
+        return ParseOutcome::Print(if verbose { manual_text() } else { help_text() });
+    }
+    if version {
+        return ParseOutcome::Print(format!("rwave {}", crate::VERSION));
     }
     if argv.is_empty() {
         return ParseOutcome::Print(help_text());
@@ -785,12 +810,15 @@ fn resolve_batch(acc: Acc) -> Result<ParseOutcome, String> {
             return Err(format!("depth must be positive; got {n}"));
         }
     }
+    // A run written to a file is not cut by default; a line may still pass
+    // its own --limit.
+    let limit = acc.limit.or(acc.output.as_ref().map(|_| 0));
     Ok(ParseOutcome::Batch(BatchInvocation {
         file,
         json: acc.json,
         output: acc.output,
         defaults: Defaults {
-            limit: acc.limit,
+            limit,
             verbose: acc.verbose,
             begin: acc.begin,
             end: acc.end,

@@ -6,6 +6,23 @@ based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
+### Added
+- `rwave --help --verbose` prints the full manual (`skill/SKILL.md`, compiled in).
+
+### Changed
+- `--help` is one page of per-command syntax; SKILL.md is restructured as the manual.
+- `/` and `.` are interchangeable in path patterns.
+- A glob, and a full path that bypasses selection, may leave the bus range off
+  (`*data` finds `data[7:0]`).
+- `-o` lifts the default 500-row limit; an explicit `--limit` still applies.
+- `list` header counts signals and alias paths apart.
+- Text `list --verbose` rows end in `id=`, so alias rows group by signal.
+- README, `--help` and SKILL.md trimmed to usage; output details live in `docs/JSON.md`.
+
+### Fixed
+- `snapshot`/`compare` note an `--at` past the last event.
+- A name with no match suggests `list --filter`.
+
 ## [0.3.2] — 2026-11-11
 
 Correctness fixes ported from VcdAnalyzer 1.5.3–1.6.2 (its index work aside),

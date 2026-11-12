@@ -304,14 +304,15 @@ impl Selection {
         // Separately, never by slicing a lowered path: `to_lowercase` can
         // change a string's byte length.
         let path_lower = path.to_lowercase();
+        let path_key = crate::filter::fold_seps(&path_lower);
         let leaf_lower = leaf_of(path, scope).to_lowercase();
         if let Some(inc) = &self.include {
-            if !inc.matches_lower(&path_lower, &leaf_lower) {
+            if !inc.matches_lower(&path_key, &leaf_lower) {
                 return false;
             }
         }
         match &self.exclude {
-            Some(e) => !e.matches_lower(&path_lower, &leaf_lower),
+            Some(e) => !e.matches_lower(&path_key, &leaf_lower),
             None => true,
         }
     }

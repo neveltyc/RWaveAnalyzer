@@ -145,6 +145,7 @@ pub(super) fn compute_snapshot(wave: &mut Wave, args: &Args) -> Result<Json, Str
     // undefined signals, so the known count is not what was clipped.
     hints.push_opt(trunc_hint(trunc, shown_n, total, true, "signals"));
     hints.push_opt(d.matched.alias_note());
+    hints.push_opt(past_end_note(wave, d.t_at, ts));
     if d.selected_len == 0 {
         hints.push(if d.matched.selective { SELECTION_EMPTY } else { NO_SIGNALS });
     } else if d.known_count == 0 {
@@ -173,6 +174,9 @@ pub(super) fn text_snapshot(wave: &mut Wave, args: &Args) -> Result<(), String> 
         crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
+        crate::outln!("Note: {note}");
+    }
+    if let Some(note) = past_end_note(wave, d.t_at, ts) {
         crate::outln!("Note: {note}");
     }
     if args.verbose {

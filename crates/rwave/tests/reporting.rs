@@ -304,3 +304,113 @@ fn a_flag_the_command_ignores_is_rejected() {
     }
     let _ = std::fs::remove_file(&vcd);
 }
+
+/// An `--at` past the last event still answers, with the final values, but
+/// says so: `5s` typed for `5ns` must not pass as an ordinary answer.
+#[test]
+fn a_time_point_past_the_end_is_flagged() {
+    let vcd = fixture("past_end", VCD);
+    let out = ok_stdout(&vcd, &["snapshot", "--json", "--at", "5s", "--filter", "clk"]);
+    assert!(out.contains("5s is after the last event at 30ns"), "{out}");
+    let out = ok_stdout(&vcd, &["compare", "--at", "10ns,5s", "--filter", "clk"]);
+    assert!(out.contains("Note: 5s is after the last event at 30ns"), "{out}");
+    let out = ok_stdout(&vcd, &["snapshot", "--json", "--at", "20ns", "--filter", "clk"]);
+    assert!(out.contains("\"hint\":null"), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// `list` rows are alias paths; the header says paths and signals apart once
+/// an alias makes them differ.
+#[test]
+fn the_list_header_counts_paths_and_signals_apart() {
+    let vcd = fixture("list_header", VCD);
+    let out = ok_stdout(&vcd, &["list"]);
+    assert!(out.starts_with("Matched: 3/3 signals, 4 alias paths\n"), "{out}");
+    let out = ok_stdout(&vcd, &["list", "--filter", "clk"]);
+    assert!(out.starts_with("Matched: 1/3 signals\n"), "{out}");
+    let out = ok_stdout(&vcd, &["list", "--verbose", "--filter", "clk"]);
+    assert!(out.contains(" id="), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// `/` and `.` are interchangeable in a path pattern, for every name role.
+#[test]
+fn a_slash_path_reaches_a_dotted_hierarchy() {
+    let vcd = fixture("slash", VCD);
+    let out = ok_stdout(&vcd, &["list", "--filter", "tb/clk"]);
+    assert!(out.contains("tb.clk"), "{out}");
+    let out = ok_stdout(&vcd, &["search", "--condition", "tb/clk=1"]);
+    assert!(out.contains("tb.clk=1"), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// A name that matches nothing says how to find the right one.
+#[test]
+fn a_missing_name_points_at_list() {
+    let vcd = fixture("missing", VCD);
+    let msg = err_message(&vcd, &["search", "--condition", "clck=1"]);
+    assert!(msg.contains("list --filter"), "{msg}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// `--help --verbose` prints the compiled-in manual, front matter stripped.
+#[test]
+fn help_verbose_prints_the_manual() {
+    for argv in [["--help", "--verbose"], ["--verbose", "-h"]] {
+        let out = Command::new(rwave()).args(argv).output().expect("spawn rwave");
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.starts_with("# rwave manual"), "{argv:?}: {}", &text[..80.min(text.len())]);
+        assert!(!text.contains("name: waveform-debug"));
+    }
+    let out = Command::new(rwave()).arg("--help").output().expect("spawn rwave");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("rwave --help --verbose"));
+    assert!(!text.contains("# rwave manual"));
+}
+
+const BUS_VCD: &str = "\
+$timescale 1ns $end
+$scope module top $end
+$var wire 8 ! data [7:0] $end
+$var wire 1 \" valid $end
+$scope module u $end
+$var wire 4 # cnt [3:0] $end
+$upscope $end
+$var wire 1 $ \\a/b  $end
+$var wire 1 % \\a.b  $end
+$upscope $end
+$enddefinitions $end
+#0
+b0 !
+0\"
+b0 #
+0$
+0%
+#10
+b101 !
+1\"
+b11 #
+1$
+";
+
+/// A glob, like a whole name, may leave the bus range off.
+#[test]
+fn a_glob_reaches_a_bus_without_its_range() {
+    let vcd = fixture("glob_bus", BUS_VCD);
+    let out = ok_stdout(&vcd, &["list", "--filter", "*data,*valid"]);
+    assert!(out.contains("top.data[7:0]") && out.contains("top.valid"), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}
+
+/// A full path bypasses the selection with or without its bus range, and a
+/// literal spelling beats a separator-folded one.
+#[test]
+fn a_full_path_bypasses_the_selection_without_its_range() {
+    let vcd = fixture("bypass", BUS_VCD);
+    let out = ok_stdout(&vcd, &["search", "--scope", "u", "--condition", "top.data=5"]);
+    assert!(out.contains("top.data[7:0]=5"), "{out}");
+    let out = ok_stdout(&vcd, &["search", "--condition", "top.\\a/b=1"]);
+    assert!(out.contains("Found: 1"), "{out}");
+    let _ = std::fs::remove_file(&vcd);
+}

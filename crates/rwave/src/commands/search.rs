@@ -74,7 +74,7 @@ fn resolve_one_signal(
     let has_wild = pat.contains('*') || pat.contains('?');
 
     if !has_wild {
-        let exact = sids_where(wave, |info| info.has_exact_path_ci(&pl));
+        let exact = spelled_sids(wave, &pl);
         if exact.len() == 1 {
             return Ok(exact[0]);
         }
@@ -95,7 +95,7 @@ fn resolve_one_signal(
     if matched.is_empty() {
         let scoped = within_selection(sel);
         let hint = if scoped.is_empty() {
-            String::new()
+            "; find the name with list --filter <part>".to_string()
         } else {
             "; give the full hierarchical path to look outside it".to_string()
         };
@@ -151,7 +151,7 @@ fn resolve_show_sids(
         let has_wild = pat.contains('*') || pat.contains('?');
         if !has_wild {
             let pl = pat.to_lowercase();
-            let exact = sids_where(wave, |info| info.has_exact_path_ci(&pl));
+            let exact = spelled_sids(wave, &pl);
             if !exact.is_empty() {
                 selected.extend(exact);
                 continue;
@@ -168,7 +168,7 @@ fn resolve_show_sids(
     }
     if !missing.is_empty() {
         return Err(format!(
-            "--show matches no signals{}: {}",
+            "--show matches no signals{}: {}; find the names with list --filter <part>",
             within_selection(sel),
             missing.join(", ")
         ));

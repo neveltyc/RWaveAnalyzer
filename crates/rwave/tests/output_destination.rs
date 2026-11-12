@@ -227,3 +227,35 @@ fn batch_error_lines_carry_their_exit_status() {
     assert!(lines[3].ends_with("\"exit\":1}"), "{out}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Writing to a file asks for the whole result: the default row cap does not
+/// apply, while an explicit `--limit` still does, for one command or a batch.
+#[test]
+fn output_to_a_file_lifts_the_default_limit() {
+    let d = dir("nolimit");
+    let mut vcd = String::from("$timescale 1ns $end\n$scope module top $end\n$var wire 1 ! clk $end\n$upscope $end\n$enddefinitions $end\n");
+    for t in 0..600 {
+        vcd.push_str(&format!("#{t}\n{}!\n", t % 2));
+    }
+    std::fs::write(d.join("big.vcd"), vcd).unwrap();
+    let rows = |file: &str| std::fs::read_to_string(d.join(file)).unwrap().matches("\"time_ticks\"").count();
+
+    assert!(run(&d, &["dump", "big.vcd", "--json", "-o", "all.json"]).status.success());
+    assert_eq!(rows("all.json"), 600);
+    assert!(run(&d, &["dump", "big.vcd", "--json", "--limit", "7", "-o", "seven.json"]).status.success());
+    assert_eq!(rows("seven.json"), 7);
+
+    for (line, want) in [("dump\n", 600), ("dump --limit 7\n", 7)] {
+        let mut child = Command::new(rwave())
+            .current_dir(&d)
+            .args(["--batch", "--json", "big.vcd", "-o", "b.json"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(line.as_bytes()).unwrap();
+        assert!(child.wait_with_output().unwrap().status.success());
+        assert_eq!(rows("b.json"), want, "{line:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

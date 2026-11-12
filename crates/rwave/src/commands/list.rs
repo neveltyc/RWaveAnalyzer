@@ -17,8 +17,7 @@ struct ListEntry {
 }
 
 /// Build the sorted `list` entries and the clip decision, shared by both
-/// renderers. Returns `(entries, shown, truncated)`.
-/// Returns `(entries, shown, truncated, selective)`. `selective` says whether
+/// renderers. Returns `(entries, shown, truncated, selective)`. `selective` says whether
 /// any selection option was actually given: an empty result means something
 /// different on a file with no signals in it than on a pattern that missed.
 fn list_entries(
@@ -58,9 +57,17 @@ fn list_entries(
     Ok((entries, shown_n, trunc, !all))
 }
 
+/// Distinct signals among the rows, and the noun the rows are counted in:
+/// `paths` once an alias makes rows and signals differ.
+fn row_units(entries: &[ListEntry]) -> (usize, &'static str) {
+    let signals = entries.iter().map(|e| e.sid).collect::<std::collections::BTreeSet<_>>().len();
+    (signals, if signals == entries.len() { "signals" } else { "paths" })
+}
+
 pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String> {
     let (entries, shown_n, trunc, selective) = list_entries(wave, args)?;
     let total = entries.len();
+    let (_, noun) = row_units(&entries);
     let mut sig_arr = Vec::new();
     for e in entries.iter().take(shown_n) {
         let mut o = Obj::new()
@@ -73,7 +80,7 @@ pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String>
         sig_arr.push(o.build());
     }
     let mut hints = Hints::new();
-    hints.push_opt(trunc_hint(trunc, shown_n, total, true, "signals"));
+    hints.push_opt(trunc_hint(trunc, shown_n, total, true, noun));
     // Only blame the selection when there was one. A file whose hierarchy
     // declares nothing has no pattern to widen.
     if total == 0 {
@@ -87,7 +94,14 @@ pub(super) fn compute_list(wave: &mut Wave, args: &Args) -> Result<Json, String>
 pub(super) fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
     let (entries, shown_n, trunc, selective) = list_entries(wave, args)?;
     let total = entries.len();
-    crate::outln!("Matched: {}/{}", total, wave.signal_count());
+    // Rows are alias paths; the denominator counts signals. Say both when an
+    // alias makes them differ.
+    let (signals, noun) = row_units(&entries);
+    if total == signals {
+        crate::outln!("Matched: {}/{} signals", signals, wave.signal_count());
+    } else {
+        crate::outln!("Matched: {}/{} signals, {} alias paths", signals, wave.signal_count(), total);
+    }
     if total == 0 {
         crate::outln!(
             "{}",
@@ -99,15 +113,25 @@ pub(super) fn text_list(wave: &mut Wave, args: &Args) -> Result<(), String> {
         );
     }
     for e in entries.iter().take(shown_n) {
-        crate::outln!(
-            "  {} {}  {}",
-            ljust(&e.path, 60),
-            rjust(&e.width.to_string(), 5),
-            e.type_str
-        );
+        if args.verbose {
+            crate::outln!(
+                "  {} {}  {:<10} id={}",
+                ljust(&e.path, 60),
+                rjust(&e.width.to_string(), 5),
+                e.type_str,
+                e.sid
+            );
+        } else {
+            crate::outln!(
+                "  {} {}  {}",
+                ljust(&e.path, 60),
+                rjust(&e.width.to_string(), 5),
+                e.type_str
+            );
+        }
     }
     if trunc {
-        crate::outln!("{}", trunc_line(shown_n, total, "signals"));
+        crate::outln!("{}", trunc_line(shown_n, total, noun));
     }
     Ok(())
 }

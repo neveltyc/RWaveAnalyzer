@@ -138,6 +138,7 @@ pub(super) fn compute_compare(wave: &mut Wave, args: &Args) -> Result<Json, Stri
     let mut hints = Hints::new();
     hints.push_opt(trunc_hint(trunc, shown_n, total, true, "diffs"));
     hints.push_opt(d.matched.alias_note());
+    hints.push_opt(past_end_note(wave, d.ta, ts).or_else(|| past_end_note(wave, d.tb, ts)));
     if d.selected_len == 0 {
         hints.push(if d.matched.selective { SELECTION_EMPTY } else { NO_SIGNALS });
     } else if total == 0 {
@@ -165,6 +166,9 @@ pub(super) fn text_compare(wave: &mut Wave, args: &Args) -> Result<(), String> {
         crate::outln!("{h}");
     }
     if let Some(note) = d.matched.alias_note() {
+        crate::outln!("Note: {note}");
+    }
+    if let Some(note) = past_end_note(wave, d.ta, ts).or_else(|| past_end_note(wave, d.tb, ts)) {
         crate::outln!("Note: {note}");
     }
     crate::outln!("{} changed, {} unchanged", total, unchanged);

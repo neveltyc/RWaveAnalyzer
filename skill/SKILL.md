@@ -3,222 +3,186 @@ name: waveform-debug
 description: RTL waveform analysis CLI for debug, CI, and AI agents. Natively reads VCD, FST (preferred — ~10× smaller), and GHW. On linux-amd64, experimental support for WLF and FSDB via each vendor's own reader library. Use when the user has a waveform file (.vcd, .fst, .ghw, .wlf, .fsdb) and wants to inspect, search, compare, or summarize signals, browse the design hierarchy, or find what drives a signal — triggers on any mention of waveform analysis, signal queries, RTL debug, simulation results, or VCD/FST/WLF/FSDB files.
 ---
 
-# rwave — agent skill
+# rwave manual
 
-`rwave` is a single binary for querying RTL simulation waveforms from the
-terminal. It natively reads **VCD**, **FST**, and **GHW** (prefer FST — typically
-10× smaller than VCD). On linux-amd64 it also provides experimental support for
-**WLF** (Questa/ModelSim) and **FSDB** (Verdi) by calling into each vendor's own
-reader library interface. Nine commands cover inspection, search, comparison,
-summary, hierarchy, and driver/load tracing. **Always pass `--json` from an
-agent.** This file covers
-what is unique to driving the tool from an agent — see [README_en.md](../README_en.md)
-for the full reference.
+`rwave` queries RTL simulation waveforms from the terminal: VCD, FST and GHW
+everywhere, WLF and FSDB on linux-amd64. `rwave --help` is the syntax summary;
+this manual (also `rwave --help --verbose`) is the full usage guide.
+
+## Principles
+
+1. **Always pass `--json`.** Text output is for humans.
+2. **Orient before you query.** `info` → `tree`/`list` → a targeted command.
+3. **Stay narrow on big files.** Give every `dump` a window and a selection;
+   give `summary`, `snapshot` and `compare` a selection.
+4. **Read `matched` and `hint` before the rows.** They say what the selection
+   caught, why a result is empty, and when a result was cut.
+5. **Never treat a truncated result as the whole answer.** On `truncated:true`,
+   narrow the selection first; raise `--limit` only if every row is wanted.
+6. **One `search --show` beats many `snapshot`s.** It returns the shown values
+   across every span where the condition holds, in one call.
+7. **Batch planned work, not adaptive work.** `--batch` saves reloading a large
+   file, but you cannot see one result before writing the next line.
+8. **Fix the command on exit 2; fix the environment on exit 1.** Do not retry
+   the same call.
 
 ## Install
 
-Prebuilt binaries are attached to every tagged release, with one `sha256sums.txt`
-covering them all (`sha256sum -c sha256sums.txt`).
-All four read VCD/FST/GHW; only `rwave-linux-amd64` includes experimental
-WLF and FSDB support. Pick the one matching the runtime and `chmod +x`:
+Release binaries: `rwave-linux-amd64` (the only one with WLF/FSDB),
+`rwave-linux-arm64`, `rwave-windows-amd64.exe`, `rwave-macos-arm64`, plus
+`sha256sums.txt`.
 
 ```bash
 curl -fsSL -o ~/.local/bin/rwave \
   https://github.com/neveltyc/RWaveAnalyzer/releases/latest/download/rwave-linux-amd64
 chmod +x ~/.local/bin/rwave
-~/.local/bin/rwave --version
 ```
 
-## Vendor formats — experimental (linux-amd64 only)
-
-On linux-amd64, rwave reads Questa `.wlf` and Verdi `.fsdb` through each
-vendor's own reader library from the user's licensed installation:
-
-```bash
-export VERDI_HOME=/path/to/verdi                            # for .fsdb (needs a Verdi-Ultra license)
-export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so # for .wlf
-rwave --json info dump.fsdb
-```
-
-If the env is unset, the library/license is missing, or the build is not
-linux-amd64, `.wlf`/`.fsdb` fail with a non-zero exit and an explanation on
-stderr — JSON under `--json`, a one-line `Error:` without it. Fall back to
-converting the dump to VCD or FST first.
-
-## Pick the right command
+## Pick the command
 
 ```
-User wants to know...
-├─ "What's in this file?"
-│   └─ info           file overview, signal count, time span, scopes
-├─ "What signals exist?" / "Find signals matching X"
-│   └─ list           signal paths with width and type
-├─ "What happened between T1 and T2?"
-│   └─ dump           value-change events in time order
-├─ "Which signals are active/static?"
-│   └─ summary        per-signal change count, edges, unique values
-├─ "What is the value of X at time T?"
-│   └─ snapshot       all known signal values at one time point
-├─ "What changed between T1 and T2?"
-│   └─ compare        diff of signal values at two time points
-├─ "When does condition C hold?" / "Find handshakes"
-│   └─ search         condition-based, three sub-modes:
-│       ├─ interval   time ranges where condition is true (no --show, no changed())
-│       ├─ segment    intervals + observed values         (with --show)
-│       └─ event      fires when signals transition       (changed(SIG) in condition)
-├─ "Where am I?" / "What's under tb.dut?"
-│   └─ tree           hierarchy; --of SIGNAL gives its full ancestor chain
-└─ "Who drives this signal?" / "What reads it?"
-    └─ trace          drivers/loads with file:line; FSDB + built-in NPI only
+What the user wants                     Command
+─────────────────────────────────────── ────────────────────────────────────────
+What's in this file?                    info
+Which signals exist / match X?          list
+Where am I in the hierarchy?            tree  (tree --of SIG: its ancestors)
+What happened between T1 and T2?        dump
+Which signals are active / static?      summary
+What is X at time T?                    snapshot
+What changed between T1 and T2?         compare
+When does condition C hold?             search                  → interval rows
+  ...and what were these values then?   search --show K1,K2     → segment rows
+When does SIG transition?               search "changed(SIG)"   → event rows
+Who drives / reads this signal?         trace (FSDB + built-in NPI only)
 ```
 
-All three `search` modes answer under `rows`; read `mode` to know how to read a
-row (`event` rows have `end_ticks: null`).
+A segment row is a span where the condition holds and every shown value is
+constant, so the row count depends on `--show`. To count transactions, use
+event mode on the clock: `changed(clk),clk!=0,valid=1,ready=1`.
 
-## Condition syntax (search only)
+## Commands
 
-Comma-separated AND list. Each item is `SIG=VAL`, `SIG==VAL`, `SIG!=VAL`,
-or `changed(SIG)`.
+| Command | Invocation | Fields to read |
+|:--|:--|:--|
+| `info` | `info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `timescale_assumed`, `scopes[]`, `var_types{}` |
+| `list` | `list <F> [sel]` | `signals[].path`, `.width`, `.type`, `.id` (`--verbose`) |
+| `dump` | `dump <F> --begin T --end T [sel]` | `window{}`, `matched`, `events[].time_ticks`, `.time_h`, `.path`, `.value` |
+| `summary` | `summary <F> [--begin T] [--end T] [sel]` | `matched`, `active`, `static`, `unknown`, `rows[].path`, `.kind`, `.changes`, `.rise_count`, `.fall_count`, `.init`, `.last`, `.unique` (count), `.unknown` |
+| `snapshot` | `snapshot <F> --at T [sel]` | `at_ticks`, `matched`, `known`, `undefined`, `signals[].path`, `.value` |
+| `compare` | `compare <F> --at T1,T2 [sel]` | `matched`, `unchanged`, `diffs[].path`, `.at_t1`, `.at_t2` |
+| `search` | `search <F> --condition C [--show K] [--begin T] [--end T] [sel]` | `mode`, `condition_resolved`, `rows[].begin_ticks`, `.end_ticks`, `.values{}` |
+| `tree` | `tree <F> [SCOPE] [--depth N]` or `tree <F> --of SIG` | `mode`, `scopes[].path`, `.level`, `.signals`, `.children` |
+| `trace` | `trace <F> SIG [--load] [--at T] [--control]` | `status`, `dir`, `endpoints[].statement`, `.file`, `.line`, `.signals[].path`, `.value` |
 
-- Signal pattern must resolve to **exactly one** signal. If ambiguous,
-  the error lists candidates — add `--scope`/`--exclude` to narrow the
-  lookup, or give the full path (a full path bypasses selection).
-- Values: decimal (`5`), hex (`0xff`), binary (`b1010` / `0b1010`),
-  4-state (`b1x0z`), or bare `x`/`z`. Negative decimal = two's complement in
-  the signal's width (`cnt=-1`). Real signals: any decimal or real number,
-  compared numerically (`temp=-1.5`, `dac=100`, `1e-3`). String signals: a
-  number or bit literal compares as text (`s=5`); other text is not a target.
-- A value the signal cannot hold is an error (exit 2), not "No interval":
-  more bits than the width (`state=99` on 4 bits, `bit=2`), a bit pattern on a
-  real (`temp=b101`), a level term on an event (use `changed(ev)`).
-- **Don't-care bits:** `?` in a binary literal matches any bit value, like
-  `?` in a Verilog `casez` item — `status=b?????1??` holds wherever bit 2 of an 8-bit
-  `status` is 1, and `state=b10??` on a 4-bit `state` tests its top two bits.
-  A short literal still pads with `0` (so `b1??` on 8 bits requires the top
-  five bits to be 0): check the width with `list` and write every bit. `?`
-  needs the `b`/`0b` prefix and works only on logic signals. Under `!=`, an
-  `x`/`z` sitting under a `?` does not block a match; only the cared bits
-  must be known. Unlike Verilog, a leading `?` does not extend and `z` is a
-  cared bit. Quote the condition so the shell does not glob the `?`.
-- `!=` does **not** match `x`/`z` ("unknown is not evidence of
-  difference"). To find unknowns, ask explicitly with `sig=x`.
-- `changed(SIG)`: edge predicate, true at exactly the ticks where SIG
-  transitions (t=0 initialization is not a transition). Its presence
-  switches the search to event mode. One signal per changed();
-  `changed(a),changed(b)` = both transition on the same tick. Level terms
-  in the clause are evaluated on the post-update state at that tick.
-  Rising edges only: `changed(x),x!=0`; falling only: `changed(x),x=0`.
-  With no `--show`, event mode shows the changed() signals.
-- OR: repeat `--condition`. Each `--condition` is one AND clause; the search
-  holds wherever **any** clause holds (OR-of-ANDs) — e.g. one clause per
-  channel for "any channel handshakes". Identical / term-reordered / alias-
-  equivalent clauses fold silently. No in-string OR (`|` / parentheses).
-  Every clause must contain a `changed()` term or none may (modes cannot mix).
+- Every result except `info` also has `command`, `shown`, `truncated`,
+  `total`, `total_is_exact`, `hint`.
+- `search` answers under `rows` in every mode; `mode` says how to read a row.
+- `tree` defaults to depth 1 and counts scopes, not signals.
 
-## Command quick reference
+## Times and windows
 
-`<F>` is the input file. See [README_en.md](../README_en.md) for the full surface; the table
-below is the agent-side cheat sheet of the JSON-form arguments and the
-fields you'll usually parse out.
-
-| Command | Common invocation | Useful JSON fields |
-|---|---|---|
-| `info` | `rwave --json info <F>` | `signal_count`, `time_min_ticks`, `time_max_ticks`, `duration_h`, `timescale`, `timescale_assumed`, `scopes[]`, `var_types` |
-| `list` | `rwave --json list <F> [selection]` | `signals[].path`, `.width`, `.type` |
-| `dump` | `rwave --json dump <F> --begin T --end T [selection]` | `window{}`, `matched`, `events[].time_ticks`, `.time_h`, `.path`, `.value` |
-| `summary` | `rwave --json summary <F> [selection]` | `window{}`, `matched`, `active`, `static`, `unknown`, `rows[].path`, `.kind`, `.changes`, `.rise_count`/`.fall_count`, `.init`, `.defined_at_ticks`, `.last`, `.unknown` |
-| `snapshot` | `rwave --json snapshot <F> --at T [selection]` | `at_ticks`, `at_h`, `known`, `undefined`, `signals[].path`, `.value`, `.undefined` |
-| `compare` | `rwave --json compare <F> --at T1,T2 [selection]` | `t1_ticks`, `t1_h`, `t2_ticks`, `t2_h`, `unchanged`, `diffs[].path`, `.at_t1`, `.at_t2` |
-| `search` | see decision tree above | `mode`, `window{}`, `rows[].begin_ticks`, `.end_ticks`, `.values{}` |
-| `tree` | `rwave --json tree <F> [SCOPE] [--depth N]` | `mode` (`subtree`/`chain`), `signal`, `roots[]`, `root_signals`, `scopes[].path`, `.name`, `.level`, `.signals`, `.children` |
-| `trace` | `rwave --json trace <F> <SIG> [--load] [--at T] [--control]` | `status`, `dir`, `endpoints[].kind`, `.statement`, `.file`, `.line`, `.boundary`, `.signals[].path`/`.value` |
-
-Every result also carries `command`, `shown`, `truncated`, `total`,
-`total_is_exact` and `hint`. Full field reference: `docs/JSON.md`.
-
-`tree` works on every format. `trace` works only on `.fsdb` via the built-in NPI
-backend and exits 2 elsewhere. Do not retry it on another file format.
-
-`trace` rules:
-
-- Never pass `--kdb` unless rwave asks for it. The design library is read from
-  the FSDB header; if that fails, use only a path the user supplies.
-- Read `status` before trusting the list: `resolved`, `boundary_only` (the
-  driver is outside the traced hierarchy), `no_driver_found`.
-- Clock, reset, and enclosing `if`/`case` are excluded unless you pass
-  `--control`.
-- One driver is the normal answer; several usually means a reset arm plus a
-  data arm. Loads are often many, so pass `--limit`.
-
-For `dump`, **always pass `--begin/--end` and a selection** — running it
-unbounded on a large dump streams the whole file.
-For `snapshot` and `compare` on large files, **always pass a selection** — unfiltered scans emit every signal.
+- `fs` `ps` `ns` `us` `ms` `s` suffix (`17.5us`); a bare integer is raw ticks.
+- `--begin`/`--end` (`dump`, `summary`, `search`) are inclusive.
+- `--at T` for `snapshot`, `--at T1,T2` for `compare`, optional `--at T` for
+  `trace`.
 
 ## Selecting signals
 
-Five options, applied to each signal path in turn. They work on every command
-except `info` and `trace` — `list`, `dump`, `summary`, `snapshot`, `compare`,
-and `search` (the last narrows name resolution rather than rows, see below);
-`tree` takes `--scope`/`--depth` only — and all work
-as `--batch` defaults. `info` describes the file and ignores them.
+| Option | Effect |
+|:--|:--|
+| `--scope P1,P2` | Only these subtrees. Segment-aligned: `u_fifo` never matches `u_fifo_ctrl`. A path matches as a suffix: `u_tx.u_fifo` finds it anywhere. |
+| `--depth N` | At most N levels below the scope; a direct signal is 1. Needs `--scope` (not for `tree`). |
+| `--filter K1,K2` | Keep matching signals. |
+| `--exclude K1,K2` | Drop matching signals; applied last. |
+| `--exact` | A wildcard-free pattern never falls back to a substring. |
 
-| | |
-|---|---|
-| `--scope P1,P2` | restrict to subtrees |
-| `--depth N` | at most N levels below the `--scope` root; a signal directly in it is depth 1. Requires `--scope` |
-| `--filter K1,K2` | keep matching signals |
-| `--exclude K1,K2` | drop matching signals; applied last |
-| `--exact` | a wildcard-free name no signal has matches nothing (no substring fallback); rarely needed |
+Pattern rules (also for `search`'s `--condition` and `--show` names):
 
-**A pattern with no separator matches the leaf name; one containing a `.` or
-`/` matches the whole path.** This is the rule to internalize. RTL names scopes after signals —
-a CDC synchronizer instance is conventionally `u_sync_<sig>` — so `--filter
-tx_fifo_push_err` gets you the status bit, not the synchronizer's clocks and
-flops. When you *do* want a subtree, write the separator: `--filter 'u_dma.'`, or
-`--exclude 'u_sync_status.'` to drop one. `--exclude u_sync_status` (bare)
-drops nothing, because no *leaf* is called that.
+| Pattern | Matches |
+|:--|:--|
+| `req` (no separator) | Leaf name only, so the signal and not the `u_sync_req` instance |
+| `u_dma.` or `u_dma/` | Path; `.` and `/` are interchangeable |
+| A signal's whole name | Only that signal: `state` → `state[2:0]`, not `state_next`; `u_dma.req` → `top.u_dma.req` |
+| A name no signal has | Substring: `fifo` → every `*fifo*` |
+| `name*`, `*data`, `a?b` | Glob anchored at both ends; bus range optional, so `*data` finds `data[7:0]` |
+| `a,b` | Either; case-insensitive throughout |
+| `''` | Option not given (lifts a batch default) |
 
-`--scope` matches segment-wise, so `u_fifo` never selects `u_fifo_ctrl`. A bare
-value names an instance (`*`/`?` allowed) and includes its descendants; a path
-value is a segment-aligned suffix, so `u_tx.u_fifo` finds that subtree without
-you knowing the path from the root.
+- `[` and `]` are literal, so `data[7:0]` works as written.
+- `--exclude clk` drops only signals named `clk`; drop every clock with `'*clk*'`.
+- `search` resolves names inside the selection; a full path (bus range
+  optional) bypasses it.
+- Over-matched? Narrow with `--scope`/`--depth`, subtract with `--exclude`,
+  or use the full name.
 
-If `list --filter X` returns far more rows than expected, **do not just raise
-`--limit`** — narrow structurally with `--scope`/`--depth`, subtract with
-`--exclude`, or give the full name.
+## Search conditions
 
-A wildcard-free pattern that is a signal's whole name (leaf or path, bus range
-optional) selects only the signals with that name: `--filter state` is `state[2:0]`, not
-`state_next[2:0]`; `--filter top.sig3` is not `top.sig30`; a path may start at
-any segment (`u_dma.req`). A pattern that is no signal's name matches as a
-substring (`--filter fifo`). For a prefix write `name*`.
-The whole-name check looks only inside `--scope`/`--depth`. Same rule for
-`--exclude` (`--exclude clk` drops only `clk`; use `'*clk*'` for all) and for
-`search`'s `--condition`/`--show` names.
+| Form | Meaning |
+|:--|:--|
+| `SIG=VAL`, `SIG!=VAL` | Level test |
+| `changed(SIG)` | True at each tick SIG transitions (not at t=0); switches to event mode |
+| `A=1,B=0` | AND |
+| repeated `--condition` | OR of the clauses; all have a `changed()` term or none does |
 
-Selection is per path: a signal is kept when any one of its paths clears every
-option, so excluding a synchronizer never costs you the status bit wired into
-it. `list` prints only the paths that survived `--scope`/`--depth`/`--exclude`;
-`--filter` hides no rows, so a hit may still surface several alias rows — use
-`--verbose` and group by `id` (same `id` = same signal).
+| Value | Example | Note |
+|:--|:--|:--|
+| Decimal | `cnt=5`, `cnt=-1` | Negative is two's complement at the signal width |
+| Hex | `addr=0xff` | |
+| Binary / 4-state | `st=b1010`, `bus=b1x0z` | `0b` prefix also accepted |
+| Don't-care | `status=b?????1??` | `?` matches any bit; a short literal pads with 0, so write every bit |
+| Unknown | `bus=x`, `bus=z` | Every bit x (or z); a partial or mixed unknown does not match |
+| Real | `temp=-1.5`, `dac=100` | Numeric compare |
+| String | `s=5` | A number or bit literal, compared as text; other text is rejected |
 
-`search` has no row filter (its `--condition`/`--show` names are the
-selection), so the options narrow **name resolution** instead: they are usually
-what turns `pattern ... matches N signals` into a unique hit. A name written as
-a full path bypasses selection entirely. Note for batch plans: a `--batch`-line
-`--filter` now narrows `search` lines too; pass `--filter ''` on a line to lift
-it.
+- A condition name must resolve to exactly one signal; an ambiguous one errors
+  with candidates. A `--show` pattern may match several.
+- A value the signal cannot hold is an error (exit 2), not an empty result:
+  `state=99` on 3 bits, `temp=b101` on a real, a level test on an event.
+- `!=` never matches an x/z bit in a cared position.
+- Rising edge `changed(x),x!=0`; falling edge `changed(x),x=0`.
+- `changed(a),changed(b)` means both on the same tick.
+- No `|` or parentheses; use repeated `--condition` for OR.
+- Double-quote conditions; single-quote names containing `$`.
 
-A selection matching nothing is an empty result with `ok:true`, not an error.
+## Reading JSON
 
+| Value | Format | Parse |
+|:--|:--|:--|
+| 1-bit logic | `0`, `1` | `int(v, 16)` |
+| Multi-bit logic | `0x4` (no zero padding) | `int(v, 16)` |
+| Any x/z bit | `bx`, `bz`, `b01x0` (full width) | `v.startswith('b')`; bits are `v[1:]` |
+| Real | `1.5`, `NaN` | `float(v)` |
+| String | as recorded | |
+| Event | `triggered` | |
 
-## Batch mode (one load, many queries)
+- Pick the parser from the signal's `type` (`list`): `real`, `string` and
+  `event` are not logic. Never test `'x' in v`: every `0x` value has an `x`.
+- Every documented key is always present; empty is `null`, `0`, `[]` or `{}`.
+  Test values, not presence.
+- `matched` is `null` without a selection option; else `matched.count` is how
+  many signals it caught.
+- Errors are `{"command","ok":false,"error"}` on stderr; stdout carries results
+  only.
 
-For a pre-planned multi-step investigation of **one** file — especially a large
-`.fsdb`/`.wlf` that is slow to open — use `--batch` to load the file once and run
-a list of commands from stdin, instead of paying the open cost on every call:
+| Exit | Meaning | Do |
+|:--|:--|:--|
+| 0 | Answered, an empty result too | Read `hint` when empty |
+| 1 | File or environment: open/parse, design library, license, unwritable result | Fix the setup |
+| 2 | Request: flags, names, conditions, times, the `-o` target | Fix the command |
+| 3 | Terminal output cut at 1 MiB | Use `-o FILE` or a pipe |
 
-```sh
+## Large results
+
+- `--limit N` caps rows (default 500, `0` unlimited). With `-o` or
+  `--verbose` and no `--limit`, nothing is cut, so keep a selection on large files.
+- `-o FILE` writes the whole result to FILE and prints a one-line receipt.
+  Read a large file in pieces.
+  Keep a selection on: an unfiltered query on a big file is big on disk too.
+- With `--batch`, `-o` goes on the `--batch` line and covers the run.
+
+## Batch mode
+
+```bash
 printf '%s\n' \
   'info' \
   'list --filter clk,state' \
@@ -226,189 +190,115 @@ printf '%s\n' \
   | rwave --batch --json sim.fsdb
 ```
 
-- One command per line — exactly what you'd type after `rwave`, minus the file
-  (the file is given once on the `--batch` line). **Pass `--json`**: output is
-  one NDJSON object per line, `{"id","ok","result"}` or `{"id","ok","error","exit"}`,
-  in input order.
-- `id` is the trailing `#label` if present, else a 1-based line number. Correlate
-  by **input order** (authoritative) or `id`. Blank and `#`-comment lines are
-  skipped; `[global-opts]` on the `--batch` line are per-command defaults.
-- Each `result` is byte-identical to the equivalent single-command `--json`
-  output — parse it exactly the same way.
-- A failing command is `"ok":false` and does **not** stop the batch; the process
-  still exits `0`. Check each line's `ok`. Only a bad file, an unreadable
-  stream or an unwritable result (exit 1), or a terminal cut (exit 3), ends
-  the run.
-- Plan the full list up front — batch does not let you see one result before
-  choosing the next. For adaptive, read-then-decide flows, use separate calls.
+- One command per line, without `rwave` and the file.
+- Blank and `#` lines are skipped; a trailing `#label` becomes the `id`.
+- Options on the `--batch` line are per-line defaults; a line overrides one or
+  lifts it with `''`.
+- Output is one NDJSON line per command, in input order:
+  `{"id","ok","result"}` or `{"id","ok":false,"error","exit"}`.
+- `result` is identical to the single-command `--json` output.
+- A failed line does not stop the run, so check every `ok`.
 
+## Vendor formats (linux-amd64, experimental)
 
-## Workflow patterns
-
-(all assume `--json`)
-
-### First contact with a waveform file
-
-```
-1. info                        learn time range, scopes, timescale
-2. list --scope <block>        see one block at a time (--depth 1 to skip submodules)
-3. list --filter <suspect>     find the signals of interest by name
-4. summary --filter <window>   spot active vs static signals
-5. dump or search              drill into specifics
+```bash
+export VERDI_HOME=/path/to/verdi                            # .fsdb, needs Verdi-Ultra
+export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so # .wlf
 ```
 
-### "What happened at time T?"
+| Variable | Use |
+|:--|:--|
+| `VERDI_HOME` | Verdi install for `.fsdb` |
+| `RWAVE_WLF_LIB` | `libwlf.so` for `.wlf` |
+| `RWAVE_FSDB_LIB`, `RWAVE_NPI_L1_LIB` | `libNPI.so` / `libnpiL1.so` in a non-standard layout |
+| `RWAVE_PLUGIN_FSDB` | External FSDB plugin; overrides the built-in backend, no `trace` |
+| `RWAVE_PLUGIN_<EXT>` | External backend for any other extension |
+| `RWAVE_TRACE_EN=0` | Disable `trace` |
+
+If the library, license or platform is missing, the command exits 1 with the
+reason. Suggest converting the dump to FST or VCD instead.
+
+## trace
+
+- Works only on `.fsdb` opened through the built-in NPI backend; elsewhere it
+  exits 2. Do not retry on another format.
+- Pass `--kdb` only when rwave asks for it, and only with a path the user
+  gives. The design library path is read from the FSDB.
+- Read `status` first: `resolved`, `boundary_only` (driver outside the traced
+  hierarchy), `no_driver_found`.
+- Clocks, resets and enclosing `if`/`case` are left out unless `--control`.
+- Several drivers usually means a reset arm and a data arm. Loads are often
+  many, so pass `--limit`.
+- With `--at T`, each endpoint's `signals[]` carry their values. Follow a
+  `signals[].path` into the next `trace` to walk the cone.
+
+## Workflows
+
+All with `--json`.
+
+**First look**
 
 ```
-1. snapshot --at T
-2. dump --begin T-Δ --end T+Δ
-3. compare --at T-Δ,T+Δ
+info                              time range, timescale, scopes
+tree --depth 2                    top of the hierarchy
+list --scope <block> --depth 1    one block's own signals
+summary --scope <block>           active vs static, unknown bits
 ```
 
-### Protocol transaction extraction (AXI, AHB, etc.)
+**At time T**
 
 ```
-1. list --filter '*valid,*ready,*addr,*data,*len'
-2. search --condition "arvalid=1,arready=1" --show araddr,arlen
-3. search --condition "wvalid=1,wready=1" --show wdata,wstrb
+snapshot --at T --filter <sigs>
+dump --begin T-Δ --end T+Δ --filter <sigs>
+compare --at T-Δ,T+Δ --scope <block>
 ```
 
-`search` segment mode is the primary tool here — one row per
-sub-interval, with `--show` capturing the field values you care about.
-
-### Hunt an unexpected state
+**Protocol transactions**
 
 ```
-1. summary --scope <block>               rows with unknown:true carried an x/z bit
-2. search --condition "state=x"          when does it go unknown?
-3. search --condition "error!=0"         when does it assert?
-4. snapshot --at <first_hit>             full picture at that moment
-5. dump --begin <pre> --end <hit> --filter <relevant>
+list --filter '*valid,*ready,*addr,*data'
+search --condition "arvalid=1,arready=1" --show araddr,arlen
+search --condition "ch0_valid=1,ch0_ready=1" --condition "ch1_valid=1,ch1_ready=1"
 ```
 
-Step 1 is one call over the whole selection; the top-level `unknown` count
-says whether there is anything to chase before you read the rows.
-
-### Orient in an unfamiliar hierarchy
+**Unknown values**
 
 ```
-1. tree                                  top-level scopes
-2. tree <scope> --depth 2                what is inside one block
-3. tree --of <signal>                    the ancestor chain of a signal you already have
+summary --scope <block>                    rows with unknown:true had an x/z bit
+search --condition "state=x"               when every bit is x
+dump --filter <sig> --begin .. --end ..    partial x/z values
+snapshot --at <first hit> --scope <block>  context at that moment
 ```
 
-`tree --of` is the fastest way back up from a deep leaf: every row is a path you
-can paste straight into `--scope`. `--depth` counts scopes here, where `list`
-counts signals.
-
-### "Why does this signal have that value?" (FSDB + NPI only)
-
-```
-1. snapshot --at T --filter <signal>     confirm the value
-2. trace <signal> --at T                 the driving statement, with file:line
-3. trace <driver_signal> --at T          walk one level up the cone
-4. trace <signal> --load                 or go the other way: who reads it
-```
-
-Each `endpoints[]` entry carries `statement`, `file`, `line`, and the `signals[]`
-it reads; with `--at` those come with their values, so one call answers both
-"who drives it" and "what was it carrying". Follow a `signals[].path` into the
-next `trace` to walk the cone. Stop when `status` is `boundary_only`, which
-means the driver is outside what could be followed, or when a hop reaches a
-primary input.
-
-### Clock/reset sanity
+**Clock and reset**
 
 ```
 summary --filter '*clk*,*rst*,*reset*'
-# clk should toggle with balanced rise/fall
-# rst should be static after the initial assertion
-# noisy? --exclude '*_clkgen.*' drops generated clock trees
 ```
 
-### Event-driven signal investigation
+A clock should show balanced `rise_count`/`fall_count`; a reset should be
+static after its first release.
 
-Use `search --condition --show` to bulk-extract field values across events —
-one call replaces multiple `snapshot` calls. Catch specific edges with
-`changed()` terms (rising: `changed(x),x!=0`; falling: `changed(x),x=0`).
-Then drill down with `compare` for jump deltas, `dump --limit 0` for full
-traces, and `snapshot` for precise checkpoints.
-When a transition is visible in a different signal's trace, use `dump --limit 0` +
-external post-processing — not `search` with `changed()`.
+**Edges and events**
 
-`dump` with multiple signals interleaves their events chronologically —
-see e.g. a push flag and data bus transition side-by-side in one timeline.
+```
+search --condition "changed(req),req!=0" --show addr     rising edges, with addr
+search --condition "changed(req),ready=0"                req toggles while not ready
+```
 
-## Agent-side gotchas
+For a transition seen only through another signal's trace, use
+`dump --limit 0 -o FILE` and post-process the file.
 
-- **Output truncation.** Default `--limit` is 500. A clipped result carries
-  `truncated: true` and a `hint` field spelling out the re-run — take it,
-  with `--limit 0` (unlimited) or a larger value. `total_is_exact: false`
-  means `total` is a lower bound, not the true count. Never treat a
-  truncated result as the whole answer.
-- **Fixed JSON shape.** For a given command and flags, every documented key
-  is always present — `null`/`0`/`[]`/`{}` when it has nothing to say. Test a
-  key's *value*, never its presence. `search` answers under `rows` in all
-  three modes; read `mode` to know how to read a row.
-- **Errors are JSON too.** With `--json` a failure is
-  `{"command":…,"ok":false,"error":…}` on stderr with a non-zero exit code.
-  stdout carries results only, so one parser covers both.
-- **Check `matched` before reading rows.** `dump`, `summary`, `snapshot` and
-  `compare` carry `matched: {count, paths}` whenever a selection option was given
-  (`paths` stops at 10; `count` is exact). `count` larger than intended
-  means the pattern over-matched — re-run with a full name or a narrower
-  glob, not with a bigger `--limit`. Absent when no selection option was passed.
-- **Rows carry the canonical path.** A signal declared under several names
-  is always labelled with one of them. When the matched name differs, the
-  `hint` says so; do not assume the row path is the string you searched for.
-- **An empty result says why.** `shown: 0` comes with a `hint` naming the
-  cause: the selection matched nothing, the window starts after the last
-  event, or the signals simply did not change. Read it instead of guessing.
-- **`dump`/`summary` echo `window`.** `begin_ticks`/`end_ticks` are the
-  resolved window; a fractional time rounds to a tick and shows up there.
-  `snapshot` echoes `at_ticks` the same way.
-- **A flag the command does not read is an error.** `list --begin 1ns`,
-  `dump --at 1ns`, `info --filter clk` all exit 2. `--begin`/`--end` are
-  `dump`/`summary`/`search`; `--at` is `snapshot`/`compare`/`trace`.
-- **Exit code.** 0 answered (empty results too; read `hint`). 1 the file or
-  environment (cannot open/parse, the recorded design library, licence, a
-  result that cannot be written). 2 the request is wrong (flags, names,
-  conditions, times, `-o` naming a directory or the waveform, a `--kdb`
-  holding no design library): fix the command. 3 terminal output cut at
-  1 MiB. In `--batch`, a failed line carries the same number as `exit`.
-  Without `--json` the message is one line on stderr starting with `Error:`
-  (`rwave: error:` for an argv usage error).
-- **Big results: `-o FILE`.** `--limit 0` plus `-o out.json` writes the whole
-  result to the file (only on success) and prints a receipt
-  `{"command","output","bytes","lines"}`; read the file in pieces. In
-  `--batch`, `-o` goes on the `--batch` line and covers the whole run.
-- **`--json` everywhere.** Mixing text-mode parsing in is the most common
-  source of fragility. Pass `--json` on every invocation.
-- **Shell quoting.** Double-quote conditions (`--condition "changed(req),ready=0"`
-  — parens are shell metacharacters). If a signal name contains `$` (common
-  in gate-level netlists), single-quote so the shell doesn't expand it.
+**Why does X have this value?** (FSDB + NPI)
 
-## Documented behaviors that may surprise
+```
+snapshot --at T --filter <sig>
+trace <sig> --at T                driving statement, file:line, input values
+trace <driver input> --at T       one level up
+trace <sig> --load                who reads it
+```
 
-- `dump`'s ordering of *simultaneous* events follows declaration order
-  (not VCD writer-emission order). Set of events, timestamps, values are
-  identical to the reference; only intra-timestamp order can differ.
-- `comments` is always `[]` and `synthesized_buses` is always `0` 
-- A zero-width `search` window (`--begin T --end T`) yields no rows.
-- **Value format.** Clean 1-bit: `0`/`1`. Clean multi-bit: `0x<hex>`
-  (lower-case, leading zeros stripped — `0x4`, not `0x00000004`). Any value with
-  an unknown bit, 1-bit included: `b<bits>` at full width (`bx`, `bz`, `b01x0`).
-  Real: shortest round-trip decimal (`1.5`, `0` for `-0`, `NaN`). String
-  verbatim. Width is in the signal metadata, not the value.
+## Other behavior
 
-  ```python
-  is_unknown = value.startswith('b')    # 'bx', 'bz', 'b01x0'
-  n = int(value, 16)                    # '0', '1', '0x3' all parse directly
-  bits = value[1:]                      # unknown value: full-width bit string
-  ```
-
-  Never test `'x' in value` — every `0x` hex value contains an `x`.
-
-For everything else (time syntax, filter syntax, value formatting, format
-quirks, the FST `parameter`-value drop, performance notes) see [README_en.md](../README_en.md).
-
+- A flag the command does not read is an error: `dump --at`, `list --begin`,
+  `info --filter`.

@@ -38,15 +38,11 @@ pub(super) fn should_stream(n: usize) -> bool {
 /// unless an explicit `--limit` was supplied; `--limit 0` always means
 /// unlimited. Returns `0` for "unlimited".
 pub(super) fn limit_of(args: &Args) -> usize {
+    // Writing to a file is asking for the whole result, like --verbose.
     match args.limit {
         Some(n) => n.max(0) as usize,
-        None => {
-            if args.verbose {
-                0
-            } else {
-                DEFAULT_LIMIT
-            }
-        }
+        None if args.verbose || args.output.is_some() => 0,
+        None => DEFAULT_LIMIT,
     }
 }
 
@@ -116,6 +112,45 @@ pub(crate) fn sids_where(wave: &Wave, pred: impl Fn(&SignalInfo) -> bool) -> Vec
         .filter(|(_, info)| pred(info))
         .map(|(sid, _)| sid)
         .collect()
+}
+
+/// The signals a name spells as a full path: literally if any, else with `/`
+/// and `.` alike, else with the bus range left off.
+pub(crate) fn spelled_sids(wave: &Wave, pat_lower: &str) -> Vec<Sid> {
+    let pairs = wave.signals().iter().enumerate().flat_map(|(sid, info)| {
+        info.alias_pairs().map(move |pair| (sid, pair))
+    });
+    let mut hits: Vec<Sid> = best_spelled(pairs, pat_lower).into_iter().map(|(sid, _)| sid).collect();
+    hits.dedup();
+    hits
+}
+
+/// The items whose path `pat_lower` spells at the strictest
+/// [`Spelling`](crate::filter::Spelling) that finds any, lower-casing each
+/// path once.
+fn best_spelled<'a, T>(
+    items: impl Iterator<Item = (T, (&'a str, &'a str))>,
+    pat_lower: &str,
+) -> Vec<(T, (&'a str, &'a str))> {
+    let mut best = crate::filter::SPELLINGS.len();
+    let mut hits = Vec::new();
+    for (item, pair) in items {
+        let lowered = pair.0.to_lowercase();
+        let Some(tier) = crate::filter::SPELLINGS[..best]
+            .iter()
+            .position(|how| how.spells(&lowered, pat_lower))
+        else {
+            continue;
+        };
+        if tier < best {
+            best = tier;
+            hits.clear();
+        }
+        if tier == best {
+            hits.push((item, pair));
+        }
+    }
+    hits
 }
 
 /// Compile this invocation's selection options, honouring `--exact`, and
@@ -305,6 +340,19 @@ impl Hints {
             obj.push("hint", Json::str(self.text()))
         }
     }
+}
+
+/// A note when time `t` lies past the last recorded event, so a units slip
+/// (`5s` for `5ns`) does not pass as an ordinary answer.
+pub(super) fn past_end_note(wave: &Wave, t: i64, ts: f64) -> Option<String> {
+    let (_, mx) = wave.time_range()?;
+    (t > mx).then(|| {
+        format!(
+            "{} is after the last event at {}; values from there on are the final ones",
+            crate::format::fmt_time(t, ts),
+            crate::format::fmt_time(mx, ts)
+        )
+    })
 }
 
 /// Said when the file's hierarchy is empty. Distinct from [`SELECTION_EMPTY`]:
@@ -556,14 +604,11 @@ pub(super) fn resolve_signal_path(
 ) -> Result<(String, String), String> {
     let pat = pattern.trim();
     let pl = pat.to_lowercase();
-    let mut exact: Vec<(String, String)> = Vec::new();
-    for i in 0..wave.signal_count() {
-        for (path, scope) in wave.signal(i).alias_pairs() {
-            if path.to_lowercase() == pl {
-                exact.push((path.to_string(), scope.to_string()));
-            }
-        }
-    }
+    let pairs = wave.signals().iter().flat_map(|info| info.alias_pairs().map(|pair| ((), pair)));
+    let mut exact: Vec<(String, String)> = best_spelled(pairs, &pl)
+        .into_iter()
+        .map(|(_, (path, scope))| (path.to_string(), scope.to_string()))
+        .collect();
     exact.sort();
     exact.dedup();
     if exact.len() == 1 {
@@ -583,7 +628,7 @@ pub(super) fn resolve_signal_path(
     hits.dedup();
     match hits.len() {
         0 => Err(format!(
-            "{role} matches no signals: {}",
+            "{role} matches no signals: {}; find the name with list --filter <part>",
             crate::format::pyrepr(pat)
         )),
         1 => Ok(hits.into_iter().next().unwrap()),

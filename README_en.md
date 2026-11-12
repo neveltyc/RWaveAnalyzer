@@ -19,30 +19,18 @@
 
 ---
 
-## Why RWaveAnalyzer?
-
-You have a multi-gigabyte FST from an overnight regression, and you need to know
-exactly when `arvalid` and `arready` were both high, or what `state[3:0]` held at
-17.55 µs. Opening Verdi or GTKWave means waiting for a GUI to start, clicking
-down the hierarchy, and reading values off a cursor. RWaveAnalyzer answers the
-same questions from the terminal, in a single command:
+Find when `arvalid` and `arready` were both high with one command, no GUI:
 
 ```sh
 rwave search sim.fst --condition "arvalid=1,arready=1" --show araddr,arlen
 ```
 
-The tool is a single self-contained binary called `rwave`. It reads the open
-**VCD**, **FST**, and **GHW** formats, and on linux-amd64 it adds experimental
-support for the **WLF** (Mentor/Questa) and **FSDB** (Synopsys/Verdi) databases,
-which it reads through each vendor's own library (see [WLF and FSDB](#experimental-support-for-wlf-and-fsdb)).
-Every command also has a `--json` mode with stable keys, so the same tool drives
-a human at a prompt, a CI gate, and an AI agent equally well. Whole-file commands
-stream their work in bounded memory, so a dump with hundreds of thousands of
-signals does not exhaust RAM.
+- **Single binary**, no runtime dependencies.
+- **Formats**: VCD, FST, GHW; experimental WLF and FSDB on linux-amd64.
+- **JSON output**: every command takes `--json`, with stable keys for scripts, CI, and AI agents.
+- **Large files**: whole-file commands stream in batches with bounded memory.
 
 ## Quick start
-
-Point any command at a `.vcd`, `.fst`, `.ghw` (or `.wlf` / `.fsdb`) file:
 
 ```sh
 # What's in this file?
@@ -60,10 +48,10 @@ rwave search sim.fst --condition "valid=1,ready=1" --show data
 # At which instants does req toggle while ready is low?
 rwave search sim.fst --condition "changed(req),ready=0" --show state
 
-# When does ANY of several channels handshake? (repeat --condition to OR)
+# When does any channel handshake? (repeat --condition to OR)
 rwave search sim.fst --condition "ch0_valid=1,ch0_ready=1" --condition "ch1_valid=1,ch1_ready=1"
 
-# What are all known values at exactly 17.55 us?
+# Values at 17.55 us
 rwave snapshot sim.fst --at 17.55us --filter state,init_done
 
 # What changed between two times?
@@ -72,19 +60,16 @@ rwave compare sim.fst --at 17.5us,17.7us --filter bus
 # Which signals are active versus static?
 rwave summary sim.fst --filter alu
 
-# Just this block, and not its submodules
+# Just this block, not its submodules
 rwave list sim.fst --scope u_tx.u_fifo --depth 1
 
 # Everything but the CDC synchronizers
 rwave summary sim.fst --exclude '*_sync_*.*'
 ```
 
-Add `--json` to any command for compact, machine-readable output.
-
 ## Install
 
-Download the `rwave` binary for your platform from the
-[latest release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest):
+Download the binary for your platform from the [latest release](https://github.com/neveltyc/RWaveAnalyzer/releases/latest):
 
 | Platform | Binary | VCD · FST · GHW | WLF | FSDB |
 |:--|:--|:--:|:--:|:--:|
@@ -100,34 +85,20 @@ chmod +x rwave
 ./rwave --version
 ```
 
-Every binary reads VCD/FST/GHW; WLF and FSDB are linux-amd64 only (see
-[WLF and FSDB](#experimental-support-for-wlf-and-fsdb)). The `rwave-linux-amd64` build is dynamically linked
-against glibc with a 2.17 baseline (manylinux2014), so it runs on every
-mainstream Linux distribution released since 2014.
+`rwave-linux-amd64` needs glibc 2.17 or newer.
 
 ## Building from source
 
-The only requirement for a local build is a recent stable Rust toolchain
-(developed against 1.90, edition 2024). The build is pure Rust — there is no C
-code, no `build.rs`, and no system dependency to install — so a plain `cargo`
-invocation produces a binary for the host machine:
+Needs a stable Rust toolchain, 1.90 or newer. No other system dependencies.
 
 ```sh
-cargo build --release      # → target/release/rwave
+cargo build --release                         # → target/release/rwave
+cargo build --release --no-default-features   # VCD/FST/GHW only
 ```
 
-The WLF and FSDB backends are gated behind the default-on `wlf` and `fsdb`
-features and are further restricted to `x86_64` Linux at compile time; on any
-other host they compile out and you are left with the VCD/FST/GHW core.
-`--no-default-features` forces that pure core on any platform. The parser
-front-end (`wellen`) and its FST reader are vendored under `vendor/`, so the
-build needs no network access and always uses the exact, pinned parser revision.
+The WLF and FSDB backends compile only on x86_64 Linux; other platforms get VCD/FST/GHW.
 
-To produce the four release binaries, `scripts/build-release.sh` cross-compiles
-them with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (Zig
-as the cross-linker), so the same recipe works from any host — only the macOS
-target requires a macOS machine. Each target receives the correct feature set
-automatically, and `linux-amd64` is pinned to the glibc 2.17 baseline.
+Cross-building the release binaries uses [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild); the macOS target builds only on macOS:
 
 | Target | Triple | Output |
 |:--|:--|:--|
@@ -145,171 +116,120 @@ rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-musl \
                   x86_64-pc-windows-gnu aarch64-apple-darwin
 
 ./scripts/build-release.sh                        # all four targets
-./scripts/build-release.sh --target linux-amd64   # a single target
+./scripts/build-release.sh --target linux-amd64   # one target
 ```
 
-The script checks its prerequisites up front and prints the exact install
-command for anything that is missing. [docs/BUILD.md](docs/BUILD.md) covers the
-cross-compilation setup, the per-target linking choices, and the Linux recipe in
-full.
+Details in [docs/BUILD.md](docs/BUILD.md). Tests:
+
+```sh
+cargo test
+bash verify/run.sh
+```
 
 ## Commands
 
 ```
-rwave [--json] [--limit N] [--verbose] <command> <file> [options]
+rwave [--json] [--limit N] [--verbose] [-o FILE] <command> <file> [options]
 rwave --batch [--json] <file> [global-opts] < commands.txt
 ```
 
 | Command | What it does |
 |:--|:--|
-| `info`     | Timescale, signal and type counts, time span, and scopes — the file at a glance |
-| `list`     | Enumerate signals with path, width, and type (one row per alias path) |
-| `dump`     | Print every value change in a time window, in time order |
-| `summary`  | Per-signal statistics: active versus static, change count, rise/fall edges, whether it ever carried an unknown bit |
-| `snapshot` | All known signal values at one time point (`--at T`) |
-| `compare`  | What changed between two time points (`--at T1,T2`) |
-| `search`   | Find the intervals — or, with `changed(SIG)`, the instants — where a condition holds |
-| `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s full ancestor chain |
-| `trace`    | Who drives a signal, or what it drives, with `file:line` — FSDB via the built-in Verdi NPI backend only. On by default; `RWAVE_TRACE_EN=0` turns it off |
+| `info`     | Timescale, signal counts, time span, scopes |
+| `list`     | Signal paths, widths, types |
+| `dump`     | Every value change in a time window |
+| `summary`  | Per-signal change count, rising/falling edges, unknown bits seen |
+| `snapshot` | All signal values at one time |
+| `compare`  | What changed between two times |
+| `search`   | Spans where a condition holds, or instants a `changed()` fires |
+| `tree`     | Browse the hierarchy: a scope's children, or `--of SIGNAL`'s ancestors |
+| `trace`    | A signal's drivers and loads with `file:line` (FSDB only, see [trace](#tracing-drivers-and-loads)) |
 
-- **Selection.** Every command but `info`, `tree`, and `trace` takes the five
-  [signal-selection](#selecting-signals) options; `tree` takes `--scope`/`--depth`.
-- **Time.** `dump`, `summary`, and `search` take a `--begin`/`--end` window;
-  `snapshot`/`compare` take instants (`--at`). Times use the suffixes `fs`, `ps`,
-  `ns`, `us`, `ms`, `s` (e.g. `17.5us`); a bare integer is raw ticks.
-- **Global flags.** `--json` for structured output, `--limit N` to cap rows
-  (default 500, `0` = unlimited), `--verbose` for extra fields. A clipped result
-  says so on its last line and carries a `hint` field under `--json`.
-  `-o/--output FILE` writes the whole result to FILE (only on success) and
-  prints a one-line receipt. Output to a terminal (stdout or the `-o` target)
-  stops after 1 MiB (exit 3); pipes, redirects and files get everything.
-- **Conditions** (`search`) are a comma-separated AND-list of `SIG=VAL`,
-  `SIG!=VAL`, or `changed(SIG)`; values are decimal, hex (`0xff`), binary
-  (`b1010`), or 4-state; a `?` in a binary literal is a don't-care bit, like `?`
-  in a Verilog `casez` item (`status=b?????1??` tests bit 2 of an 8-bit bus; a
-  short literal pads with 0, so write every bit). A negative decimal is two's
-  complement in the signal's width (`cnt=-1`); a real signal compares numbers
-  (`temp=-1.5`, `dac=100`); on a string signal a number or bit literal
-  compares as text (`s=5`). A value the signal cannot hold (`state=99` on 4
-  bits, `bit=2`, `temp=b101`) is an error, not an empty result.
-  `changed(SIG)` switches to event mode — the instants SIG
-  transitions while the rest of the clause holds. Repeat `--condition` to OR the
-  clauses (all must contain a `changed()` term, or none may); there is no
-  in-string OR.
+| Option | What it does |
+|:--|:--|
+| `--json`            | Compact JSON, see [JSON output](#json-output) |
+| `--limit N`         | At most N rows, default 500 (unlimited with `-o` or `--verbose`), `0` = unlimited; a cut ends with a hint line |
+| `--verbose`         | More fields |
+| `-o, --output FILE` | Full result to FILE (created only on success); stdout gets a one-line receipt |
+| `--begin T` / `--end T` | Time window for `dump`, `summary`, `search` |
+| `--at T`            | Time point for `snapshot`; `compare` takes `--at T1,T2` |
 
-Run `rwave <command> --help` for the complete reference.
+- Times take a `fs`, `ps`, `ns`, `us`, `ms`, or `s` suffix (`17.5us`); a bare number is raw ticks.
+- Terminal output stops at 1 MiB with exit 3; pipes and files are unlimited.
+- `rwave --help` is the syntax summary; `rwave --help --verbose` prints the full manual.
+
+### Search conditions
+
+| Syntax | Meaning |
+|:--|:--|
+| `SIG=VAL` / `SIG!=VAL` | Equal / not equal |
+| `changed(SIG)`         | Instants SIG toggles, reported as times instead of spans |
+| `--show K1,K2`         | Spans split wherever a shown value changes, so the row count depends on `--show` |
+| `A=1,B=0`              | Comma = AND |
+| Repeated `--condition` | OR between them; all use `changed()` or none do |
+
+| Value | Syntax |
+|:--|:--|
+| Decimal  | `cnt=5`; negatives are two's complement at the signal width, `cnt=-1` |
+| Hex      | `addr=0xff` |
+| Binary / 4-state | `state=b1010`, `bus=bx`; `?` is a don't-care, `status=b?????1??` tests bit 2 (short literals zero-extend, so write every bit) |
+| real     | Numeric compare, `temp=-1.5` |
+| string   | A number or bit literal, compared as text, `s=5` |
+
+A value the signal can never hold is an error, e.g. `state=99` on a 4-bit `state`.
 
 ## Selecting signals
 
-A dump has more signals than any one question needs. Five options narrow it,
-and they compose as a pipeline over each signal path in turn:
+Every command except `info`, `tree`, and `trace` takes these five options (`tree` takes `--scope` and `--depth` only):
 
-| | |
+| Option | What it does |
 |:--|:--|
-| `--scope P1,P2`  | which subtree to look in |
-| `--depth N`      | how far below that subtree's root to go (requires `--scope`) |
-| `--filter K1,K2` | which names to keep |
-| `--exclude K1,K2`| what to drop, applied last |
-| `--exact`        | a name no signal has matches nothing, instead of a substring (rarely needed) |
+| `--scope P1,P2`   | Only these subtrees; segment-aligned, so `u_fifo` never hits `u_fifo_ctrl` |
+| `--depth N`       | Levels below the scope, direct signals = 1; needs `--scope` (except `tree`) |
+| `--filter K1,K2`  | Keep matches |
+| `--exclude K1,K2` | Drop matches, applied last |
+| `--exact`         | Full names only, no substring fallback |
 
-```sh
-# One block, not its submodules.
-rwave list sim.fst --scope u_tx.u_fifo --depth 1
+Matching rules:
 
-# A status bit, without the CDC synchronizer named after it.
-rwave summary sim.fst --filter tx_fifo_push_err
-
-# Everything except the clock trees.
-rwave dump sim.fst --begin 1us --end 2us --exclude '*clk*,*_clkgen.*'
-```
-
-**Name vs. path.** A pattern with no separator matches a signal's **leaf name**;
-one with a `.` or `/` matches its **whole path**. This matters: RTL names a CDC
-synchronizer after the signal it carries (`u_sync_<sig>`), so a path match for
-`tx_fifo_push_err` also pulls in every net inside that synchronizer. Match the
-leaf for the signal itself; add a dot (`--filter 'u_dma.'`) to address the
-hierarchy. A pattern with `*`/`?` is an anchored glob; `[`/`]` are literal,
-matching is case-insensitive, and comma-separated patterns are ORed.
-
-**A name selects that signal; a fragment searches.** A wildcard-free pattern
-that is some signal's whole name, leaf or path, selects only the signals with
-that name: `--filter
-DtsmTrainVal0Min` leaves `DtsmTrainVal0Min_strobe` out, `--filter top.sig3`
-leaves `top.sig30` out. A bus range is optional (`state` names `state[2:0]`, not
-`state_next[2:0]`), and a path may start at any segment (`u_dma.req` names
-`top.u_dma.req`). A pattern that is no signal's name is a substring
-(`--filter fifo` finds every `*fifo*`), and `name*` asks for the prefix. The
-whole-name check looks only within `--scope`/`--depth`. The same rule applies
-to `--exclude` and to `search`'s `--condition`/`--show` names, so `--exclude clk`
-drops the signal named `clk`; `--exclude '*clk*'` drops every clock.
-
-**The output says what it caught.** `dump`, `summary`, `snapshot` and `compare` print
-`Matched N signals: <paths>` above the rows (a count alone past 10), and carry
-the same under a `matched` key in JSON. Where a waveform declares one signal
-under several names, both the matched name and the canonical name the rows
-carry are shown (`A -> B`), since the rows only ever use the canonical one.
-
-**`--scope`** matches segment by segment (`u_fifo` never hits `u_fifo_ctrl`),
-takes a subtree with its descendants, and matches a path as a segment-aligned
-suffix. **`--depth`** counts from the matched scope (a signal directly in it is
-depth 1) and needs `--scope` — except `tree`, which counts scopes from the root
-and takes `--depth` alone.
-
-**Per-path, not per-signal.** A signal survives if any one of its paths clears
-every option — which is what makes `--exclude` safe on a net that also lives
-inside a synchronizer: the outer path keeps the signal, the synchronizer's own
-nets (no outer path) drop out. `search` has no row filter — its `--condition`
-and `--show` names *are* the selection, so the options only disambiguate how a
-name **resolves**; a full path bypasses selection entirely. A match of nothing
-is an empty result, not an error, and an empty value (`--filter ''`) reads as
-"not given" (how a `--batch` line lifts a default).
+- A pattern without `.` or `/` matches the signal name; with one, the full path, e.g. `--filter 'u_dma.'`. The two separators are interchangeable.
+- If a signal's full name equals the pattern, only that signal is selected: `top.sig3` does not select `top.sig30`. Paths may start at any segment (`u_dma.req`); the bus range is optional (`state` selects `state[2:0]`).
+- With no exact name, the pattern matches as a substring; write `name*` for a prefix.
+- `*` and `?` make an anchored glob, bus range optional (`*data` finds `data[7:0]`); `[` and `]` are literal; case-insensitive; commas mean OR.
+- `--exclude` and `search`'s `--condition`/`--show` follow the same rules: `--exclude clk` drops only `clk`; drop every clock with `--exclude '*clk*'`.
+- No match is an empty result, not an error; `--filter ''` is the same as omitting it.
 
 ## JSON output
-
-Under `--json`, every command emits compact structured JSON. Each time is given
-both as a raw tick count (the `*_ticks` fields) and in human-readable form (the
-`*_h` fields), so the output is equally usable by a script, a CI gate, or an AI
-agent rather than only by a person reading the terminal. Signal values render
-compactly for the same reason: a clean 1-bit logic signal as `0`/`1`, a clean
-multi-bit bus as `0x<hex>` with leading zeros stripped (e.g. `0x4`), any value
-with an unknown bit as `b<bits>` at full width (`bx`, `bz`, `b01x0`), and
-reals as the shortest decimal that round-trips (`1.50` is `1.5`, `-0` is `0`,
-NaN is `NaN`), strings verbatim. The `b` prefix is the one test for "has unknown
-bits" — do not test for the letter `x`, every `0x` value contains it. The
-width is in each signal's metadata, so it is not re-encoded as hex padding.
 
 ```sh
 rwave --json info sim.fst
 rwave --json search sim.fst --condition "state=5" --show data
 ```
 
-**Shape follows the invocation, never the data.** For a given command and a
-given set of flags the key set is fixed: every documented key is always
-present, in the documented order, carrying `null` / `0` / `[]` / `{}` when it
-has nothing to say. Test a key's value, never its presence. `--verbose` adds a
-further fixed set — you know whether you passed it.
+- Every time comes as raw ticks (`*_ticks`) and human-readable (`*_h`).
+- For a given command and flags, the key set and order are fixed; empty values are `null`, `0`, `[]`, or `{}`.
+- Errors are JSON on stderr: `{"command":"dump","ok":false,"error":"..."}`.
 
-Failures are JSON too: on stderr, as
-`{"command":"dump","ok":false,"error":"..."}`. stdout carries results only, so
-one parser covers both paths.
-
-| exit | meaning |
+| Value type | Format |
 |:--|:--|
-| 0 | answered; an empty result too, which says why (`hint`) |
-| 1 | the file or environment: cannot open/parse, the recorded design library, licence, a result that cannot be written |
-| 2 | the request: flags, names, conditions, times, `-o` naming a directory or the waveform, a `--kdb` holding no design library; change the command |
-| 3 | terminal output cut at 1 MiB; the result is incomplete, send it to a file or a pipe |
+| 1-bit logic | `0`, `1` |
+| Multi-bit   | `0x<hex>`, no zero padding, e.g. `0x4` |
+| Unknown bits | Full-width `b<bits>`, e.g. `bx`, `b01x0`; test the `b` prefix, not for an `x` |
+| real        | Shortest exact decimal, e.g. `1.5`, `NaN` |
+| string      | As is |
 
-The full per-command field reference is in [docs/JSON.md](docs/JSON.md).
+| Exit | Meaning |
+|:--|:--|
+| 0 | Answered, empty results included (`hint` says why) |
+| 1 | File or environment: unreadable or unparsable file, design library or license unavailable, result not written |
+| 2 | Bad request: wrong option, signal name, condition, or time; fix the command |
+| 3 | Terminal output cut at 1 MiB; write to a file or pipe instead |
+
+Per-command fields: [docs/JSON.md](docs/JSON.md).
 
 ## Batch mode
 
-Large FSDB and WLF databases are read through a vendor library, where each
-"open" spins up a C++ runtime and indexes the whole hierarchy — seconds to tens
-of seconds for a multi-gigabyte file. When several queries target the *same*
-file (a CI gate, a scripted extraction, an AI agent's multi-step plan), paying
-that cost once instead of once per query matters. `--batch` does exactly that:
-it loads the file **once**, then runs a list of commands read from stdin.
+`--batch` loads the file once and runs the commands on stdin in order, saving the load time on repeated queries against one large file (FSDB and WLF especially).
 
 ```sh
 printf '%s\n' \
@@ -320,80 +240,46 @@ printf '%s\n' \
   | rwave --batch --json sim.fst
 ```
 
-Each input line is an ordinary command with the leading `rwave` and the file
-omitted — both are already fixed by the `--batch` invocation. Blank lines and
-lines beginning with `#` are skipped; a trailing `#label` names that line's
-result. Any `[global-opts]` on the `--batch` command line (`--limit`,
-`--verbose`, the selection options, …) become defaults that an individual line
-can override. A `--batch`-wide `--exclude` is a good way to keep one class of
-noise out of every query in a plan; each option overrides its own default
-independently, so a line that wants one of them lifted passes it empty
-(`--filter ''`) without disturbing the rest.
-
-Results come back in input order, one per command. With `--json` each is a
-single NDJSON object; without it, each is a `#label` header followed by that
-command's usual text output:
-
 ```
 {"id":"1","ok":true,"result":{ …info… }}
 {"id":"2","ok":true,"result":{ …list… }}
 ```
 
-A batch `result` is identical to what the equivalent single command would
-produce — batch only saves the repeated load, it never changes a command's
-output. A command that fails (an unknown signal, an illegal time) is reported
-with `"ok":false`, and an `exit` field with the status it would have exited
-with alone, and does **not** stop the batch; the run still exits `0`. Only a
-file that cannot be loaded, a command stream that cannot be read, a result that
-cannot be written (exit 1) or a terminal cut (exit 3) ends the run.
+- One command per line, without `rwave` and the file. Blank and `#` lines are skipped; a trailing `#label` names the result.
+- Options on the `--batch` command line are per-line defaults; a line can override them, and an empty value (`--filter ''`) drops one.
+- Results come back in input order, identical to running each command alone: one NDJSON line each with `--json`, a `#label` header each in text mode.
+- A failed command reports `"ok":false` and its standalone `exit`, and the batch continues.
 
-## Experimental support for WLF and FSDB
+## WLF and FSDB (experimental)
 
-On linux-amd64, RWaveAnalyzer provides experimental support for two vendor
-waveform databases — Mentor/Siemens **WLF** and Synopsys **FSDB** — by calling
-into each vendor's own reader library at runtime. There is no format conversion
-step and no intermediate file.
+linux-amd64 only. rwave reads them in place through the vendor's own libraries, no conversion.
 
 ### WLF
-
-rwave reads Questa / ModelSim `.wlf` files through `libwlf.so`. Point
-`RWAVE_WLF_LIB` at the library from your Questa installation:
 
 ```sh
 export RWAVE_WLF_LIB=/path/to/questa/linux_x86_64/libwlf.so
 rwave info run.wlf
 ```
 
-The vendor tool must be installed on the same machine; rwave loads `libwlf.so`
-at runtime and does not ship it.
-
 ### FSDB
 
-rwave supports two ways to read `.fsdb` files. Both are experimental and
-linux-amd64 only.
+Two ways:
 
-**Built-in backend (NPI)** — ships with the `rwave-linux-amd64` binary; no
-extra build step. rwave calls Synopsys's NPI (Novas Programming Interface)
-through `libNPI.so` from your Verdi installation. This path requires a
-Verdi-Ultra license feature on the host. All it needs is `VERDI_HOME`:
+| | Built-in NPI backend | [rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) |
+|:--|:--|:--|
+| Get it | Included in `rwave-linux-amd64` | Build it on a machine with Verdi |
+| License | Verdi-Ultra | No Verdi-Ultra needed |
+| Set | `VERDI_HOME` | `RWAVE_PLUGIN_FSDB` |
+| `trace` | ✓ | — |
+
+Built-in backend:
 
 ```sh
-export VERDI_HOME=/path/to/verdi     # usually already set once you source Verdi
+export VERDI_HOME=/path/to/verdi     # usually set by sourcing the Verdi env
 rwave info sim.fsdb
 ```
 
-rwave finds `libNPI.so` under `$VERDI_HOME` on its own — no `LD_LIBRARY_PATH`
-needed. Point `RWAVE_FSDB_LIB` at a specific `libNPI.so` only for a non-standard
-layout.
-
-**Plugin backend
-([rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin))**
-— a source-only plugin that reads FSDB through Synopsys's FsdbReader interface.
-You compile it yourself on a machine that has a licensed Verdi installation,
-because the build links against vendor libraries that cannot be redistributed.
-This path does not require the Verdi-Ultra license feature that the NPI backend
-needs — if you need to read FSDB on any linux-amd64 environment, choose this
-approach:
+Plugin:
 
 ```sh
 # build on a machine with Verdi
@@ -401,170 +287,55 @@ git clone https://github.com/neveltyc/rwave-open-fsdb-plugin
 cd rwave-open-fsdb-plugin
 ./configure && make bundle
 
-# deploy — unpack the bundle, point rwave at the plugin
+# deploy
 mkdir -p ~/.rwave
 tar xzf dist/rwave_fsdb_backend-*-linux_x86_64.tar.gz -C ~/.rwave --strip-components=1
 export RWAVE_PLUGIN_FSDB="$HOME/.rwave/librwave_fsdb_backend.so"
 rwave info sim.fsdb
 ```
 
-When `RWAVE_PLUGIN_FSDB` is set it overrides the built-in NPI backend for
-`.fsdb` files.
-
-The plugin is built against rwave's backend ABI, currently **v2**. rwave
-requires an exact match and says so if it differs, naming both versions;
-rebuild the plugin when it does.
+With `RWAVE_PLUGIN_FSDB` set, the plugin overrides the built-in backend. The plugin must match rwave's backend ABI version (currently v2); on a mismatch rwave errors out, and rebuilding the plugin fixes it.
 
 ### Tracing drivers and loads
 
-`trace` answers "who drives this signal" and "what reads it", with the driving
-statement's source text and `file:line`. It is on wherever the built-in Verdi
-NPI backend is: on any other file it says so and exits 2.
-
-It is the one command that reads something other than the waveform — the
-elaborated design library, which costs a licence checkout — so the switch that
-used to gate it is kept as a kill switch: `RWAVE_TRACE_EN=0` refuses outright.
+`trace` finds a signal's drivers or loads, with the source statement and `file:line`. It needs an FSDB opened through the built-in NPI backend and checks out a license while it runs.
 
 ```bash
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res
 rwave trace sim.fsdb tb.dut.u_core.u_alu.res --load --at 1250ns
 ```
 
-Connectivity comes from Verdi's elaborated design database, built with
-`vcs -kdb -debug_access+all` or with `vericom -kdb` plus `elabcom -elab kdb`.
-You do not normally say where it is: VCS records the path in the FSDB header.
-Pass `--kdb <simv.daidir>` only when rwave reports that path unreachable, which
-happens when a dump is copied away from its build.
+It needs the Verdi design library, built with `vcs -kdb -debug_access+all`, or `vericom -kdb` plus `elabcom -elab kdb`. rwave reads its path from the FSDB header; if that path has moved, pass `--kdb`.
 
-`trace` requires an `.fsdb` opened by the built-in Verdi NPI backend, so setting
-`RWAVE_PLUGIN_FSDB` turns it off. Other formats report it as unsupported.
-
-| Option | Effect |
+| Option | What it does |
 |:--|:--|
-| `--load` | what reads the signal, instead of what drives it |
-| `--at T` | annotate each endpoint with its value at T |
-| `--control` | include clock, reset, and enclosing `if`/`case` dependencies |
-| `--kdb DIR` | design database, when the recorded path is unreachable |
-| `--top NAME` | design top module, when it differs from the waveform's |
+| `--load`     | Who reads the signal instead of who drives it |
+| `--at T`     | Annotate each endpoint with its value at T |
+| `--control`  | Include clocks, resets, and enclosing `if`/`case` dependencies |
+| `--kdb DIR`  | Design library path |
+| `--top NAME` | Design top module, when it differs from the waveform's |
 
 ### Environment variables
 
-| Variable | Required? | What it does |
+| Variable | Required | What it does |
 |:--|:--|:--|
-| `VERDI_HOME`       | for `.fsdb` | Your Verdi install. rwave auto-discovers `libNPI.so` (and `libnpiL1.so` for `trace`) under it; needs a Verdi-Ultra license. |
-| `RWAVE_WLF_LIB`    | for `.wlf` | Absolute path to `libwlf.so`. |
-| `RWAVE_TRACE_EN`   | optional | `trace` is on by default; set to `0` to refuse it outright (it reads the design library, which costs a licence checkout). |
-| `RWAVE_FSDB_LIB`   | optional | Absolute path to `libNPI.so`. Overrides the `VERDI_HOME` auto-discovery, for a non-standard layout. |
-| `RWAVE_NPI_L1_LIB` | optional | Absolute path to `libnpiL1.so` (NPI connectivity library, used by `trace`). Override if it is not beside `libNPI.so`. |
-| `RWAVE_PLUGIN_FSDB` | optional | Absolute path to `librwave_fsdb_backend.so` from the plugin build. Overrides the built-in FSDB backend. |
+| `VERDI_HOME`        | for `.fsdb` | Verdi install dir; rwave finds `libNPI.so` and `libnpiL1.so` under it |
+| `RWAVE_WLF_LIB`     | for `.wlf`  | Path to `libwlf.so` |
+| `RWAVE_TRACE_EN`    | optional | `0` disables `trace` |
+| `RWAVE_FSDB_LIB`    | optional | Path to `libNPI.so`, for a non-standard Verdi layout |
+| `RWAVE_NPI_L1_LIB`  | optional | Path to `libnpiL1.so`, when it isn't next to `libNPI.so` |
+| `RWAVE_PLUGIN_FSDB` | optional | Path to the FSDB plugin's `librwave_fsdb_backend.so` |
 
-For other formats or a custom backend implementation, rwave loads any shared
-library that implements its C ABI from `$RWAVE_PLUGIN_<EXT>` — see
-[docs/PLUGIN.md](docs/PLUGIN.md).
+Other formats can load your own backend via `$RWAVE_PLUGIN_<EXT>`; see [docs/PLUGIN.md](docs/PLUGIN.md).
 
 ## Disclaimer
 
-RWaveAnalyzer reads WLF and FSDB only through each vendor's own reader library
-interface. It contains no vendor binaries and no vendor source code, links
-against none of them at build time, and redistributes no vendor software; at
-runtime it loads the reader library that you supply from your own licensed
-installation. The
-[rwave-open-fsdb-plugin](https://github.com/neveltyc/rwave-open-fsdb-plugin) is
-likewise source-only and ships no vendor binaries — you compile it against your
-own Verdi installation. Reading these formats requires the vendor's software and,
-where applicable, a valid license on your machine; obtaining and using those
-under the vendor's terms is your responsibility.
+rwave contains, links, and distributes no vendor software; at runtime it loads libraries from your own licensed installation. Obtaining and using that software and its licenses under the vendor's terms is your responsibility.
 
 ## For AI agents
 
-The repository ships an agent skill at [skill/SKILL.md](skill/SKILL.md): a
-decision tree that maps user intent to a command, a cheat sheet of the JSON
-fields, the condition grammar, the WLF/FSDB setup, and a handful of debugging
-workflows. Point your agent at it, and the `--json` output of every command does
-the rest.
-
-## Architecture
-
-The crate is layered top to bottom, and each layer depends only on the ones
-below it:
-
-```
-        cli            argument parsing only
-         │
-      commands         per-command logic and presentation (text / JSON)
-         │
-       model           format-neutral domain: signal table, replay, snapshots
-         │
-      backend          WaveformBackend trait (the parser contract)
-         │
-  wellen_backend       the only code that touches the wellen parser
-```
-
-The decisive boundary is the **`WaveformBackend`** trait. A backend hands the
-model fully decoded, owned per-signal traces (parallel time and value arrays);
-the model owns all of the replay, merging, and snapshot logic and works purely
-over slices. Because the trait surface is coarse — there is no per-sample virtual
-call — the hot path stays monomorphic, and adding a parser means adding a single
-file under `backend/`. The vendor and plugin formats enter through that same
-boundary: a backend can come from a vtable compiled into the binary
-(`plugin/builtin/`) or from a `dlopen`ed library (`plugin/loader.rs`), and either
-one is driven through `plugin_backend.rs` and the C ABI in
-[`crates/rwave/include/rwave_backend.h`](crates/rwave/include/rwave_backend.h).
-
-At the top level the repository is organized as follows:
-
-```
-crates/rwave/      the rwave crate (CLI, model, backends, plugin ABI)
-vendor/            vendored parser front-end: wellen + a patched fst-reader
-verify/            self-test harness with committed stimulus
-scripts/           release build and stimulus-generation scripts
-skill/             the agent-skill descriptor
-docs/              extended documentation (BUILD, PLUGIN)
-.github/workflows/ CI (ci.yml), release (release.yml), and benchmark (bench.yml)
-```
-
-## Performance
-
-- **Replay** is a binary min-heap k-way merge over the selected signals' traces,
-  `O(n log k)` for `n` changes across `k` signals; ties within one timestamp
-  resolve to writer (declaration) order.
-- **Snapshots and `compare`** binary-search each signal for the last value at or
-  before the target time, with no full replay.
-- **Whole-file commands** — `summary`, and unfiltered `dump`/`snapshot`/`compare`
-  — decode signals in memory-bounded batches and release each batch as they go,
-  so peak memory is proportional to one batch rather than to the whole file.
-  `summary` computes its per-signal statistics directly from each trace in an
-  allocation-light loop, and `dump` keeps only the earliest `--limit` events in a
-  bounded heap.
-
-These streaming paths produce byte-identical output to the simple eager paths;
-the switch between them is purely a memory and throughput optimization keyed on
-how many signals were selected.
-
-## Testing
-
-```sh
-cargo test                  # unit tests: formatting, filters, conditions, CLI
-bash verify/run.sh          # smoke test plus VCD/FST parity on bundled stimulus
-```
-
-`verify/run.sh` needs only the built binary: it confirms that every command runs
-on both a VCD and an FST, and that the value-bearing commands produce identical
-results across the two formats for the same design — a self-contained regression
-net that needs no external reference.
+[skill/SKILL.md](skill/SKILL.md) is the agent skill and the full manual that `rwave --help --verbose` prints: principles, command choice, a JSON field reference, and debug recipes.
 
 ## License
 
-MIT — see [LICENSE](LICENSE), which covers rwave's own code. The vendored
-components keep their own licenses: `vendor/wellen` and `vendor/fst-reader` are
-both BSD-3-Clause, and each retains its license file in its own directory.
-
-Because rwave ships as a single self-contained binary, a downloaded release
-asset carries no repository around it — so the notices its dependencies require
-in a binary redistribution are collected in
-[third-party-licenses.md](third-party-licenses.md), which is published with every
-release. Regenerate it after a dependency change:
-
-```sh
-bash scripts/gen-licenses.sh
-```
+MIT, see [LICENSE](LICENSE). `vendor/wellen` and `vendor/fst-reader` are BSD-3-Clause. Notices for the dependencies in the release binaries: [third-party-licenses.md](third-party-licenses.md).
